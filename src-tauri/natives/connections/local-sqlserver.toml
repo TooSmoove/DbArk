@@ -1,0 +1,12 @@
+[connection]
+name = "Local SQL Server"
+engine = "sqlserver"
+host = "localhost"
+port = 1433
+database = "master"
+username = "sa"
+credential_ref = "devsql:local-sqlserver:sa"
+
+[display]
+color = "#6c63ff"
+group = "Local"

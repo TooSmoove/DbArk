@@ -26,9 +26,32 @@ fn test_connection(connection_string: String) -> bool {
     }
 }
 
+#[tauri::command]
+fn load_connection(path: String) -> String {
+    unsafe {
+        let lib = Library::new("natives/QueryExecutor.dll")
+            .expect("Failed to load QueryExecutor.dll");
+
+        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = lib
+            .get(b"load_connection")
+            .expect("Failed to find load_connection export");
+
+        let c_path = CString::new(path).expect("CString failed");
+        let result_ptr = func(c_path.as_ptr());
+
+        if result_ptr.is_null() {
+            return "ERROR: null response".to_string();
+        }
+
+        std::ffi::CStr::from_ptr(result_ptr)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![test_connection])
+        .invoke_handler(tauri::generate_handler![test_connection, load_connection])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

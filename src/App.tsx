@@ -15,12 +15,32 @@ function App() {
         }
     }
 
+    async function testToml() {
+        if (!window.__TAURI__) {
+            setResult("⚠️ Open the desktop app to test");
+            return;
+        }
+        try {
+            const result = await invoke<string>("load_connection", {
+                path: "natives/connections/local-sqlserver.toml"
+            });
+            setResult(result);
+        } catch (e) {
+            setResult("❌ Error: " + String(e));
+        }
+    }
+
     return (
         <div style={{ padding: 40, fontFamily: "monospace" }}>
-            <h2>DbArk — IPC Test</h2>
-            <button onClick={runTest} style={{ padding: "8px 16px", marginBottom: 16 }}>
-                Test C# connection
-            </button>
+            <h2>DevSQL — IPC Test</h2>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                <button onClick={runTest} style={{ padding: "8px 16px", marginBottom: 16 }}>
+                    Test C# connection
+                </button>
+                <button onClick={testToml} style={{ padding: "8px 16px" }}>
+                    Test TOML parser
+                </button>
+            </div>
             <div>{result}</div>
         </div>
     );
