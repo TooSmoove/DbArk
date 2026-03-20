@@ -22,3 +22,22 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust
+target/
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+
+# .NET
+src-csharp/**/bin/
+src-csharp/**/obj/
+
+# Tauri
+src-tauri/target/
+
+# OS
+.DS_Store
+Thumbs.db
