@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Build C# NativeAOT library
+        run: |
+          cd src-csharp/QueryExecutor
+          dotnet publish -c Release
+
+      - name: Copy native DLL
+        run: |
+          copy src-csharp\QueryExecutor\bin\Release\net10.0\win-x64\publish\QueryExecutor.dll src-tauri\natives\QueryExecutor.dll
+
+      - name: Build Tauri app
+        run: cargo tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: placeholder
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: placeholder
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend deps
+        run: npm install
+
+      - name: Build C# NativeAOT library
+        run: |
+          cd src-csharp/QueryExecutor
+          dotnet publish -c Release -r osx-arm64
+
+      - name: Copy native dylib
+        run: |
+          cp src-csharp/QueryExecutor/bin/Release/net10.0/osx-arm64/publish/libQueryExecutor.dylib src-tauri/natives/
+
+      - name: Build Tauri app
+        run: cargo tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: placeholder
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: placeholder
