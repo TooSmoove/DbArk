@@ -1,0 +1,12 @@
+[connection]
+name = "Remote MySQL"
+engine = "mysql"
+host = "52.54.120.55"
+port = 3306
+database = "dashop"
+username = "smooveDr"
+credential_ref = "devsql:remote-mysql:smooveDr"
+
+[display]
+color = "#f59e0b"
+group = "Remote"

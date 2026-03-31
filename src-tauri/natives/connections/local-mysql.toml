@@ -1,0 +1,12 @@
+[connection]
+name = "Local MySQL"
+engine = "mysql"
+host = "localhost"
+port = 3306
+database = "testdb"
+username = "root"
+credential_ref = "dbark:local-mysql:root"
+
+[display]
+color = "#f59e0b"
+group = "Local"

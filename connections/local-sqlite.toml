@@ -1,0 +1,12 @@
+[connection]
+name = "Local SQLite"
+engine = "sqlite"
+host = "localhost"
+port = 0
+database = "C:/Users/keith/test.db"
+username = "none"
+credential_ref = "dbark:local-sqlite:none"
+
+[display]
+color = "#10b981"
+group = "Local"
