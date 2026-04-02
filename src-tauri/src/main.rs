@@ -196,32 +196,40 @@ fn build_connection_string(
     port: u16,
     database: String,
     username: String,
-) -> String {
-    let entry = match keyring::Entry::new(&credential_ref, &username) {
-        Ok(e) => e,
-        Err(_) => return String::new(),
-    };
+    ssl_mode: Option<String>,
+) -> Result<String, String> {
+    let entry = keyring::Entry::new(&credential_ref, &username)
+        .map_err(|e| e.to_string())?;
     let password = entry.get_password().unwrap_or_default();
 
+    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+
     let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" =>
-            format!("Server={};Port={};Database={};Uid={};Pwd={};",
-                host, port, database, username, password),
-        "sqlserver" =>
-            format!("Server={},{};Database={};User Id={};Password={};",
-                host, port, database, username, password),
-        "postgres" =>{
-            format!("Host={};Port={};Database={};Username={};Password={};",
-                host, port, database, username, password)
+        "mysql" => {
+            let ssl_param = match ssl.as_str() {
+                "none"        => "SslMode=None;",
+                "require"     => "SslMode=Required;",
+                "verify-full" => "SslMode=VerifyFull;",
+                _             => "SslMode=Preferred;", // prefer is default
+            };
+            format!("Server={};Port={};Database={};Uid={};Pwd={};{}",
+                host, port, database, username, password, ssl_param)
         },
-       "sqlite" => format!("Data Source={}", database),
-        _ => String::new(),
+        "postgres" => {
+            let ssl_param = match ssl.as_str() {
+                "none"        => "SSL Mode=Disable;",
+                "require"     => "SSL Mode=Require;",
+                "verify-full" => "SSL Mode=VerifyFull;",
+                _             => "SSL Mode=Prefer;",
+            };
+            format!("Host={};Port={};Database={};Username={};Password={};{}",
+                host, port, database, username, password, ssl_param)
+        },
+        "sqlite" => format!("Data Source={}", database),
+        _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
-    // Zero out the password from the local variable
-    // The connection string itself still contains it but
-    // it will be consumed immediately by execute_query
-    conn_str
+    Ok(conn_str)
 }
 
 #[tauri::command]
@@ -382,6 +390,46 @@ fn query_file_with_db(
     }
 }
 
+#[tauri::command]
+fn get_schema(
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+) -> Result<String, String> {
+    let entry = keyring::Entry::new(&credential_ref, &username)
+        .map_err(|e| e.to_string())?;
+    let password = entry.get_password().unwrap_or_default();
+
+    let connection_string = match engine.to_lowercase().as_str() {
+        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};",
+                        host, port, database, username, password),
+        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};",
+                        host, port, database, username, password),
+        "sqlite"   => format!("Data Source={}", database),
+        _          => return Err(format!("Unsupported engine: {}", engine)),
+    };
+
+    unsafe {
+        let lib = Library::new("natives/SchemaExplorer.dll")
+            .map_err(|e| e.to_string())?;
+
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char
+        ) -> *const c_char> = lib.get(b"get_schema")
+            .map_err(|e| e.to_string())?;
+
+        let cs  = CString::new(connection_string).unwrap();
+        let eng = CString::new(engine).unwrap();
+
+        let ptr = func(cs.as_ptr(), eng.as_ptr());
+        if ptr.is_null() { return Err("null response".to_string()); }
+        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
@@ -401,7 +449,8 @@ fn main() {
             query_file,
             get_file_schema,
             list_db_tables,
-            query_file_with_db])
+            query_file_with_db,
+            get_schema])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

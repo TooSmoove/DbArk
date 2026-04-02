@@ -9,6 +9,8 @@ import {
   createColumnHelper,
 } from "@tanstack/react-table";
 
+import { useVirtualizer } from "@tanstack/react-virtual";
+
 // ---- Types ------------------------------------------------
 interface ConnectionConfig {
   id: string;
@@ -22,6 +24,7 @@ interface ConnectionConfig {
   color: string;
   group: string;
   filePath: string;
+  sslMode: string;
 }
 
 interface ConnectionListResult {
@@ -33,6 +36,7 @@ interface QueryResult {
   columns: string[];
   rows: (string | null)[][];
   rowCount: number;
+  truncated?: boolean;
   error?: string;
 }
 
@@ -41,6 +45,24 @@ interface FileSession {
   name: string;
   path: string;
   type: "csv" | "json" | "xlsx";
+}
+
+interface ColumnInfo {
+  name: string;
+  dataType: string;
+  isNullable: boolean;
+  isPrimaryKey: boolean;
+}
+
+interface TableInfo {
+  name: string;
+  schema: string;
+  columns: ColumnInfo[];
+}
+
+interface SchemaResult {
+  tables: TableInfo[];
+  error?: string;
 }
 
 // ---- Engine badge -----------------------------------------
@@ -95,6 +117,7 @@ function JoinTablesPanel({
       port: activeConnection.port,
       database: activeConnection.database,
       username: activeConnection.username,
+      sslMode: activeConnection.sslMode ?? "prefer",
     })
       .then((result) => {
         const parsed = JSON.parse(result);
@@ -213,6 +236,7 @@ function AddConnectionForm({
   const [form, setForm] = useState({
     name: "", engine: "mysql", host: "", port: "", database: "",
     username: "", password: "", color: "#6c63ff", group: "",
+    sslMode: "prefer",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -243,6 +267,7 @@ function AddConnectionForm({
         port: parseInt(form.port) || defaultPort[form.engine] || 3306,
         database: form.database, username: form.username,
         color: form.color, group: form.group, folderPath: connectionsFolder,
+        sslMode: form.sslMode,
       };
       const result = await invoke<string>("save_connection", {
         requestJson: JSON.stringify(request),
@@ -302,6 +327,20 @@ function AddConnectionForm({
       </label>
 
       <label style={labelStyle}>
+        SSL Mode
+        <select
+          style={fieldStyle}
+          value={form.sslMode}
+          onChange={e => setForm(f => ({ ...f, sslMode: e.target.value }))}
+        >
+          <option value="prefer">Prefer (default)</option>
+          <option value="none">None — no encryption</option>
+          <option value="require">Require — encrypt, don't verify cert</option>
+          <option value="verify-full">Verify Full — encrypt + verify cert</option>
+        </select>
+      </label>
+
+      <label style={labelStyle}>
         Colour
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
           <input type="color" value={form.color}
@@ -336,11 +375,13 @@ function AddConnectionForm({
 
 // ---- Results grid -----------------------------------------
 function ResultsGrid({ result }: { result: QueryResult }) {
+  const parentRef = useRef<HTMLDivElement>(null);
   const columnHelper = createColumnHelper<(string | null)[]>();
 
   const columns = result.columns.map((col, i) =>
     columnHelper.accessor((row) => row[i], {
-      id: col, header: col,
+      id: col,
+      header: col,
       cell: (info) => {
         const val = info.getValue();
         if (val === null)
@@ -350,19 +391,42 @@ function ResultsGrid({ result }: { result: QueryResult }) {
     })
   );
 
-  const table = useReactTable({ data: result.rows, columns, getCoreRowModel: getCoreRowModel() });
+  const table = useReactTable({
+    data: result.rows,
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  });
+
+  const { rows } = table.getRowModel();
+
+  const rowVirtualiser = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 32,
+    overscan: 20,
+  });
+
+  const virtualRows = rowVirtualiser.getVirtualItems();
+  const totalHeight = rowVirtualiser.getTotalSize();
+  const paddingTop    = virtualRows.length > 0 ? virtualRows[0].start : 0;
+  const paddingBottom = virtualRows.length > 0
+    ? totalHeight - virtualRows[virtualRows.length - 1].end
+    : 0;
 
   return (
-    <div style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
-      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, fontFamily: "monospace", tableLayout: "auto" }}>
+    <div ref={parentRef} style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
+      <table style={{
+        borderCollapse: "collapse", width: "100%",
+        fontSize: 13, fontFamily: "monospace", tableLayout: "auto",
+      }}>
         <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
           {table.getHeaderGroups().map((hg) => (
             <tr key={hg.id}>
               {hg.headers.map((header) => (
                 <th key={header.id} style={{
-                  padding: "7px 14px", textAlign: "left", background: "#1e2026",
-                  borderBottom: "1px solid #2d2f36", color: "#9ca3af",
-                  fontWeight: 500, whiteSpace: "nowrap",
+                  padding: "7px 14px", textAlign: "left",
+                  background: "#1e2026", borderBottom: "1px solid #2d2f36",
+                  color: "#9ca3af", fontWeight: 500, whiteSpace: "nowrap",
                 }}>
                   {flexRender(header.column.columnDef.header, header.getContext())}
                 </th>
@@ -371,19 +435,30 @@ function ResultsGrid({ result }: { result: QueryResult }) {
           ))}
         </thead>
         <tbody>
-          {table.getRowModel().rows.map((row, i) => (
-            <tr key={row.id} style={{ background: i % 2 === 0 ? "#0e0f11" : "#13141a" }}>
-              {row.getVisibleCells().map((cell) => (
-                <td key={cell.id} style={{
-                  padding: "5px 14px", borderBottom: "1px solid #1e2026",
-                  color: "#e8e9ec", whiteSpace: "nowrap", maxWidth: 320,
-                  overflow: "hidden", textOverflow: "ellipsis",
-                }}>
-                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                </td>
-              ))}
-            </tr>
-          ))}
+          {paddingTop > 0 && (
+            <tr><td style={{ height: paddingTop }} colSpan={columns.length} /></tr>
+          )}
+          {virtualRows.map((virtualRow) => {
+            const row = rows[virtualRow.index];
+            return (
+              <tr key={row.id} style={{
+                background: virtualRow.index % 2 === 0 ? "#0e0f11" : "#13141a",
+              }}>
+                {row.getVisibleCells().map((cell) => (
+                  <td key={cell.id} style={{
+                    padding: "5px 14px", borderBottom: "1px solid #1e2026",
+                    color: "#e8e9ec", whiteSpace: "nowrap",
+                    maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis",
+                  }}>
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
+          {paddingBottom > 0 && (
+            <tr><td style={{ height: paddingBottom }} colSpan={columns.length} /></tr>
+          )}
         </tbody>
       </table>
     </div>
@@ -453,6 +528,10 @@ function App() {
   const { size: editorHeight, onMouseDown: onEditorDragStart } = useResizable(220, 80, 600);
 
   const CONNECTIONS_FOLDER = "C:/Users/keith/source/repos/DevSql/connections";
+  const [schema, setSchema] = useState<SchemaResult | null>(null);
+  const [schemaLoading, setSchemaLoading] = useState(false);
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
+  const schemaRef = useRef<SchemaResult | null>(null);
 
   // Keep refs in sync
   useEffect(() => { activeConnectionRef.current = activeConnection; }, [activeConnection]);
@@ -490,6 +569,7 @@ function App() {
   }, []);
 
   useEffect(() => { loadConnections(); }, []);
+  useEffect(() => { schemaRef.current = schema; }, [schema]);
 
   async function loadConnections() {
     try {
@@ -554,6 +634,7 @@ function App() {
             database: conn.database,
             username: conn.username,
             tableNames: joinTables.join(","),
+            sslMode: conn.sslMode ?? "prefer",
           });
         } else {
           // Pure file query
@@ -572,6 +653,7 @@ function App() {
           port: conn.port,
           database: conn.database,
           username: conn.username,
+          sslMode: conn.sslMode ?? "prefer",
         });
         raw = await invoke<string>("execute_query", {
           connectionString,
@@ -606,9 +688,96 @@ function App() {
   }, [joinTables]);
 
   const handleEditorMount: OnMount = (editor, monaco) => {
-    editorRef.current = editor;
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runQuery());
+      editorRef.current = editor;
+
+      // Cmd+Enter to run
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runQuery());
+
+      // Register SQL autocomplete provider
+      monaco.languages.registerCompletionItemProvider("sql", {
+        triggerCharacters: [" ", ".", "\n"],
+        provideCompletionItems: (model, position) => {
+          const word = model.getWordUntilPosition(position);
+          const range = {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: word.startColumn,
+            endColumn: word.endColumn,
+          };
+
+          const suggestions: monaco.languages.CompletionItem[] = [];
+
+          // SQL keywords
+          const keywords = [
+            "SELECT", "FROM", "WHERE", "JOIN", "LEFT JOIN", "RIGHT JOIN",
+            "INNER JOIN", "ON", "GROUP BY", "ORDER BY", "HAVING", "LIMIT",
+            "OFFSET", "INSERT INTO", "UPDATE", "DELETE FROM", "CREATE TABLE",
+            "DROP TABLE", "ALTER TABLE", "AND", "OR", "NOT", "IN", "IS NULL",
+            "IS NOT NULL", "LIKE", "BETWEEN", "DISTINCT", "COUNT", "SUM",
+            "AVG", "MIN", "MAX", "AS", "CASE", "WHEN", "THEN", "ELSE", "END",
+          ];
+
+          keywords.forEach(kw => {
+            suggestions.push({
+              label: kw,
+              kind: monaco.languages.CompletionItemKind.Keyword,
+              insertText: kw,
+              range,
+            });
+          });
+
+          // Tables and columns from schema
+          if (schemaRef.current?.tables) {
+            schemaRef.current.tables.forEach(table => {
+              // Table name suggestion
+              suggestions.push({
+                label: table.name,
+                kind: monaco.languages.CompletionItemKind.Class,
+                insertText: table.name,
+                detail: `table · ${table.columns.length} columns`,
+                documentation: table.columns.map(c => `${c.name} (${c.dataType})`).join("\n"),
+                range,
+              });
+
+              // Column name suggestions
+              table.columns.forEach(col => {
+                suggestions.push({
+                  label: col.name,
+                  kind: monaco.languages.CompletionItemKind.Field,
+                  insertText: col.name,
+                  detail: `${col.dataType}${col.isPrimaryKey ? " · PK" : ""}${col.isNullable ? "" : " · NOT NULL"}`,
+                  documentation: `${table.name}.${col.name}`,
+                  range,
+                });
+              });
+            });
+          }
+
+          return { suggestions };
+        },
+      });
   };
+
+async function loadSchema(conn: ConnectionConfig) {
+  setSchema(null);
+  setSchemaLoading(true);
+  try {
+    const raw = await invoke<string>("get_schema", {
+      credentialRef: conn.credentialRef,
+      engine: conn.engine,
+      host: conn.host,
+      port: conn.port,
+      database: conn.database,
+      username: conn.username,
+    });
+    const parsed: SchemaResult = JSON.parse(raw);
+    setSchema(parsed);
+  } catch (e) {
+    console.error("Schema load failed:", e);
+  } finally {
+    setSchemaLoading(false);
+  }
+}
 
   return (
     <div style={{
@@ -658,26 +827,156 @@ function App() {
               </div>
             ) : (
               connections.map((conn) => (
-                <div
-                  key={conn.id}
-                  onClick={() => { setActiveConnection(conn); setActiveFile(null); setJoinTables([]); }}
-                  style={{
-                    padding: "9px 14px", cursor: "pointer",
-                    borderBottom: "1px solid #1e2026",
-                    borderLeft: `3px solid ${activeConnection?.id === conn.id ? conn.color : "transparent"}`,
-                    background: activeConnection?.id === conn.id ? "#1e2026" : "transparent",
-                    transition: "background .1s",
-                  }}
-                >
-                  <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 3, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {conn.name}
+                <div key={conn.id}>
+                  {/* Connection row */}
+                  <div
+                    onClick={() => {
+                      setActiveConnection(conn);
+                      setActiveFile(null);
+                      setJoinTables([]);
+                      setSchema(null);
+                      setExpandedTables(new Set());
+                      loadSchema(conn);
+                    }}
+                    style={{
+                      padding: "9px 14px",
+                      cursor: "pointer",
+                      borderBottom: "1px solid #1e2026",
+                      borderLeft: `3px solid ${
+                        activeConnection?.id === conn.id ? conn.color : "transparent"
+                      }`,
+                      background: activeConnection?.id === conn.id ? "#1e2026" : "transparent",
+                      transition: "background .1s",
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 3, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {conn.name}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                      <EngineBadge engine={conn.engine} />
+                      <span style={{ fontSize: 10, color: "#4b5563", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                        {conn.host}
+                      </span>
+                    </div>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                    <EngineBadge engine={conn.engine} />
-                    <span style={{ fontSize: 10, color: "#4b5563", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                      {conn.host}
-                    </span>
-                  </div>
+
+                  {/* Schema tree — only shown for the active connection */}
+                  {activeConnection?.id === conn.id && (
+                    <div style={{ background: "#0e0f11", borderBottom: "1px solid #1e2026" }}>
+                      {schemaLoading && (
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "#4b5563", fontFamily: "monospace" }}>
+                          Loading schema…
+                        </div>
+                      )}
+
+                      {schema?.error && (
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "#ef4444", fontFamily: "monospace" }}>
+                          {schema.error}
+                        </div>
+                      )}
+
+                      {schema && !schema.error && (
+                        <>
+                          {/* Refresh button */}
+                          <div style={{ padding: "5px 14px 3px", display: "flex", justifyContent: "flex-end" }}>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); loadSchema(conn); }}
+                              style={{ background: "none", border: "none", color: "#4b5563", cursor: "pointer", fontSize: 10, fontFamily: "monospace", padding: "2px 4px" }}
+                              title="Refresh schema"
+                            >
+                              ↻ refresh
+                            </button>
+                          </div>
+
+                          {/* Table list */}
+                          {schema.tables.map((table) => (
+                            <div key={table.name}>
+                              {/* Table row */}
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 6,
+                                  padding: "5px 14px",
+                                  cursor: "pointer",
+                                  borderTop: "1px solid #1a1b21",
+                                }}
+                                onClick={() => {
+                                  // Toggle expand/collapse
+                                  const next = new Set(expandedTables);
+                                  next.has(table.name) ? next.delete(table.name) : next.add(table.name);
+                                  setExpandedTables(next);
+                                }}
+                                onDoubleClick={() => {
+                                  // Insert SELECT query into editor
+                                  const q = `SELECT * FROM ${table.name} LIMIT 100`;
+                                  editorRef.current?.setValue(q);
+                                  editorRef.current?.focus();
+                                }}
+                                title="Click to expand · Double-click to query"
+                              >
+                                <span style={{ fontSize: 9, color: "#4b5563", flexShrink: 0, width: 10 }}>
+                                  {expandedTables.has(table.name) ? "▾" : "▸"}
+                                </span>
+                                <span style={{
+                                  fontSize: 11,
+                                  color: "#9ca3af",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                  fontFamily: "monospace",
+                                  flex: 1,
+                                }}>
+                                  {table.name}
+                                </span>
+                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
+                                  {table.columns.length}
+                                </span>
+                              </div>
+
+                              {/* Column list — shown when table is expanded */}
+                              {expandedTables.has(table.name) && table.columns.map((col) => (
+                                <div
+                                  key={col.name}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    padding: "3px 14px 3px 26px",
+                                    borderTop: "1px solid #111318",
+                                  }}
+                                >
+                                  {/* PK indicator */}
+                                  {col.isPrimaryKey && (
+                                    <span style={{ fontSize: 8, color: "#f59e0b", flexShrink: 0 }} title="Primary key">🔑</span>
+                                  )}
+                                  <span style={{
+                                    fontSize: 11,
+                                    color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
+                                    fontFamily: "monospace",
+                                    flex: 1,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}>
+                                    {col.name}
+                                  </span>
+                                  <span style={{
+                                    fontSize: 9,
+                                    color: "#374151",
+                                    fontFamily: "monospace",
+                                    flexShrink: 0,
+                                  }}>
+                                    {col.dataType}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -796,10 +1095,14 @@ function App() {
           >
             {loading ? "Running..." : "▶ Run (Cmd+Enter)"}
           </button>
-
           {duration !== null && !loading && (
             <span style={{ color: "#6b7280", fontSize: 11, whiteSpace: "nowrap" }}>
               {result ? `${result.rowCount} rows · ` : ""}{duration}ms
+              {result?.truncated && (
+                <span style={{ color: "#f59e0b", marginLeft: 8 }}>
+                  ⚠ first 10,000 rows shown
+                </span>
+              )}
             </span>
           )}
         </div>

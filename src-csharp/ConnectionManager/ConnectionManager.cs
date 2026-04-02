@@ -19,6 +19,7 @@ public class ConnectionConfig
     public string Color { get; set; } = "#6c63ff";
     public string Group { get; set; } = "";
     public string FilePath { get; set; } = "";
+    public string SslMode { get; set; } = "prefer";
 }
 
 public class ConnectionListResult
@@ -38,6 +39,7 @@ public class SaveConnectionRequest
     public string Color { get; set; } = "#6c63ff";
     public string Group { get; set; } = "";
     public string FolderPath { get; set; } = "";
+    public string SslMode { get; set; } = "prefer";
 }
 
 public static class ConnectionManagerLib
@@ -99,6 +101,39 @@ public static class ConnectionManagerLib
                 ? GetDefaultConnectionsFolder()
                 : request.FolderPath;
 
+            // Validate before writing
+            if (!IsValidHost(request.Host))
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid host '{request.Host}' — only alphanumeric characters, dots, hyphens allowed");
+
+            if (!IsValidPort(request.Port > 0 ? request.Port : GetDefaultPort(request.Engine)))
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid port '{request.Port}'");
+
+            if (!IsValidIdentifier(request.Database))
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
+
+            if (!IsValidIdentifier(request.Username))
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid username '{request.Username}' — only alphanumeric characters, underscores, hyphens, dots allowed");
+
+            if (!IsValidEngine(request.Engine))
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid engine '{request.Engine}'");
+
+            if (!IsValidSslMode(request.SslMode))
+                request.SslMode = "prefer";
+
+            // SQLite database is a file path — different validation rules
+            if (request.Engine == "sqlite")
+            {
+                if (string.IsNullOrWhiteSpace(request.Database))
+                    return Marshal.StringToCoTaskMemUTF8("ERROR: SQLite database path cannot be empty");
+                // Just check for injection characters — allow paths
+                if (request.Database.Contains(';') || request.Database.Contains('='))
+                    return Marshal.StringToCoTaskMemUTF8("ERROR: Invalid characters in SQLite path");
+            }
+            else if (!IsValidIdentifier(request.Database))
+            {
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid database name '{request.Database}'");
+            }
+
             if (!Directory.Exists(folderPath))
                 Directory.CreateDirectory(folderPath);
 
@@ -113,19 +148,20 @@ public static class ConnectionManagerLib
             int port = request.Port > 0 ? request.Port : GetDefaultPort(request.Engine);
 
             string toml = $"""
-                [connection]
-                name = "{request.Name}"
-                engine = "{request.Engine}"
-                host = "{request.Host}"
-                port = {port}
-                database = "{request.Database}"
-                username = "{request.Username}"
-                credential_ref = "{credentialRef}"
+                    [connection]
+                    name = "{request.Name}"
+                    engine = "{request.Engine}"
+                    host = "{request.Host}"
+                    port = {port}
+                    database = "{request.Database}"
+                    username = "{request.Username}"
+                    credential_ref = "{credentialRef}"
+                    ssl_mode = "{request.SslMode}"
 
-                [display]
-                color = "{request.Color}"
-                group = "{request.Group}"
-                """;
+                    [display]
+                    color = "{request.Color}"
+                    group = "{request.Group}"
+                    """;
 
             File.WriteAllText(filePath, toml);
 
@@ -200,10 +236,9 @@ public static class ConnectionManagerLib
         string toml = File.ReadAllText(filePath);
         var values = ParseToml(toml);
 
-        // Generate a stable ID from the filename
         string id = Path.GetFileNameWithoutExtension(filePath);
 
-        return new ConnectionConfig
+        var config = new ConnectionConfig
         {
             Id = id,
             Name = values.GetValueOrDefault("connection.name", id),
@@ -215,9 +250,56 @@ public static class ConnectionManagerLib
             CredentialRef = values.GetValueOrDefault("connection.credential_ref", ""),
             Color = values.GetValueOrDefault("display.color", "#6c63ff"),
             Group = values.GetValueOrDefault("display.group", ""),
-            FilePath = filePath
+            FilePath = filePath,
+            SslMode = values.GetValueOrDefault("connection.ssl_mode", "prefer"),
         };
+
+        // Validate all fields before returning
+        if (!IsValidHost(config.Host))
+            throw new Exception($"Invalid host value in {Path.GetFileName(filePath)}: '{config.Host}'");
+
+        if (!IsValidPort(config.Port))
+            throw new Exception($"Invalid port value in {Path.GetFileName(filePath)}: '{config.Port}'");
+
+        if (config.Engine != "sqlite" && !IsValidIdentifier(config.Database))
+            throw new Exception($"Invalid database value in {Path.GetFileName(filePath)}: '{config.Database}'");
+
+        if (!IsValidIdentifier(config.Username))
+            throw new Exception($"Invalid username value in {Path.GetFileName(filePath)}: '{config.Username}'");
+
+        if (!IsValidEngine(config.Engine))
+            throw new Exception($"Invalid engine value in {Path.GetFileName(filePath)}: '{config.Engine}'");
+
+        if (!IsValidSslMode(config.SslMode))
+            config.SslMode = "prefer";
+
+        return config;
     }
+    private static bool IsValidHost(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) return false;
+        // Allow hostnames, IP addresses, and localhost
+        // Reject semicolons, equals signs, and other connection string injection characters
+        return System.Text.RegularExpressions.Regex.IsMatch(
+            host, @"^[a-zA-Z0-9._\-]{1,253}$");
+    }
+
+    private static bool IsValidPort(int port) => port >= 0 && port <= 65535;
+
+    private static bool IsValidIdentifier(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        // Allow alphanumeric, underscores, hyphens, and dots
+        // Reject semicolons, equals, quotes — anything that could break a connection string
+        return System.Text.RegularExpressions.Regex.IsMatch(
+            value, @"^[a-zA-Z0-9_\-\.]{1,128}$");
+    }
+
+    private static bool IsValidEngine(string engine) =>
+        engine is "mysql" or "postgres" or "sqlite" or "sqlserver";
+
+    private static bool IsValidSslMode(string sslMode) =>
+    sslMode is "none" or "prefer" or "require" or "verify-full";
 
     private static Dictionary<string, string> ParseToml(string toml)
     {

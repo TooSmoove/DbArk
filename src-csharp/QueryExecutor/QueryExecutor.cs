@@ -163,16 +163,20 @@ public static class QueryExecutor
             columns.Add(reader.GetName(i));
 
         var rows = new List<List<string?>>();
-        int rowLimit = 1000;
+        int rowLimit = 10_000;
         int rowCount = 0;
+        bool truncated = false;
 
-        while (reader.Read() && rowCount < rowLimit)
+        while (reader.Read())
         {
+            if (rowCount >= rowLimit)
+            {
+                truncated = true;
+                break;
+            }
             var row = new List<string?>();
             for (int i = 0; i < reader.FieldCount; i++)
-                row.Add(reader.IsDBNull(i)
-                    ? null
-                    : reader.GetValue(i)?.ToString());
+                row.Add(reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString());
             rows.Add(row);
             rowCount++;
         }
@@ -181,12 +185,12 @@ public static class QueryExecutor
         {
             Columns = columns,
             Rows = rows,
-            RowCount = rowCount
+            RowCount = rowCount,
+            Truncated = truncated
         };
 
-        string json = JsonSerializer.Serialize(
-            result, AppJsonContext.Default.QueryResult);
-        return Marshal.StringToCoTaskMemUTF8(json);
+        return Marshal.StringToCoTaskMemUTF8(
+            JsonSerializer.Serialize(result, AppJsonContext.Default.QueryResult));
     }
 
     // ---- SQLite via direct P/Invoke to winsqlite3.dll ----------------
@@ -293,7 +297,7 @@ public static class QueryExecutor
             var columns = new List<string>();
             var rows = new List<List<string?>>();
             int rowCount = 0;
-            int rowLimit = 1000;
+            int rowLimit = 10000;
 
             sqlite3_prepare_v2(db, sql, -1, out IntPtr stmt, IntPtr.Zero);
 
@@ -373,6 +377,7 @@ public class QueryResult
     public List<string> Columns { get; set; } = new();
     public List<List<string?>> Rows { get; set; } = new();
     public int RowCount { get; set; }
+    public bool Truncated { get; set; }
 }
 
 public class ErrorResult
