@@ -1,154 +1,103 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use libloading::{Library, Symbol};
+use libloading::{Symbol};
 use std::ffi::{c_char, CStr, CString};
+use std::sync::OnceLock;
 
-#[tauri::command]
-fn test_connection(connection_string: String) -> bool {
-    unsafe {
-        // Load the C# native library
-        let lib = Library::new("natives/QueryExecutor.dll")
-            .expect("Failed to load QueryExecutor.dll");
+static QUERY_EXECUTOR:     OnceLock<libloading::Library> = OnceLock::new();
+static CONNECTION_MANAGER: OnceLock<libloading::Library> = OnceLock::new();
+static FILE_QUERY_ENGINE:  OnceLock<libloading::Library> = OnceLock::new();
+static SCHEMA_EXPLORER:    OnceLock<libloading::Library> = OnceLock::new();
+static QUERY_HISTORY:      OnceLock<libloading::Library> = OnceLock::new();
 
-        // Get the exported function
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> i32> = lib
-            .get(b"test_connection")
-            .expect("Failed to find test_connection export");
-
-        // Convert the Rust String to a C string
-        let c_string = CString::new(connection_string)
-            .expect("CString conversion failed");
-
-        // Call the C# function
-        let result = func(c_string.as_ptr());
-        result == 1
-    }
+fn get_query_executor() -> &'static libloading::Library {
+    QUERY_EXECUTOR.get_or_init(|| unsafe {
+        libloading::Library::new("natives/QueryExecutor.dll")
+            .expect("Failed to load QueryExecutor.dll")
+    })
 }
 
-#[tauri::command]
-fn load_connection(path: String) -> String {
-    unsafe {
-        let lib = Library::new("natives/QueryExecutor.dll")
-            .expect("Failed to load QueryExecutor.dll");
+fn get_connection_manager() -> &'static libloading::Library {
+    CONNECTION_MANAGER.get_or_init(|| unsafe {
+        libloading::Library::new("natives/ConnectionManager.dll")
+            .expect("Failed to load ConnectionManager.dll")
+    })
+}
 
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = lib
-            .get(b"load_connection")
-            .expect("Failed to find load_connection export");
+fn get_file_query_engine() -> &'static libloading::Library {
+    FILE_QUERY_ENGINE.get_or_init(|| unsafe {
+        libloading::Library::new("natives/FileQueryEngine.dll")
+            .expect("Failed to load FileQueryEngine.dll")
+    })
+}
 
-        let c_path = CString::new(path).expect("CString failed");
-        let result_ptr = func(c_path.as_ptr());
+fn get_schema_explorer() -> &'static libloading::Library {
+    SCHEMA_EXPLORER.get_or_init(|| unsafe {
+        libloading::Library::new("natives/SchemaExplorer.dll")
+            .expect("Failed to load SchemaExplorer.dll")
+    })
+}
 
-        if result_ptr.is_null() {
-            return "ERROR: null response".to_string();
-        }
-
-        std::ffi::CStr::from_ptr(result_ptr)
-            .to_string_lossy()
-            .into_owned()
-    }
+fn get_query_history() -> &'static libloading::Library {
+    QUERY_HISTORY.get_or_init(|| unsafe {
+        libloading::Library::new("natives/QueryHistory.dll")
+            .expect("Failed to load QueryHistory.dll")
+    })
 }
 
 #[tauri::command]
 fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>) -> String {
     let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
-
     let result = unsafe {
-        let lib = match Library::new("natives/QueryExecutor.dll") {
-            Ok(l) => l,
-            Err(e) => return format!("{{\"error\":\"Failed to load QueryExecutor: {}\"}}", e),
-        };
-
         let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char,
-            *const c_char, *const c_char,
-        ) -> *const c_char> = match lib.get(b"execute_query") {
-            Ok(f) => f,
-            Err(e) => return format!("{{\"error\":\"Failed to find execute_query: {}\"}}", e),
-        };
-
-        let c_conn    = CString::new(connection_string.as_str()).unwrap_or_default();
-        let c_sql     = CString::new(sql).unwrap_or_default();
-        let c_engine  = CString::new(engine).unwrap_or_default();
-        let c_ro      = CString::new(read_only_str).unwrap_or_default();
-
-        let result_ptr = func(
-            c_conn.as_ptr(), c_sql.as_ptr(),
-            c_engine.as_ptr(), c_ro.as_ptr());
-
-        if result_ptr.is_null() {
-            "{\"error\":\"null response\"}".to_string()
-        } else {
-            CStr::from_ptr(result_ptr).to_string_lossy().into_owned()
-        }
+            *const c_char, *const c_char, *const c_char, *const c_char,
+        ) -> *const c_char> = get_query_executor().get(b"execute_query").expect("execute_query");
+        let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
+        let c_sql    = CString::new(sql).unwrap_or_default();
+        let c_engine = CString::new(engine).unwrap_or_default();
+        let c_ro     = CString::new(read_only_str).unwrap_or_default();
+        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr());
+        if ptr.is_null() { "{\"error\":\"null response\"}".to_string() }
+        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     };
-
-    // Zero out connection string
     unsafe {
         let bytes = connection_string.as_bytes_mut();
         for b in bytes.iter_mut() { *b = 0; }
     }
-
     result
 }
 
 #[tauri::command]
 fn list_connections(folder_path: String) -> String {
     unsafe {
-        let lib = Library::new("natives/ConnectionManager.dll")
-            .expect("Failed to load ConnectionManager.dll");
-
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = lib
-            .get(b"list_connections")
-            .expect("Failed to find list_connections");
-
-        let c_path = CString::new(folder_path).expect("CString failed");
-        let result_ptr = func(c_path.as_ptr());
-
-        if result_ptr.is_null() {
-            return "{\"connections\":[]}".to_string();
-        }
-
-        std::ffi::CStr::from_ptr(result_ptr)
-            .to_string_lossy()
-            .into_owned()
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
+            get_connection_manager().get(b"list_connections").expect("list_connections");
+        let c_path = CString::new(folder_path).unwrap_or_default();
+        let ptr = func(c_path.as_ptr());
+        if ptr.is_null() { "{\"connections\":[]}".to_string() }
+        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     }
 }
 
 #[tauri::command]
 fn save_connection(request_json: String) -> String {
     unsafe {
-        let lib = Library::new("natives/ConnectionManager.dll")
-            .expect("Failed to load ConnectionManager.dll");
-
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = lib
-            .get(b"save_connection")
-            .expect("Failed to find save_connection");
-
-        let c_req = CString::new(request_json).expect("CString failed");
-        let result_ptr = func(c_req.as_ptr());
-
-        if result_ptr.is_null() {
-            return "ERROR: null response".to_string();
-        }
-
-        std::ffi::CStr::from_ptr(result_ptr)
-            .to_string_lossy()
-            .into_owned()
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
+            get_connection_manager().get(b"save_connection").expect("save_connection");
+        let c_req = CString::new(request_json).unwrap_or_default();
+        let ptr = func(c_req.as_ptr());
+        if ptr.is_null() { "ERROR: null response".to_string() }
+        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     }
 }
 
 #[tauri::command]
 fn delete_connection(file_path: String) -> bool {
     unsafe {
-        let lib = Library::new("natives/ConnectionManager.dll")
-            .expect("Failed to load ConnectionManager.dll");
-
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> i32> = lib
-            .get(b"delete_connection")
-            .expect("Failed to find delete_connection");
-
-        let c_path = CString::new(file_path).expect("CString failed");
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
+            get_connection_manager().get(b"delete_connection").expect("delete_connection");
+        let c_path = CString::new(file_path).unwrap_or_default();
         func(c_path.as_ptr()) == 1
     }
 }
@@ -156,8 +105,7 @@ fn delete_connection(file_path: String) -> bool {
 #[tauri::command]
 fn store_credential(target: String, username: String, password: String) -> bool {
     let entry = match keyring::Entry::new(&target, &username) {
-        Ok(e) => e,
-        Err(_) => return false,
+        Ok(e) => e, Err(_) => return false,
     };
     entry.set_password(&password).is_ok()
 }
@@ -169,32 +117,26 @@ fn delete_credential(target: String) -> bool {
         Ok(e) => e,
         Err(_) => return false,
     };
-     entry.delete_password().is_ok()
+    entry.delete_password().is_ok()
 }
 
 #[tauri::command]
 fn build_connection_string(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
+    credential_ref: String, engine: String, host: String,
+    port: u16, database: String, username: String,
     ssl_mode: Option<String>,
 ) -> Result<String, String> {
     let entry = keyring::Entry::new(&credential_ref, &username)
         .map_err(|e| e.to_string())?;
     let password = entry.get_password().unwrap_or_default();
-
     let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
-
     let conn_str = match engine.to_lowercase().as_str() {
         "mysql" => {
             let ssl_param = match ssl.as_str() {
                 "none"        => "SslMode=None;",
                 "require"     => "SslMode=Required;",
                 "verify-full" => "SslMode=VerifyFull;",
-                _             => "SslMode=Preferred;", // prefer is default
+                _             => "SslMode=Preferred;",
             };
             format!("Server={};Port={};Database={};Uid={};Pwd={};{}",
                 host, port, database, username, password, ssl_param)
@@ -212,260 +154,154 @@ fn build_connection_string(
         "sqlite" => format!("Data Source={}", database),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
-
     Ok(conn_str)
-}
-
-#[tauri::command]
-fn test_postgres_connection(connection_string: String) -> String {
-    unsafe {
-        let lib = match Library::new("natives/QueryExecutor.dll") {
-            Ok(l) => l,
-            Err(e) => return format!("ERROR: {}", e),
-        };
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = match lib
-            .get(b"test_postgres_connection") {
-            Ok(f) => f,
-            Err(e) => return format!("ERROR: {}", e),
-        };
-        let c_conn = CString::new(connection_string).unwrap_or_default();
-        let result_ptr = func(c_conn.as_ptr());
-        if result_ptr.is_null() { return "ERROR: null".to_string(); }
-        std::ffi::CStr::from_ptr(result_ptr).to_string_lossy().into_owned()
-    }
-}
-
-#[tauri::command]
-fn test_sqlite_connection(connection_string: String) -> String {
-    unsafe {
-        let lib = match Library::new("natives/QueryExecutor.dll") {
-            Ok(l) => l,
-            Err(e) => return format!("ERROR: {}", e),
-        };
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = match lib
-            .get(b"test_sqlite_connection") {
-            Ok(f) => f,
-            Err(e) => return format!("ERROR: {}", e),
-        };
-        let c_conn = CString::new(connection_string).unwrap_or_default();
-        let result_ptr = func(c_conn.as_ptr());
-        if result_ptr.is_null() { return "ERROR: null".to_string(); }
-        std::ffi::CStr::from_ptr(result_ptr).to_string_lossy().into_owned()
-    }
 }
 
 #[tauri::command]
 fn query_file(file_path: String, sql: String) -> String {
     unsafe {
-        let lib = match Library::new("natives/FileQueryEngine.dll") {
-            Ok(l) => l,
-            Err(e) => return format!("{{\"error\":\"FileQueryEngine load failed: {}\"}}", e),
-        };
-        let func: Symbol<unsafe extern "C" fn(
-            *const i8, *const i8) -> *const i8> = match lib
-            .get(b"query_file") {
-            Ok(f) => f,
-            Err(e) => return format!("{{\"error\":\"query_file not found: {}\"}}", e),
-        };
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_file_query_engine().get(b"query_file").expect("query_file");
         let c_path = CString::new(file_path).unwrap_or_default();
         let c_sql  = CString::new(sql).unwrap_or_default();
         let ptr = func(c_path.as_ptr(), c_sql.as_ptr());
-        if ptr.is_null() { return "{\"error\":\"null\"}".to_string(); }
-        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        if ptr.is_null() { "{\"error\":\"null\"}".to_string() }
+        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     }
 }
 
 #[tauri::command]
 fn get_file_schema(file_path: String) -> String {
     unsafe {
-        let lib = match Library::new("natives/FileQueryEngine.dll") {
-            Ok(l) => l,
-            Err(e) => return format!("{{\"error\":\"FileQueryEngine load failed: {}\"}}", e),
-        };
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = match lib
-            .get(b"get_file_schema") {
-            Ok(f) => f,
-            Err(e) => return format!("{{\"error\":\"get_file_schema not found: {}\"}}", e),
-        };
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
+            get_file_query_engine().get(b"get_file_schema").expect("get_file_schema");
         let c_path = CString::new(file_path).unwrap_or_default();
         let ptr = func(c_path.as_ptr());
-        if ptr.is_null() { return "{\"error\":\"null\"}".to_string(); }
-        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        if ptr.is_null() { "{\"error\":\"null\"}".to_string() }
+        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     }
 }
 
 #[tauri::command]
 fn list_db_tables(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
+    credential_ref: String, engine: String, host: String,
+    port: u16, database: String, username: String,
 ) -> Result<String, String> {
     let entry = keyring::Entry::new(&credential_ref, &username)
         .map_err(|e| e.to_string())?;
     let password = entry.get_password().unwrap_or_default();
-
     let mut connection_string = match engine.to_lowercase().as_str() {
         "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
         "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
         "sqlite"   => format!("Data Source={}", database),
         _          => return Err(format!("Unsupported engine: {}", engine)),
     };
-
     let result = unsafe {
-        let lib = Library::new("natives/FileQueryEngine.dll")
-            .map_err(|e| e.to_string())?;
-
         let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char
-        ) -> *const c_char> = lib.get(b"ListTables")
-            .map_err(|e| e.to_string())?;
-
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_file_query_engine().get(b"ListTables").expect("ListTables");
         let cs  = CString::new(connection_string.as_str()).unwrap();
         let eng = CString::new(engine).unwrap();
-
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
         Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     };
-
-    // Zero out connection string
     unsafe {
         let bytes = connection_string.as_bytes_mut();
         for b in bytes.iter_mut() { *b = 0; }
     }
-
     result
 }
 
 #[tauri::command]
 fn query_file_with_db(
-    file_path: String,
-    sql: String,
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    table_names: String,
-) -> Result<String, String> {
-    // Build connection string via keyring — password never touches JS
-    let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-    let password = entry.get_password().unwrap_or_default();
-
-    let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
-        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
-        "sqlite"   => format!("Data Source={}", database),
-        _          => return Err(format!("Unsupported engine: {}", engine)),
-    };
-
-    unsafe {
-        let lib = Library::new("natives/FileQueryEngine.dll").map_err(|e| e.to_string())?;
-
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char,
-            *const c_char, *const c_char,
-            *const c_char,
-        ) -> *const c_char> = lib.get(b"QueryFileWithDb").map_err(|e| e.to_string())?;
-
-        let fp  = CString::new(file_path).unwrap();
-        let s   = CString::new(sql).unwrap();
-        let cs  = CString::new(connection_string.clone()).unwrap();
-        let eng = CString::new(engine).unwrap();
-        let tbl = CString::new(table_names).unwrap();
-
-        let ptr = func(fp.as_ptr(), s.as_ptr(), cs.as_ptr(), eng.as_ptr(), tbl.as_ptr());
-        
-        // Zero out connection string bytes before dropping
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-
-        if ptr.is_null() { return Err("null response".to_string()); }
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
-    }
-}
-
-#[tauri::command]
-fn get_schema(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
+    file_path: String, sql: String, credential_ref: String,
+    engine: String, host: String, port: u16,
+    database: String, username: String, table_names: String,
 ) -> Result<String, String> {
     let entry = keyring::Entry::new(&credential_ref, &username)
         .map_err(|e| e.to_string())?;
     let password = entry.get_password().unwrap_or_default();
-
     let mut connection_string = match engine.to_lowercase().as_str() {
         "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
         "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
         "sqlite"   => format!("Data Source={}", database),
         _          => return Err(format!("Unsupported engine: {}", engine)),
     };
-
-    unsafe {
-        let lib = Library::new("natives/SchemaExplorer.dll")
-            .map_err(|e| e.to_string())?;
-
+    let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char
-        ) -> *const c_char> = lib.get(b"get_schema")
-            .map_err(|e| e.to_string())?;
-
-        let cs  = CString::new(connection_string.clone()).unwrap();
-        let eng = CString::new(engine).unwrap();
-
-        let ptr = func(cs.as_ptr(), eng.as_ptr());
-
-        // Zero out connection string bytes before dropping
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-
+            *const c_char, *const c_char, *const c_char,
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_file_query_engine().get(b"QueryFileWithDb").expect("QueryFileWithDb");
+        let strings = (
+            CString::new(file_path).unwrap(),
+            CString::new(sql).unwrap(),
+            CString::new(connection_string.as_str()).unwrap(),
+            CString::new(engine).unwrap(),
+            CString::new(table_names).unwrap(),
+        );
+        let ptr = func(
+            strings.0.as_ptr(), strings.1.as_ptr(),
+            strings.2.as_ptr(), strings.3.as_ptr(),
+            strings.4.as_ptr(),
+        );
         if ptr.is_null() { return Err("null response".to_string()); }
         Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    };
+    unsafe {
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
     }
+    result
+}
+
+#[tauri::command]
+fn get_schema(
+    credential_ref: String, engine: String, host: String,
+    port: u16, database: String, username: String,
+) -> Result<String, String> {
+    let entry = keyring::Entry::new(&credential_ref, &username)
+        .map_err(|e| e.to_string())?;
+    let password = entry.get_password().unwrap_or_default();
+    let mut connection_string = match engine.to_lowercase().as_str() {
+        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};", host, port, database, username, password),
+        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};", host, port, database, username, password),
+        "sqlite"   => format!("Data Source={}", database),
+        _          => return Err(format!("Unsupported engine: {}", engine)),
+    };
+    let result = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_schema_explorer().get(b"get_schema").expect("get_schema");
+        let cs  = CString::new(connection_string.as_str()).unwrap();
+        let eng = CString::new(engine).unwrap();
+        let ptr = func(cs.as_ptr(), eng.as_ptr());
+        if ptr.is_null() { return Err("null response".to_string()); }
+        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    };
+    unsafe {
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+    }
+    result
 }
 
 #[tauri::command]
 fn add_history_entry(
-    connection_id: String,
-    connection_name: String,
-    sql: String,
-    executed_at: i64,
-    duration_ms: i32,
-    row_count: i32,
-    success: bool,
+    connection_id: String, connection_name: String, sql: String,
+    executed_at: i64, duration_ms: i32, row_count: i32, success: bool,
 ) -> bool {
     unsafe {
-        let lib = match Library::new("natives/QueryHistory.dll") {
-            Ok(l) => l,
-            Err(_) => return false,
-        };
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char,
-        ) -> i32> = match lib.get(b"add_history_entry") {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-
-        // Pack everything into a single JSON string
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
+            get_query_history().get(b"add_history_entry").expect("add_history_entry");
         let json = format!(
             r#"{{"connectionId":"{}","connectionName":"{}","sql":"{}","executedAt":{},"durationMs":{},"rowCount":{},"success":{}}}"#,
             connection_id.replace('"', "\\\""),
             connection_name.replace('"', "\\\""),
             sql.replace('"', "\\\"").replace('\n', "\\n").replace('\r', ""),
-            executed_at,
-            duration_ms,
-            row_count,
-            success
+            executed_at, duration_ms, row_count, success
         );
-
         let c_json = CString::new(json).unwrap();
         func(c_json.as_ptr()) == 1
     }
@@ -474,48 +310,37 @@ fn add_history_entry(
 #[tauri::command]
 fn get_history(connection_id: String, limit: i32) -> String {
     unsafe {
-        let lib = match Library::new("natives/QueryHistory.dll") {
-            Ok(l) => l,
-            Err(e) => return format!("{{\"error\":\"{}\"}}", e),
-        };
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, i32
-        ) -> *const c_char> = match lib.get(b"get_history") {
-            Ok(f) => f,
-            Err(e) => return format!("{{\"error\":\"{}\"}}", e),
-        };
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char, i32) -> *const c_char> =
+            get_query_history().get(b"get_history").expect("get_history");
         let c_id = CString::new(connection_id).unwrap();
         let ptr  = func(c_id.as_ptr(), limit);
-        if ptr.is_null() { return "{\"entries\":[]}".to_string(); }
-        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        if ptr.is_null() { "{\"entries\":[]}".to_string() }
+        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     }
 }
 
 #[tauri::command]
 fn clear_history(connection_id: String) -> bool {
     unsafe {
-        let lib = match Library::new("natives/QueryHistory.dll") {
-            Ok(l) => l,
-            Err(_) => return false,
-        };
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char
-        ) -> i32> = match lib.get(b"clear_history") {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
+            get_query_history().get(b"clear_history").expect("clear_history");
         let c_id = CString::new(connection_id).unwrap();
         func(c_id.as_ptr()) == 1
     }
 }
 
 fn main() {
+
+    get_query_executor();
+    get_connection_manager();
+    get_file_query_engine();
+    get_schema_explorer();
+    get_query_history();
+
     tauri::Builder::default()
     .plugin(tauri_plugin_clipboard_manager::init())
     .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![
-            test_connection, 
-            load_connection, 
+        .invoke_handler(tauri::generate_handler![  
             execute_query, 
             list_connections, 
             save_connection,
@@ -523,8 +348,6 @@ fn main() {
             store_credential, 
             delete_credential,
             build_connection_string,
-            test_postgres_connection,
-            test_sqlite_connection,
             query_file,
             get_file_schema,
             list_db_tables,

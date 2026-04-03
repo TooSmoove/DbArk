@@ -144,6 +144,7 @@ public static class QueryHistoryLib
             try
             {
                 EnsureTable(db);
+                PurgeOldHistory(db);
 
                 string sql = string.IsNullOrEmpty(connectionId)
                     ? $"SELECT id, connection_id, connection_name, sql, executed_at, duration_ms, row_count, success FROM query_history ORDER BY executed_at DESC LIMIT {limit}"
@@ -219,61 +220,15 @@ public static class QueryHistoryLib
         }
         catch { return 0; }
     }
-    [UnmanagedCallersOnly(EntryPoint = "test_history_db")]
-    public static IntPtr TestHistoryDb()
+    private static void PurgeOldHistory(IntPtr db)
     {
-        try
-        {
-            string dbPath = GetDbPath();
-            IntPtr db = IntPtr.Zero;
-            SqliteOpen(dbPath, ref db);
-            try
-            {
-                EnsureTable(db);
-
-                // Try a test insert
-                string sql = "INSERT INTO query_history (connection_id, connection_name, sql, executed_at, duration_ms, row_count, success) VALUES (?, ?, ?, ?, ?, ?, ?)";
-                IntPtr stmt = IntPtr.Zero;
-                SqlitePrepareV2(db, sql, -1, ref stmt, IntPtr.Zero);
-                SqliteBindText(stmt, 1, "test-conn", -1, IntPtr.Zero);
-                SqliteBindText(stmt, 2, "Test Connection", -1, IntPtr.Zero);
-                SqliteBindText(stmt, 3, "SELECT 1", -1, IntPtr.Zero);
-                SqliteBindInt64(stmt, 4, 1234567890);
-                SqliteBindInt(stmt, 5, 100);
-                SqliteBindInt(stmt, 6, 1);
-                SqliteBindInt(stmt, 7, 1);
-                int rc = SqliteStep(stmt);
-                SqliteFinalize(stmt);
-
-                // Count rows
-                IntPtr countStmt = IntPtr.Zero;
-                SqlitePrepareV2(db, "SELECT COUNT(*) FROM query_history", -1, ref countStmt, IntPtr.Zero);
-                SqliteStep(countStmt);
-                int count = SqliteColumnInt(countStmt, 0);
-                SqliteFinalize(countStmt);
-
-                return Marshal.StringToCoTaskMemUTF8($"OK: dbPath={dbPath}, insertRc={rc}, rowCount={count}");
-            }
-            finally { SqliteClose(db); }
-        }
-        catch (Exception ex)
-        {
-            return Marshal.StringToCoTaskMemUTF8($"ERROR: {ex.Message}");
-        }
-    }
-
-    [UnmanagedCallersOnly(EntryPoint = "debug_add_entry")]
-    public static IntPtr DebugAddEntry(IntPtr jsonPtr)
-    {
-        try
-        {
-            var json = Marshal.PtrToStringUTF8(jsonPtr) ?? "NULL";
-            return Marshal.StringToCoTaskMemUTF8($"Received: {json}");
-        }
-        catch (Exception ex)
-        {
-            return Marshal.StringToCoTaskMemUTF8($"Exception: {ex.Message}");
-        }
+        // Delete entries older than 90 days
+        long cutoff = DateTimeOffset.UtcNow.AddDays(-90).ToUnixTimeMilliseconds();
+        string sql = $"DELETE FROM query_history WHERE executed_at < {cutoff}";
+        IntPtr stmt = IntPtr.Zero;
+        SqlitePrepareV2(db, sql, -1, ref stmt, IntPtr.Zero);
+        SqliteStep(stmt);
+        SqliteFinalize(stmt);
     }
 
     // ---- winsqlite3 P/Invoke ----------------------------------

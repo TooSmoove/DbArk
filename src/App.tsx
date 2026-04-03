@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useCallback, useRef, useEffect, useMemo, act } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import Editor from "@monaco-editor/react";
 import type { OnMount } from "@monaco-editor/react";
 import {
@@ -733,6 +733,7 @@ function App() {
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const LOCK_AFTER_MS = 15 * 60 * 1000; // 15 minutes
   const activeTabRef = useRef<Tab>(activeTab);
+  
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
 
@@ -780,6 +781,26 @@ function App() {
     }
   }, [activeTabId, activeTab.connection]);
 
+  //Active Tab helper - load schema when connection changes
+  const schemaConnectionId = useRef<string | null>(null);
+
+  useEffect(() => {
+    const conn = activeTab.connection;
+    if (conn) {
+      if (schemaConnectionId.current === conn.id) return; // already loaded
+      schemaConnectionId.current = conn.id;
+      setSchema(null);
+      setExpandedTables(new Set());
+      loadSchema(conn);
+    } else {
+      schemaConnectionId.current = null;
+      setSchema(null);
+      setExpandedTables(new Set());
+    }
+  }, [activeTabId]);
+
+  //END Active Tab Schema helper
+
   async function loadConnections() {
     try {
       const raw = await invoke<string>("list_connections", { folderPath: CONNECTIONS_FOLDER });
@@ -800,13 +821,16 @@ function App() {
     ));
   }
 
-  // Inactivity lock
+  // ---- Inactivity lock --------------------------------------
+  const lastActivity = useRef(Date.now());
+
   function resetInactivityTimer() {
+    const now = Date.now();
+    if (now - lastActivity.current < 500) return; // throttle to max 2x per second
+    lastActivity.current = now;
     if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
-    if (locked) return; // don't reset if already locked
-    inactivityTimer.current = setTimeout(() => {
-      setLocked(true);
-    }, LOCK_AFTER_MS);
+    if (locked) return;
+    inactivityTimer.current = setTimeout(() => setLocked(true), LOCK_AFTER_MS);
   }
 
   useEffect(() => {
@@ -952,18 +976,29 @@ function App() {
 
       // Cmd+T — new tab
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT, () => {
+        const currentSql = editorRef.current?.getValue() ?? "";
         const newTab = createTab();
-        setTabs(prev => [...prev, newTab]);
+        setTabs(prev => {
+          const updated = prev.map(t =>
+            t.id === editorRef.current ? { ...t, sql: currentSql } : t
+          );
+          return [...updated, newTab];
+        });
         setActiveTabId(newTab.id);
         setTimeout(() => editorRef.current?.setValue(""), 0);
       });
 
       // Cmd+W — close tab
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
+        const currentSql = editorRef.current?.getValue() ?? "";
         setTabs(prev => {
           if (prev.length <= 1) return prev;
-          const idx     = prev.findIndex(t => t.id === activeTabId);
-          const newTabs = prev.filter(t => t.id !== activeTabId);
+          const idx = prev.findIndex(t => t.id === editorRef.current);
+          // Save current SQL then remove current tab
+          const updated = prev.map(t =>
+            t.id === editorRef.current ? { ...t, sql: currentSql } : t
+          );
+          const newTabs = updated.filter(t => t.id !== editorRef.current);
           const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
           setActiveTabId(nextTab.id);
           setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
@@ -975,7 +1010,7 @@ function App() {
     editor.onDidChangeModelContent(() => {
       const sql = editor.getValue();
       setTabs(prev => prev.map(t =>
-        t.id === activeTabId ? { ...t, sql } : t
+        t.id === editorRef.current?.id ? { ...t, sql } : t
       ));
     });
 
@@ -1219,6 +1254,7 @@ async function loadHistory(conn: ConnectionConfig | null) {
                   {/* Connection row */}
                   <div
                     onClick={() => {
+                      schemaConnectionId.current = conn.id;
                       updateActiveTab({
                         connection: conn,
                         file:       null,
@@ -1459,9 +1495,20 @@ async function loadHistory(conn: ConnectionConfig | null) {
             <div
               key={tab.id}
               onClick={() => {
+                if (tab.id === activeTabId) return; // already active
+                
+                // Save current editor content to current tab
+                const currentSql = editorRef.current?.getValue() ?? "";
+                setTabs(prev => {
+                  const updated = prev.map(t =>
+                    t.id === activeTabId ? { ...t, sql: currentSql } : t
+                  );
+                  // Find the target tab's SQL from the updated array
+                  const targetTab = updated.find(t => t.id === tab.id);
+                  setTimeout(() => editorRef.current?.setValue(targetTab?.sql ?? ""), 0);
+                  return updated;
+                });
                 setActiveTabId(tab.id);
-                // Restore editor content for this tab
-                setTimeout(() => editorRef.current?.setValue(tab.sql ?? ""), 0);
               }}
               style={{
                 display: "flex",
@@ -1511,15 +1558,20 @@ async function loadHistory(conn: ConnectionConfig | null) {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
+                    const currentSql = editorRef.current?.getValue() ?? "";
                     const idx = tabs.findIndex(t => t.id === tab.id);
-                    const newTabs = tabs.filter(t => t.id !== tab.id);
-                    setTabs(newTabs);
-                    // Activate adjacent tab
-                    if (tab.id === activeTabId) {
-                      const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
-                      setActiveTabId(nextTab.id);
-                      setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
-                    }
+                    setTabs(prev => {
+                      const updated = prev.map(t =>
+                        t.id === activeTabId ? { ...t, sql: currentSql } : t
+                      );
+                      const newTabs = updated.filter(t => t.id !== tab.id);
+                      if (tab.id === activeTabId) {
+                        const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
+                        setActiveTabId(nextTab.id);
+                        setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
+                      }
+                      return newTabs;
+                    });
                   }}
                   style={{
                     background: "none", border: "none",
@@ -1540,8 +1592,15 @@ async function loadHistory(conn: ConnectionConfig | null) {
           {/* New tab button */}
           <button
             onClick={() => {
+              // Save current editor content before creating new tab
+              const currentSql = editorRef.current?.getValue() ?? "";
               const newTab = createTab();
-              setTabs(prev => [...prev, newTab]);
+              setTabs(prev => {
+                const updated = prev.map(t =>
+                  t.id === activeTabId ? { ...t, sql: currentSql } : t
+                );
+                return [...updated, newTab];
+              });
               setActiveTabId(newTab.id);
               setTimeout(() => editorRef.current?.setValue(""), 0);
             }}
@@ -1749,7 +1808,7 @@ async function loadHistory(conn: ConnectionConfig | null) {
         {activeTab.file && (
           <JoinTablesPanel
             activeConnection={activeTab.connection}
-            onSelectionChange={activeTab.joinTables}
+            onSelectionChange={(tables) => updateActiveTab({ joinTables: tables })}
           />
         )}
 
