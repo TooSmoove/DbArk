@@ -20,6 +20,7 @@ public class ConnectionConfig
     public string Group { get; set; } = "";
     public string FilePath { get; set; } = "";
     public string SslMode { get; set; } = "prefer";
+    public bool ReadOnly { get; set; } = false;
 }
 
 public class ConnectionListResult
@@ -40,6 +41,7 @@ public class SaveConnectionRequest
     public string Group { get; set; } = "";
     public string FolderPath { get; set; } = "";
     public string SslMode { get; set; } = "prefer";
+    public bool ReadOnly { get; set; } = false;
 }
 
 public static class ConnectionManagerLib
@@ -157,6 +159,7 @@ public static class ConnectionManagerLib
                     username = "{request.Username}"
                     credential_ref = "{credentialRef}"
                     ssl_mode = "{request.SslMode}"
+                    read_only = {(request.ReadOnly ? "true" : "false")}
 
                     [display]
                     color = "{request.Color}"
@@ -252,6 +255,7 @@ public static class ConnectionManagerLib
             Group = values.GetValueOrDefault("display.group", ""),
             FilePath = filePath,
             SslMode = values.GetValueOrDefault("connection.ssl_mode", "prefer"),
+            ReadOnly = values.GetValueOrDefault("connection.read_only", "false") == "true"
         };
 
         // Validate all fields before returning

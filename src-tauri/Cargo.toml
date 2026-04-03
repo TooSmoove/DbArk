@@ -26,5 +26,6 @@ tauri-plugin-log = "2"
 libloading = "0.8"
 keyring = "2"
 tauri-plugin-dialog = "2.6.0"
+tauri-plugin-clipboard-manager = "2.3.2"
 
 

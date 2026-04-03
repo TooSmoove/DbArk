@@ -14,10 +14,13 @@
     "windows": [
       {
         "title": "DevSql",
-        "width": 1200,
-        "height": 800,
-        "resizable": true,
-        "fullscreen": false
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "maximized": true,
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {

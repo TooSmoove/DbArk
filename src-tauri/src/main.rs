@@ -50,62 +50,46 @@ fn load_connection(path: String) -> String {
 }
 
 #[tauri::command]
-fn test_mysql_connection(connection_string: String) -> String {
-    unsafe {
-        let lib = Library::new("natives/QueryExecutor.dll")
-            .expect("Failed to load QueryExecutor.dll");
+fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>) -> String {
+    let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
 
-        let func: Symbol<unsafe extern "C" fn(*const i8) -> *const i8> = lib
-            .get(b"test_mysql_connection")
-            .expect("Failed to find test_mysql_connection export");
-
-        let c_string = CString::new(connection_string)
-            .expect("CString failed");
-
-        let result_ptr = func(c_string.as_ptr());
-
-        if result_ptr.is_null() {
-            return "ERROR: null response".to_string();
-        }
-
-        std::ffi::CStr::from_ptr(result_ptr)
-            .to_string_lossy()
-            .into_owned()
-    }
-}
-
-#[tauri::command]
-fn execute_query(connection_string: String, sql: String, engine: String) -> String {
-    unsafe {
+    let result = unsafe {
         let lib = match Library::new("natives/QueryExecutor.dll") {
             Ok(l) => l,
             Err(e) => return format!("{{\"error\":\"Failed to load QueryExecutor: {}\"}}", e),
         };
 
-        let func: Symbol<unsafe extern "C" fn(
-            *const i8, *const i8, *const i8) -> *const i8> = match lib
-            .get(b"execute_query") {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+            *const c_char, *const c_char,
+        ) -> *const c_char> = match lib.get(b"execute_query") {
             Ok(f) => f,
             Err(e) => return format!("{{\"error\":\"Failed to find execute_query: {}\"}}", e),
         };
 
-        let c_conn   = CString::new(connection_string).unwrap_or_default();
-        let c_sql    = CString::new(sql).unwrap_or_default();
-        let c_engine = CString::new(engine).unwrap_or_default();
+        let c_conn    = CString::new(connection_string.as_str()).unwrap_or_default();
+        let c_sql     = CString::new(sql).unwrap_or_default();
+        let c_engine  = CString::new(engine).unwrap_or_default();
+        let c_ro      = CString::new(read_only_str).unwrap_or_default();
 
         let result_ptr = func(
-            c_conn.as_ptr(),
-            c_sql.as_ptr(),
-            c_engine.as_ptr());
+            c_conn.as_ptr(), c_sql.as_ptr(),
+            c_engine.as_ptr(), c_ro.as_ptr());
 
         if result_ptr.is_null() {
-            return "{\"error\":\"null response\"}".to_string();
+            "{\"error\":\"null response\"}".to_string()
+        } else {
+            CStr::from_ptr(result_ptr).to_string_lossy().into_owned()
         }
+    };
 
-        std::ffi::CStr::from_ptr(result_ptr)
-            .to_string_lossy()
-            .into_owned()
+    // Zero out connection string
+    unsafe {
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
     }
+
+    result
 }
 
 #[tauri::command]
@@ -319,31 +303,41 @@ fn list_db_tables(
     database: String,
     username: String,
 ) -> Result<String, String> {
-    // Build connection string via keyring — password never touches JS
-    let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
+    let entry = keyring::Entry::new(&credential_ref, &username)
+        .map_err(|e| e.to_string())?;
     let password = entry.get_password().unwrap_or_default();
 
-    let connection_string = match engine.to_lowercase().as_str() {
-        "mysql"     => format!("Server={};Port={};Database={};Uid={};Pwd={};", host, port, database, username, password),
-        "postgres"  => format!("Host={};Port={};Database={};Username={};Password={};", host, port, database, username, password),
-        "sqlite"    => format!("Data Source={};", database),
-        _           => return Err(format!("Unsupported engine: {}", engine)),
+    let mut connection_string = match engine.to_lowercase().as_str() {
+        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
+        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
+        "sqlite"   => format!("Data Source={}", database),
+        _          => return Err(format!("Unsupported engine: {}", engine)),
     };
 
-    unsafe {
-        let lib = Library::new("natives/FileQueryEngine.dll").map_err(|e| e.to_string())?;
+    let result = unsafe {
+        let lib = Library::new("natives/FileQueryEngine.dll")
+            .map_err(|e| e.to_string())?;
 
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char
-        ) -> *const c_char> = lib.get(b"ListTables").map_err(|e| e.to_string())?;
+        ) -> *const c_char> = lib.get(b"ListTables")
+            .map_err(|e| e.to_string())?;
 
-        let cs  = CString::new(connection_string).unwrap();
+        let cs  = CString::new(connection_string.as_str()).unwrap();
         let eng = CString::new(engine).unwrap();
 
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
         Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    };
+
+    // Zero out connection string
+    unsafe {
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
     }
+
+    result
 }
 
 #[tauri::command]
@@ -362,11 +356,11 @@ fn query_file_with_db(
     let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
     let password = entry.get_password().unwrap_or_default();
 
-    let connection_string = match engine.to_lowercase().as_str() {
-        "mysql"     => format!("Server={};Port={};Database={};Uid={};Pwd={};", host, port, database, username, password),
-        "postgres"  => format!("Host={};Port={};Database={};Username={};Password={};", host, port, database, username, password),
-        "sqlite"    => format!("Data Source={};", database),
-        _           => return Err(format!("Unsupported engine: {}", engine)),
+    let mut connection_string = match engine.to_lowercase().as_str() {
+        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
+        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
+        "sqlite"   => format!("Data Source={}", database),
+        _          => return Err(format!("Unsupported engine: {}", engine)),
     };
 
     unsafe {
@@ -380,11 +374,16 @@ fn query_file_with_db(
 
         let fp  = CString::new(file_path).unwrap();
         let s   = CString::new(sql).unwrap();
-        let cs  = CString::new(connection_string).unwrap();
+        let cs  = CString::new(connection_string.clone()).unwrap();
         let eng = CString::new(engine).unwrap();
         let tbl = CString::new(table_names).unwrap();
 
         let ptr = func(fp.as_ptr(), s.as_ptr(), cs.as_ptr(), eng.as_ptr(), tbl.as_ptr());
+        
+        // Zero out connection string bytes before dropping
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+
         if ptr.is_null() { return Err("null response".to_string()); }
         Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     }
@@ -403,11 +402,9 @@ fn get_schema(
         .map_err(|e| e.to_string())?;
     let password = entry.get_password().unwrap_or_default();
 
-    let connection_string = match engine.to_lowercase().as_str() {
-        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};",
-                        host, port, database, username, password),
-        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};",
-                        host, port, database, username, password),
+    let mut connection_string = match engine.to_lowercase().as_str() {
+        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
+        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
         "sqlite"   => format!("Data Source={}", database),
         _          => return Err(format!("Unsupported engine: {}", engine)),
     };
@@ -421,22 +418,104 @@ fn get_schema(
         ) -> *const c_char> = lib.get(b"get_schema")
             .map_err(|e| e.to_string())?;
 
-        let cs  = CString::new(connection_string).unwrap();
+        let cs  = CString::new(connection_string.clone()).unwrap();
         let eng = CString::new(engine).unwrap();
 
         let ptr = func(cs.as_ptr(), eng.as_ptr());
+
+        // Zero out connection string bytes before dropping
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+
         if ptr.is_null() { return Err("null response".to_string()); }
         Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     }
 }
 
+#[tauri::command]
+fn add_history_entry(
+    connection_id: String,
+    connection_name: String,
+    sql: String,
+    executed_at: i64,
+    duration_ms: i32,
+    row_count: i32,
+    success: bool,
+) -> bool {
+    unsafe {
+        let lib = match Library::new("natives/QueryHistory.dll") {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char,
+        ) -> i32> = match lib.get(b"add_history_entry") {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        // Pack everything into a single JSON string
+        let json = format!(
+            r#"{{"connectionId":"{}","connectionName":"{}","sql":"{}","executedAt":{},"durationMs":{},"rowCount":{},"success":{}}}"#,
+            connection_id.replace('"', "\\\""),
+            connection_name.replace('"', "\\\""),
+            sql.replace('"', "\\\"").replace('\n', "\\n").replace('\r', ""),
+            executed_at,
+            duration_ms,
+            row_count,
+            success
+        );
+
+        let c_json = CString::new(json).unwrap();
+        func(c_json.as_ptr()) == 1
+    }
+}
+
+#[tauri::command]
+fn get_history(connection_id: String, limit: i32) -> String {
+    unsafe {
+        let lib = match Library::new("natives/QueryHistory.dll") {
+            Ok(l) => l,
+            Err(e) => return format!("{{\"error\":\"{}\"}}", e),
+        };
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, i32
+        ) -> *const c_char> = match lib.get(b"get_history") {
+            Ok(f) => f,
+            Err(e) => return format!("{{\"error\":\"{}\"}}", e),
+        };
+        let c_id = CString::new(connection_id).unwrap();
+        let ptr  = func(c_id.as_ptr(), limit);
+        if ptr.is_null() { return "{\"entries\":[]}".to_string(); }
+        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+}
+
+#[tauri::command]
+fn clear_history(connection_id: String) -> bool {
+    unsafe {
+        let lib = match Library::new("natives/QueryHistory.dll") {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char
+        ) -> i32> = match lib.get(b"clear_history") {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let c_id = CString::new(connection_id).unwrap();
+        func(c_id.as_ptr()) == 1
+    }
+}
+
 fn main() {
     tauri::Builder::default()
+    .plugin(tauri_plugin_clipboard_manager::init())
     .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             test_connection, 
             load_connection, 
-            test_mysql_connection, 
             execute_query, 
             list_connections, 
             save_connection,
@@ -450,7 +529,10 @@ fn main() {
             get_file_schema,
             list_db_tables,
             query_file_with_db,
-            get_schema])
+            get_schema,
+            add_history_entry,
+            get_history,
+            clear_history])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -75,22 +75,25 @@ public static class QueryExecutor
 
     [UnmanagedCallersOnly(EntryPoint = "execute_query")]
     public static IntPtr ExecuteQuery(
-    IntPtr connectionStringPtr,
-    IntPtr sqlPtr,
-    IntPtr enginePtr)
+     IntPtr connectionStringPtr,
+     IntPtr sqlPtr,
+     IntPtr enginePtr,
+     IntPtr readOnlyPtr)   // ← add this
     {
         try
         {
             string? connectionString = Marshal.PtrToStringUTF8(connectionStringPtr);
             string? sql = Marshal.PtrToStringUTF8(sqlPtr);
             string? engine = Marshal.PtrToStringUTF8(enginePtr);
+            string? readOnlyStr = Marshal.PtrToStringUTF8(readOnlyPtr);
+            bool readOnly = readOnlyStr == "true";
 
             if (string.IsNullOrEmpty(connectionString))
                 return Marshal.StringToCoTaskMemUTF8("{\"error\":\"Empty connection string\"}");
             if (string.IsNullOrEmpty(sql))
                 return Marshal.StringToCoTaskMemUTF8("{\"error\":\"Empty SQL\"}");
 
-            // Split on semicolons, filter out empty statements
+            // Split statements
             var statements = sql
                 .Split(';')
                 .Select(s => s.Trim())
@@ -100,7 +103,24 @@ public static class QueryExecutor
             if (statements.Count == 0)
                 return Marshal.StringToCoTaskMemUTF8("{\"error\":\"No statements found\"}");
 
-            // Execute all but the last statement — discard their results
+            // Enforce read-only — check every statement
+            if (readOnly)
+            {
+                foreach (var stmt in statements)
+                {
+                    if (!IsReadOnlyStatement(stmt))
+                    {
+                        var err = new ErrorResult
+                        {
+                            error = $"Connection is read-only — statement not allowed: {stmt.Split('\n')[0].Trim()}"
+                        };
+                        return Marshal.StringToCoTaskMemUTF8(
+                            JsonSerializer.Serialize(err, AppJsonContext.Default.ErrorResult));
+                    }
+                }
+            }
+
+            // Execute all but last, return last result
             foreach (var stmt in statements.SkipLast(1))
             {
                 try
@@ -112,14 +132,9 @@ public static class QueryExecutor
                         _ => ExecuteMySql(connectionString, stmt),
                     };
                 }
-                catch
-                {
-                    // If a non-final statement fails, keep going
-                    // (matches behaviour of most DB clients)
-                }
+                catch { }
             }
 
-            // Execute the last statement and return its results
             var lastStatement = statements.Last();
             return engine?.ToLower() switch
             {
@@ -369,6 +384,18 @@ public static class QueryExecutor
 
         // Handle bare file path
         return connectionString.Trim();
+    }
+    private static bool IsReadOnlyStatement(string sql)
+    {
+        // Trim and get the first word
+        var trimmed = sql.TrimStart().ToUpperInvariant();
+        // Allow only SELECT and read-only pragmas/commands
+        return trimmed.StartsWith("SELECT")
+            || trimmed.StartsWith("SHOW")
+            || trimmed.StartsWith("DESCRIBE")
+            || trimmed.StartsWith("EXPLAIN")
+            || trimmed.StartsWith("PRAGMA")
+            || trimmed.StartsWith("WITH"); // CTEs — may contain SELECT
     }
 }
 

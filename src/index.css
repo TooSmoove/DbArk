@@ -51,19 +51,24 @@
 }
 
 #root {
-  width: 1126px;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
   max-width: 100%;
   margin: 0 auto;
   text-align: center;
   border-inline: 1px solid var(--border);
-  min-height: 100svh;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
 }
 
-body {
+html, body {
   margin: 0;
+  padding: 0;
+  overflow: hidden;
+  height: 100%;
+  width: 100%;
 }
 
 h1,

@@ -1,10 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import Editor from "@monaco-editor/react";
 import type { OnMount } from "@monaco-editor/react";
 import {
   useReactTable,
   getCoreRowModel,
+  getSortedRowModel,
   flexRender,
   createColumnHelper,
 } from "@tanstack/react-table";
@@ -25,6 +26,7 @@ interface ConnectionConfig {
   group: string;
   filePath: string;
   sslMode: string;
+  readOnly: boolean;
 }
 
 interface ConnectionListResult {
@@ -63,6 +65,17 @@ interface TableInfo {
 interface SchemaResult {
   tables: TableInfo[];
   error?: string;
+}
+
+interface HistoryEntry {
+  id: number;
+  connectionId: string;
+  connectionName: string;
+  sql: string;
+  executedAt: number;
+  durationMs: number;
+  rowCount: number;
+  success: boolean;
 }
 
 // ---- Engine badge -----------------------------------------
@@ -236,7 +249,7 @@ function AddConnectionForm({
   const [form, setForm] = useState({
     name: "", engine: "mysql", host: "", port: "", database: "",
     username: "", password: "", color: "#6c63ff", group: "",
-    sslMode: "prefer",
+    sslMode: "prefer", readOnly: false,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -267,7 +280,7 @@ function AddConnectionForm({
         port: parseInt(form.port) || defaultPort[form.engine] || 3306,
         database: form.database, username: form.username,
         color: form.color, group: form.group, folderPath: connectionsFolder,
-        sslMode: form.sslMode,
+        sslMode: form.sslMode, readOnly: form.readOnly,
       };
       const result = await invoke<string>("save_connection", {
         requestJson: JSON.stringify(request),
@@ -340,6 +353,21 @@ function AddConnectionForm({
         </select>
       </label>
 
+      <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+        <input
+          type="checkbox"
+          checked={form.readOnly}
+          onChange={e => setForm(f => ({ ...f, readOnly: e.target.checked }))}
+          style={{ width: 14, height: 14, cursor: "pointer" }}
+        />
+        <div>
+          <div style={{ fontSize: 12, color: "#e8e9ec", marginBottom: 2 }}>Read-only connection</div>
+          <div style={{ fontSize: 10, color: "#4b5563" }}>
+            Blocks INSERT, UPDATE, DELETE, and DROP at the driver level
+          </div>
+        </div>
+      </label>
+
       <label style={labelStyle}>
         Colour
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
@@ -376,6 +404,10 @@ function AddConnectionForm({
 // ---- Results grid -----------------------------------------
 function ResultsGrid({ result }: { result: QueryResult }) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const [filterText, setFilterText] = useState("");
+  const debouncedFilter = useDebounce(filterText, 300);
+  const [sorting, setSorting] = useState<import("@tanstack/react-table").SortingState>([]);
+
   const columnHelper = createColumnHelper<(string | null)[]>();
 
   const columns = result.columns.map((col, i) =>
@@ -391,10 +423,25 @@ function ResultsGrid({ result }: { result: QueryResult }) {
     })
   );
 
+  // Client-side filter — check if any cell in the row contains the filter text
+  // Use debouncedFilter for the actual filtering, not filterText
+  const filterableRows = result.rows.slice(0, 1_000);
+
+  const filteredRows = useMemo(() => {
+    if (!debouncedFilter.trim()) return result.rows;
+    const lower = debouncedFilter.toLowerCase();
+    return filterableRows.filter(row =>
+      row.some(cell => cell?.toLowerCase().includes(lower))
+    );
+  }, [debouncedFilter, result.rows]);
+
   const table = useReactTable({
-    data: result.rows,
+    data: filteredRows,
     columns,
     getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    onSortingChange: setSorting,
+    state: { sorting },
   });
 
   const { rows } = table.getRowModel();
@@ -406,61 +453,176 @@ function ResultsGrid({ result }: { result: QueryResult }) {
     overscan: 20,
   });
 
-  const virtualRows = rowVirtualiser.getVirtualItems();
-  const totalHeight = rowVirtualiser.getTotalSize();
+  const [copiedCell, setCopiedCell] = useState<string | null>(null);
+  const virtualRows   = rowVirtualiser.getVirtualItems();
+  const totalHeight   = rowVirtualiser.getTotalSize();
   const paddingTop    = virtualRows.length > 0 ? virtualRows[0].start : 0;
   const paddingBottom = virtualRows.length > 0
     ? totalHeight - virtualRows[virtualRows.length - 1].end
     : 0;
 
   return (
-    <div ref={parentRef} style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
-      <table style={{
-        borderCollapse: "collapse", width: "100%",
-        fontSize: 13, fontFamily: "monospace", tableLayout: "auto",
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+
+      {/* Filter bar */}
+      <div style={{
+        padding: "6px 14px",
+        borderBottom: "1px solid #1e2026",
+        background: "#13141a",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        flexShrink: 0,
       }}>
-        <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
-          {table.getHeaderGroups().map((hg) => (
-            <tr key={hg.id}>
-              {hg.headers.map((header) => (
-                <th key={header.id} style={{
-                  padding: "7px 14px", textAlign: "left",
-                  background: "#1e2026", borderBottom: "1px solid #2d2f36",
-                  color: "#9ca3af", fontWeight: 500, whiteSpace: "nowrap",
-                }}>
-                  {flexRender(header.column.columnDef.header, header.getContext())}
-                </th>
-              ))}
-            </tr>
-          ))}
-        </thead>
-        <tbody>
-          {paddingTop > 0 && (
-            <tr><td style={{ height: paddingTop }} colSpan={columns.length} /></tr>
-          )}
-          {virtualRows.map((virtualRow) => {
-            const row = rows[virtualRow.index];
-            return (
-              <tr key={row.id} style={{
-                background: virtualRow.index % 2 === 0 ? "#0e0f11" : "#13141a",
-              }}>
-                {row.getVisibleCells().map((cell) => (
-                  <td key={cell.id} style={{
-                    padding: "5px 14px", borderBottom: "1px solid #1e2026",
-                    color: "#e8e9ec", whiteSpace: "nowrap",
-                    maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis",
-                  }}>
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
+        <input
+          type="text"
+          placeholder={result.rowCount > 1000
+            ? "Filter first 1,000 rows — use WHERE for more"
+            : "Filter rows…"}
+          value={filterText}
+          onChange={e => setFilterText(e.target.value)}
+          style={{
+            background: "#0e0f11",
+            border: "1px solid #2d2f36",
+            borderRadius: 6,
+            color: "#e8e9ec",
+            fontSize: 12,
+            fontFamily: "monospace",
+            padding: "4px 10px",
+            outline: "none",
+            width: 260,
+          }}
+        />
+        {debouncedFilter && (
+          <>
+            <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+              {rows.length} of {result.rowCount} rows
+            </span>
+            <button
+              onClick={() => setFilterText("")}
+              style={{
+                background: "none", border: "none", color: "#6b7280",
+                cursor: "pointer", fontSize: 12, padding: "2px 6px",
+              }}
+            >
+              ✕ clear
+            </button>
+          </>
+        )}
+        {sorting.length > 0 && (
+          <button
+            onClick={() => setSorting([])}
+            style={{
+              background: "none", border: "none", color: "#6b7280",
+              cursor: "pointer", fontSize: 11, padding: "2px 6px",
+              fontFamily: "monospace", marginLeft: "auto",
+            }}
+          >
+            ✕ clear sort
+          </button>
+        )}
+      </div>
+
+      {/* Grid */}
+      <div ref={parentRef} style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
+        <table style={{
+          borderCollapse: "collapse", width: "100%",
+          fontSize: 13, fontFamily: "monospace", tableLayout: "auto",
+        }}>
+          <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+            {table.getHeaderGroups().map((hg) => (
+              <tr key={hg.id}>
+                {hg.headers.map((header) => (
+                  <th
+                    key={header.id}
+                    onClick={header.column.getToggleSortingHandler()}
+                    style={{
+                      padding: "7px 14px", textAlign: "left",
+                      background: "#1e2026", borderBottom: "1px solid #2d2f36",
+                      color: header.column.getIsSorted() ? "#e8e9ec" : "#9ca3af",
+                      fontWeight: 500, whiteSpace: "nowrap",
+                      cursor: "pointer", userSelect: "none",
+                    }}
+                  >
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {flexRender(header.column.columnDef.header, header.getContext())}
+                      {header.column.getIsSorted() === "asc"  && <span style={{ color: "#6c63ff" }}>↑</span>}
+                      {header.column.getIsSorted() === "desc" && <span style={{ color: "#6c63ff" }}>↓</span>}
+                      {!header.column.getIsSorted() && (
+                        <span style={{ color: "#2d2f36", fontSize: 10 }}>⇅</span>
+                      )}
+                    </span>
+                  </th>
                 ))}
               </tr>
-            );
-          })}
-          {paddingBottom > 0 && (
-            <tr><td style={{ height: paddingBottom }} colSpan={columns.length} /></tr>
-          )}
-        </tbody>
-      </table>
+            ))}
+          </thead>
+          <tbody>
+            {paddingTop > 0 && (
+              <tr><td style={{ height: paddingTop }} colSpan={columns.length} /></tr>
+            )}
+            {virtualRows.map((virtualRow) => {
+              const row = rows[virtualRow.index];
+              return (
+                <tr key={row.id}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td
+                      key={cell.id}
+                     onClick={() => {
+                        const val = cell.getValue() as string | null;
+                        if (val === null) return;
+                        const cellId = cell.id;
+
+                        import("@tauri-apps/plugin-clipboard-manager").then(({ writeText, readText, clear }) => {
+                          writeText(val).then(() => {
+                            setCopiedCell(cellId);
+                            setTimeout(() => setCopiedCell(null), 800);
+
+                            setTimeout(() => {
+                              readText().then(current => {
+                                if (current === val) {
+                                  clear().catch(() => {});
+                                }
+                              }).catch(() => {});
+                            }, 60_000);
+
+                          }).catch(() => {});
+                        });
+                      }}
+                      title="Click to copy"
+                      style={{
+                        padding: "5px 14px",
+                        borderBottom: "1px solid #1e2026",
+                        color: "#e8e9ec",
+                        whiteSpace: "nowrap",
+                        maxWidth: 320,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        cursor: "pointer",
+                        background: copiedCell === cell.id
+                          ? "rgba(108,99,255,0.15)"
+                          : virtualRow.index % 2 === 0 ? "#0e0f11" : "#13141a",
+                        transition: "background .15s",
+                      }}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+            {paddingBottom > 0 && (
+              <tr><td style={{ height: paddingBottom }} colSpan={columns.length} /></tr>
+            )}
+          </tbody>
+        </table>
+
+        {rows.length === 0 && filterText && (
+          <div style={{ padding: "24px 14px", color: "#4b5563", fontSize: 13, textAlign: "center" }}>
+            No rows match "{filterText}"
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -503,6 +665,15 @@ function useResizable(initial: number, min: number, max: number) {
   return { size, onMouseDown };
 }
 
+function useDebounce<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState<T>(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
 // ---- Main App ---------------------------------------------
 function App() {
   const editorRef = useRef<any>(null);
@@ -532,6 +703,11 @@ function App() {
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const schemaRef = useRef<SchemaResult | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [locked, setLocked] = useState(false);
+  const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const LOCK_AFTER_MS = 15 * 60 * 1000; // 15 minutes
 
   // Keep refs in sync
   useEffect(() => { activeConnectionRef.current = activeConnection; }, [activeConnection]);
@@ -584,6 +760,28 @@ function App() {
     }
   }
 
+  // Inactivity lock
+  function resetInactivityTimer() {
+    if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    if (locked) return; // don't reset if already locked
+    inactivityTimer.current = setTimeout(() => {
+      setLocked(true);
+    }, LOCK_AFTER_MS);
+  }
+
+  useEffect(() => {
+    const events = ["mousemove", "keydown", "mousedown", "touchstart"];
+    events.forEach(e => window.addEventListener(e, resetInactivityTimer));
+    resetInactivityTimer(); // start the timer on mount
+
+    return () => {
+      events.forEach(e => window.removeEventListener(e, resetInactivityTimer));
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+    };
+  }, [locked]);
+  //END Inactivity lock
+
+  //Open File Function
   async function openFile() {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -607,7 +805,9 @@ function App() {
     }
   }
 
+  //Run Query Function
   const runQuery = useCallback(async () => {
+    if (locked) return; // prevent running queries when locked
     const sql = editorRef.current?.getValue()?.trim() ?? "";
     if (!sql) return;
 
@@ -616,49 +816,51 @@ function App() {
     setResult(null);
 
     const start = performance.now();
+    let historyConn: ConnectionConfig | null = null;
 
     try {
       let raw: string;
 
       if (activeFileRef.current) {
         if (joinTables.length > 0 && activeConnectionRef.current) {
-          // Join: file + DB tables
           const conn = activeConnectionRef.current;
           raw = await invoke<string>("query_file_with_db", {
-            filePath: activeFileRef.current.path,
+            filePath:   activeFileRef.current.path,
             sql,
             credentialRef: conn.credentialRef,
-            engine: conn.engine,
-            host: conn.host,
-            port: conn.port,
-            database: conn.database,
-            username: conn.username,
+            engine:     conn.engine,
+            host:       conn.host,
+            port:       conn.port,
+            database:   conn.database,
+            username:   conn.username,
             tableNames: joinTables.join(","),
-            sslMode: conn.sslMode ?? "prefer",
+            sslMode:    conn.sslMode ?? "prefer",
           });
         } else {
-          // Pure file query
           raw = await invoke<string>("query_file", {
             filePath: activeFileRef.current.path,
             sql,
           });
         }
       } else if (activeConnectionRef.current) {
-        // Database query
         const conn = activeConnectionRef.current;
+        historyConn = conn; // track for history saving after parse
+
         const connectionString = await invoke<string>("build_connection_string", {
           credentialRef: conn.credentialRef,
-          engine: conn.engine,
-          host: conn.host,
-          port: conn.port,
-          database: conn.database,
-          username: conn.username,
-          sslMode: conn.sslMode ?? "prefer",
+          engine:        conn.engine,
+          host:          conn.host,
+          port:          conn.port,
+          database:      conn.database,
+          username:      conn.username,
+          sslMode:       conn.sslMode ?? "prefer",
         });
+
         raw = await invoke<string>("execute_query", {
           connectionString,
           sql,
-          engine: conn.engine,
+          engine:   conn.engine,
+          readOnly: conn.readOnly ?? false,
         });
       } else {
         alert("Select a connection or open a file first");
@@ -669,11 +871,23 @@ function App() {
       const ms = Math.round(performance.now() - start);
       setDuration(ms);
 
+      // Save to history after parse — single source of truth
+      if (historyConn) {
+        await saveToHistory(
+          historyConn,
+          sql,
+          ms,
+          parsed.rowCount ?? 0,
+          !parsed.error
+        );
+        // Refresh history panel if it's open
+        if (showHistory) loadHistory(historyConn);
+      }
+
       if (parsed.error) {
         setError(parsed.error);
       } else {
         setResult(parsed);
-        // Auto-clear results after 5 minutes
         if (resultClearTimer.current) clearTimeout(resultClearTimer.current);
         resultClearTimer.current = setTimeout(() => {
           setResult(null);
@@ -685,7 +899,8 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }, [joinTables]);
+  }, [joinTables, showHistory, locked]);
+  //End Run Query Function
 
   const handleEditorMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
@@ -779,12 +994,109 @@ async function loadSchema(conn: ConnectionConfig) {
   }
 }
 
+async function saveToHistory(
+  conn: ConnectionConfig,
+  sql: string,
+  durationMs: number,
+  rowCount: number,
+  success: boolean
+) {
+  try {
+    // Use setTimeout to ensure this runs after execute_query fully completes
+    await new Promise(resolve => setTimeout(resolve, 0));
+    
+    const result = await invoke<boolean>("add_history_entry", {
+      connectionId:   conn.id,
+      connectionName: conn.name,
+      sql:            sql.trim(),
+      executedAt:     Date.now(),
+      durationMs,
+      rowCount,
+      success,
+    });
+    console.log("History save result:", result);
+  } catch (e) {
+    console.error("Failed to save history:", e);
+  }
+}
+
+async function loadHistory(conn: ConnectionConfig | null) {
+  try {
+    console.log("Loading history for:", conn?.id ?? "all");
+    const raw = await invoke<string>("get_history", {
+      connectionId: conn?.id ?? "",
+      limit: 100,
+    });
+    console.log("History raw:", raw);
+    const parsed = JSON.parse(raw);
+    console.log("Loading with conn?.id:", conn?.id ?? "empty");
+    console.log("History save result:", result);
+    setHistory(parsed.entries ?? []);
+  } catch (e) {
+    console.error("Failed to load history:", e);
+  }
+}
+
   return (
     <div style={{
       display: "flex", height: "100vh", width: "100vw",
       background: "#0e0f11", color: "#e8e9ec", fontFamily: "monospace",
       overflow: "hidden", boxSizing: "border-box",
     }}>
+
+      {/* Lock overlay */}
+      {locked && (
+        <div
+          onClick={() => {
+            setLocked(false);
+            resetInactivityTimer();
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 9999,
+            background: "rgba(14,15,17,0.92)",
+            backdropFilter: "blur(12px)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            userSelect: "none",
+          }}
+        >
+          <div style={{
+            fontSize: 48,
+            marginBottom: 24,
+          }}>
+            🔒
+          </div>
+          <div style={{
+            fontSize: 20,
+            fontWeight: 700,
+            color: "#e8e9ec",
+            marginBottom: 8,
+            fontFamily: "monospace",
+          }}>
+            DevSql is locked
+          </div>
+          <div style={{
+            fontSize: 13,
+            color: "#6b7280",
+            fontFamily: "monospace",
+          }}>
+            Click anywhere to unlock
+          </div>
+          <div style={{
+            marginTop: 32,
+            fontSize: 11,
+            color: "#374151",
+            fontFamily: "monospace",
+          }}>
+            Locked after 15 minutes of inactivity
+          </div>
+        </div>
+      )}
 
       {/* Sidebar */}
       <div style={{
@@ -1050,18 +1362,28 @@ async function loadSchema(conn: ConnectionConfig) {
         }}>
           {/* Active connection pill */}
           {activeConnection && (
-            <div style={{
-              display: "flex", alignItems: "center", gap: 8, padding: "4px 10px",
-              background: "#1e2026", borderRadius: 6,
-              border: `1px solid ${activeConnection.color}44`,
-              minWidth: 0, overflow: "hidden",
-            }}>
-              <div style={{ width: 8, height: 8, borderRadius: "50%", background: activeConnection.color, flexShrink: 0 }} />
-              <span style={{ fontSize: 12, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {activeConnection.name}
-              </span>
-              <EngineBadge engine={activeConnection.engine} />
-            </div>
+              <div style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "4px 10px",
+                  background: "#1e2026", borderRadius: 6,
+                  border: `1px solid ${activeConnection.color}44`,
+                  minWidth: 0, overflow: "hidden",
+                }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: activeConnection.color, flexShrink: 0 }} />
+                  <span style={{ fontSize: 12, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {activeConnection.name}
+                  </span>
+                  <EngineBadge engine={activeConnection.engine} />
+                  {activeConnection.readOnly && (
+                    <span style={{
+                      fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
+                      background: "rgba(245,158,11,0.12)", color: "#f59e0b",
+                      textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "monospace",
+                      flexShrink: 0,
+                    }}>
+                      read-only
+                    </span>
+                  )}
+                </div>
           )}
 
           {/* Active file pill */}
@@ -1095,6 +1417,25 @@ async function loadSchema(conn: ConnectionConfig) {
           >
             {loading ? "Running..." : "▶ Run (Cmd+Enter)"}
           </button>
+          <button
+            onClick={() => {
+              setShowHistory(h => !h);
+              if (!showHistory) loadHistory(activeConnectionRef.current);
+            }}
+            style={{
+              padding: "6px 14px",
+              background: showHistory ? "#1e2026" : "none",
+              color: showHistory ? "#e8e9ec" : "#6b7280",
+              border: "1px solid #2d2f36",
+              borderRadius: 6,
+              cursor: "pointer",
+              fontSize: 12,
+              fontFamily: "monospace",
+              flexShrink: 0,
+            }}
+          >
+            ⏱ History
+          </button>
           {duration !== null && !loading && (
             <span style={{ color: "#6b7280", fontSize: 11, whiteSpace: "nowrap" }}>
               {result ? `${result.rowCount} rows · ` : ""}{duration}ms
@@ -1106,6 +1447,95 @@ async function loadSchema(conn: ConnectionConfig) {
             </span>
           )}
         </div>
+        
+        {/* History panel — only shown when a connection is active and history is toggled on */}
+        {showHistory && (
+          <div style={{
+            borderBottom: "1px solid #1e2026",
+            background: "#13141a",
+            maxHeight: 240,
+            overflow: "auto",
+            flexShrink: 0,
+          }}>
+            <div style={{
+              padding: "6px 14px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              borderBottom: "1px solid #1e2026",
+              position: "sticky",
+              top: 0,
+              background: "#13141a",
+            }}>
+              <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+                Recent queries
+              </span>
+              <button
+                onClick={async () => {
+                  await invoke("clear_history", {
+                    connectionId: activeConnectionRef.current?.id ?? ""
+                  });
+                  setHistory([]);
+                }}
+                style={{
+                  background: "none", border: "none", color: "#6b7280",
+                  cursor: "pointer", fontSize: 11, fontFamily: "monospace",
+                }}
+              >
+                Clear
+              </button>
+            </div>
+
+            {history.length === 0 ? (
+              <div style={{ padding: "12px 14px", color: "#4b5563", fontSize: 12, fontFamily: "monospace" }}>
+                No history yet
+              </div>
+            ) : (
+              history.map(entry => (
+                <div
+                  key={entry.id}
+                  onClick={() => {
+                    editorRef.current?.setValue(entry.sql);
+                    setShowHistory(false);
+                  }}
+                  style={{
+                    padding: "8px 14px",
+                    borderBottom: "1px solid #1a1b21",
+                    cursor: "pointer",
+                    transition: "background .1s",
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = "#1e2026")}
+                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                >
+                  <div style={{
+                    fontSize: 11,
+                    color: entry.success ? "#9ca3af" : "#ef4444",
+                    fontFamily: "monospace",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    marginBottom: 3,
+                  }}>
+                    {entry.sql}
+                  </div>
+                  <div style={{
+                    display: "flex",
+                    gap: 10,
+                    fontSize: 10,
+                    color: "#4b5563",
+                    fontFamily: "monospace",
+                  }}>
+                    <span>{entry.connectionName}</span>
+                    <span>{entry.durationMs}ms</span>
+                    <span>{entry.rowCount} rows</span>
+                    <span>{new Date(entry.executedAt).toLocaleTimeString()}</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+        {/*End History Panel */}
 
         {/* Join tables panel — only shown when a file is active */}
         {activeFile && (

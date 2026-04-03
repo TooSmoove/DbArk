@@ -2,10 +2,13 @@
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "default",
   "description": "DevSql default capability set — minimal permissions only",
-  "windows": [ "main" ],
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-clear"
   ]
 }
