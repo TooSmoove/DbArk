@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, act } from "react";
 import Editor from "@monaco-editor/react";
 import type { OnMount } from "@monaco-editor/react";
 import {
@@ -78,6 +78,34 @@ interface HistoryEntry {
   success: boolean;
 }
 
+interface Tab {
+  id: string;
+  title: string;
+  sql: string;
+  connection: ConnectionConfig | null;
+  file: FileSession | null;
+  result: QueryResult | null;
+  error: string | null;
+  loading: boolean;
+  duration: number | null;
+  joinTables: string[];
+}
+
+function createTab(id?: string): Tab {
+  return {
+    id:         id ?? `tab-${Date.now()}`,
+    title:      "New tab",
+    sql:        "",
+    connection: null,
+    file:       null,
+    result:     null,
+    error:      null,
+    loading:    false,
+    duration:   null,
+    joinTables: [],
+  };
+}
+
 // ---- Engine badge -----------------------------------------
 function EngineBadge({ engine }: { engine: string }) {
   const colors: Record<string, string> = {
@@ -121,8 +149,8 @@ function JoinTablesPanel({
 
   useEffect(() => {
     if (!open || !activeConnection) return;
-    setLoading(true);
-    setError(null);
+    setLoading(true);  // ← local state, not updateActiveTab
+    setError(null);    // ← local state, not updateActiveTab
     invoke<string>("list_db_tables", {
       credentialRef: activeConnection.credentialRef,
       engine: activeConnection.engine,
@@ -264,13 +292,14 @@ function AddConnectionForm({
     fontSize: 11, color: "#6b7280", display: "block", marginBottom: 8, width: "100%",
   };
 
+  // Save connection handler
   async function handleSave() {
     if (!form.name || !form.host || !form.database || !form.username) {
       setError("Name, host, database and username are required");
       return;
     }
     setSaving(true);
-    setError(null);
+    setError(null); // ← local state, not updateActiveTab
     try {
       const defaultPort: Record<string, number> = {
         mysql: 3306, sqlserver: 1433, postgres: 5432, sqlite: 0,
@@ -682,20 +711,15 @@ function App() {
   const resultClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
-  const [activeConnection, setActiveConnection] = useState<ConnectionConfig | null>(null);
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [files, setFiles] = useState<FileSession[]>([]);
-  const [activeFile, setActiveFile] = useState<FileSession | null>(null);
-  const [joinTables, setJoinTables] = useState<string[]>([]);
-  const [result, setResult] = useState<QueryResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [duration, setDuration] = useState<number | null>(null);
+  const [tabs, setTabs] = useState<Tab[]>([createTab("tab-1")]);
+  const [activeTabId, setActiveTabId] = useState("tab-1");
+  const [recentFiles, setRecentFiles] = useState<FileSession[]>([]);
+  const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
   const [sidebarWidth, setSidebarWidth] = useState(220);
   const sidebarDragging = useRef(false);
   const sidebarStartX = useRef(0);
   const sidebarStartW = useRef(220);
-
+  const [showAddForm, setShowAddForm] = useState(false);
   const { size: editorHeight, onMouseDown: onEditorDragStart } = useResizable(220, 80, 600);
 
   const CONNECTIONS_FOLDER = "C:/Users/keith/source/repos/DevSql/connections";
@@ -708,10 +732,13 @@ function App() {
   const [locked, setLocked] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const LOCK_AFTER_MS = 15 * 60 * 1000; // 15 minutes
+  const activeTabRef = useRef<Tab>(activeTab);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
 
   // Keep refs in sync
-  useEffect(() => { activeConnectionRef.current = activeConnection; }, [activeConnection]);
-  useEffect(() => { activeFileRef.current = activeFile; }, [activeFile]);
+  useEffect(() => { activeConnectionRef.current = activeTab.connection; }, [activeTab.connection]);
+  useEffect(() => { activeFileRef.current = activeTab.file; }, [activeTab.file]);
 
   // Sidebar resize
   useEffect(() => {
@@ -747,17 +774,30 @@ function App() {
   useEffect(() => { loadConnections(); }, []);
   useEffect(() => { schemaRef.current = schema; }, [schema]);
 
+  useEffect(() => {
+    if (showHistory) {
+      loadHistory(activeTab.connection);
+    }
+  }, [activeTabId, activeTab.connection]);
+
   async function loadConnections() {
     try {
       const raw = await invoke<string>("list_connections", { folderPath: CONNECTIONS_FOLDER });
       const parsed: ConnectionListResult = JSON.parse(raw);
       setConnections(parsed.connections ?? []);
       if (parsed.connections?.length > 0 && !activeConnectionRef.current) {
-        setActiveConnection(parsed.connections[0]);
+        updateActiveTab({ connection: parsed.connections[0], title: parsed.connections[0].name });
       }
     } catch (e) {
       console.error("Failed to load connections:", e);
     }
+  }
+
+  // Update active tab helper
+  function updateActiveTab(updates: Partial<Tab>) {
+    setTabs(prev => prev.map(t =>
+      t.id === activeTabId ? { ...t, ...updates } : t
+    ));
   }
 
   // Inactivity lock
@@ -790,15 +830,30 @@ function App() {
         filters: [{ name: "Data files", extensions: ["csv", "json", "xlsx"] }]
       });
       if (!selected || typeof selected !== "string") return;
+
       const name = selected.split(/[/\\]/).pop() ?? selected;
       const ext  = name.split(".").pop()?.toLowerCase() ?? "csv";
+
       const file: FileSession = {
-        id: `file-${Date.now()}`, name, path: selected,
+        id:   `file-${Date.now()}`,
+        name, path: selected,
         type: ext as "csv" | "json" | "xlsx",
       };
-      setFiles(f => [...f, file]);
-      setActiveFile(file);
-      setJoinTables([]);
+
+      setRecentFiles(f => {
+        const exists = f.find(x => x.path === selected);
+        return exists ? f : [file, ...f].slice(0, 10);
+      });
+
+      updateActiveTab({
+        file:       file,
+        connection: null,
+        title:      name,
+        joinTables: [],
+        result:     null,
+        error:      null,
+      });
+
       editorRef.current?.setValue("SELECT * FROM data LIMIT 100");
     } catch (e) {
       console.error("Failed to open file:", e);
@@ -807,13 +862,13 @@ function App() {
 
   //Run Query Function
   const runQuery = useCallback(async () => {
-    if (locked) return; // prevent running queries when locked
+    if (locked) return;
     const sql = editorRef.current?.getValue()?.trim() ?? "";
     if (!sql) return;
 
-    setLoading(true);
-    setError(null);
-    setResult(null);
+    const tab = activeTabRef.current;
+
+    updateActiveTab({ loading: true, error: null, result: null });
 
     const start = performance.now();
     let historyConn: ConnectionConfig | null = null;
@@ -821,11 +876,11 @@ function App() {
     try {
       let raw: string;
 
-      if (activeFileRef.current) {
-        if (joinTables.length > 0 && activeConnectionRef.current) {
-          const conn = activeConnectionRef.current;
+      if (tab.file) {
+        if (tab.joinTables.length > 0 && tab.connection) {
+          const conn = tab.connection;
           raw = await invoke<string>("query_file_with_db", {
-            filePath:   activeFileRef.current.path,
+            filePath:   tab.file.path,
             sql,
             credentialRef: conn.credentialRef,
             engine:     conn.engine,
@@ -833,18 +888,18 @@ function App() {
             port:       conn.port,
             database:   conn.database,
             username:   conn.username,
-            tableNames: joinTables.join(","),
+            tableNames: tab.joinTables.join(","),
             sslMode:    conn.sslMode ?? "prefer",
           });
         } else {
           raw = await invoke<string>("query_file", {
-            filePath: activeFileRef.current.path,
+            filePath: tab.file.path,
             sql,
           });
         }
-      } else if (activeConnectionRef.current) {
-        const conn = activeConnectionRef.current;
-        historyConn = conn; // track for history saving after parse
+      } else if (tab.connection) {
+        const conn = tab.connection;
+        historyConn = conn;
 
         const connectionString = await invoke<string>("build_connection_string", {
           credentialRef: conn.credentialRef,
@@ -863,43 +918,30 @@ function App() {
           readOnly: conn.readOnly ?? false,
         });
       } else {
+        updateActiveTab({ loading: false });
         alert("Select a connection or open a file first");
         return;
       }
 
       const parsed = JSON.parse(raw);
       const ms = Math.round(performance.now() - start);
-      setDuration(ms);
 
-      // Save to history after parse — single source of truth
+      updateActiveTab({
+        loading:  false,
+        duration: ms,
+        result:   parsed.error ? null : parsed,
+        error:    parsed.error ?? null,
+      });
+
       if (historyConn) {
-        await saveToHistory(
-          historyConn,
-          sql,
-          ms,
-          parsed.rowCount ?? 0,
-          !parsed.error
-        );
-        // Refresh history panel if it's open
+        await saveToHistory(historyConn, sql, ms, parsed.rowCount ?? 0, !parsed.error);
         if (showHistory) loadHistory(historyConn);
       }
 
-      if (parsed.error) {
-        setError(parsed.error);
-      } else {
-        setResult(parsed);
-        if (resultClearTimer.current) clearTimeout(resultClearTimer.current);
-        resultClearTimer.current = setTimeout(() => {
-          setResult(null);
-          setDuration(null);
-        }, 5 * 60 * 1000);
-      }
     } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
+      updateActiveTab({ loading: false, error: String(e) });
     }
-  }, [joinTables, showHistory, locked]);
+  }, [locked, showHistory, activeTabId]);
   //End Run Query Function
 
   const handleEditorMount: OnMount = (editor, monaco) => {
@@ -907,6 +949,35 @@ function App() {
 
       // Cmd+Enter to run
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runQuery());
+
+      // Cmd+T — new tab
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT, () => {
+        const newTab = createTab();
+        setTabs(prev => [...prev, newTab]);
+        setActiveTabId(newTab.id);
+        setTimeout(() => editorRef.current?.setValue(""), 0);
+      });
+
+      // Cmd+W — close tab
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
+        setTabs(prev => {
+          if (prev.length <= 1) return prev;
+          const idx     = prev.findIndex(t => t.id === activeTabId);
+          const newTabs = prev.filter(t => t.id !== activeTabId);
+          const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
+          setActiveTabId(nextTab.id);
+          setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
+          return newTabs;
+        });
+      });
+
+    // Save SQL to tab on every change
+    editor.onDidChangeModelContent(() => {
+      const sql = editor.getValue();
+      setTabs(prev => prev.map(t =>
+        t.id === activeTabId ? { ...t, sql } : t
+      ));
+    });
 
       // Register SQL autocomplete provider
       monaco.languages.registerCompletionItemProvider("sql", {
@@ -1020,7 +1091,12 @@ async function saveToHistory(
   }
 }
 
+//Load query history for a connection
 async function loadHistory(conn: ConnectionConfig | null) {
+  if (!conn) {
+    setHistory([]);
+    return;
+  }
   try {
     console.log("Loading history for:", conn?.id ?? "all");
     const raw = await invoke<string>("get_history", {
@@ -1030,7 +1106,7 @@ async function loadHistory(conn: ConnectionConfig | null) {
     console.log("History raw:", raw);
     const parsed = JSON.parse(raw);
     console.log("Loading with conn?.id:", conn?.id ?? "empty");
-    console.log("History save result:", result);
+    console.log("History save result:", activeTab.result);
     setHistory(parsed.entries ?? []);
   } catch (e) {
     console.error("Failed to load history:", e);
@@ -1143,9 +1219,14 @@ async function loadHistory(conn: ConnectionConfig | null) {
                   {/* Connection row */}
                   <div
                     onClick={() => {
-                      setActiveConnection(conn);
-                      setActiveFile(null);
-                      setJoinTables([]);
+                      updateActiveTab({
+                        connection: conn,
+                        file:       null,
+                        title:      conn.name,
+                        joinTables: [],
+                        result:     null,
+                        error:      null,
+                      });
                       setSchema(null);
                       setExpandedTables(new Set());
                       loadSchema(conn);
@@ -1155,9 +1236,9 @@ async function loadHistory(conn: ConnectionConfig | null) {
                       cursor: "pointer",
                       borderBottom: "1px solid #1e2026",
                       borderLeft: `3px solid ${
-                        activeConnection?.id === conn.id ? conn.color : "transparent"
+                        activeTab.connection?.id === conn.id ? conn.color : "transparent"
                       }`,
-                      background: activeConnection?.id === conn.id ? "#1e2026" : "transparent",
+                      background: activeTab.connection?.id === conn.id ? "#1e2026" : "transparent",
                       transition: "background .1s",
                     }}
                   >
@@ -1173,7 +1254,7 @@ async function loadHistory(conn: ConnectionConfig | null) {
                   </div>
 
                   {/* Schema tree — only shown for the active connection */}
-                  {activeConnection?.id === conn.id && (
+                  {activeTab.connection?.id === conn.id && (
                     <div style={{ background: "#0e0f11", borderBottom: "1px solid #1e2026" }}>
                       {schemaLoading && (
                         <div style={{ padding: "8px 14px", fontSize: 11, color: "#4b5563", fontFamily: "monospace" }}>
@@ -1309,20 +1390,30 @@ async function loadHistory(conn: ConnectionConfig | null) {
                 </button>
               </div>
 
-              {files.length === 0 ? (
+              {recentFiles.length === 0 ? (
                 <div style={{ padding: "6px 14px 10px", color: "#4b5563", fontSize: 11 }}>
                   Open a CSV or JSON file
                 </div>
               ) : (
-                files.map(file => (
+                recentFiles.map(file => (
                   <div
                     key={file.id}
-                    onClick={() => { setActiveFile(file); setJoinTables([]); editorRef.current?.setValue("SELECT * FROM data LIMIT 100"); }}
+                    onClick={() => {
+                      updateActiveTab({
+                        file:       file,
+                        connection: activeTab.connection, // keep connection for join panel
+                        title:      file.name,
+                        joinTables: [],
+                        result:     null,
+                        error:      null,
+                      });
+                      editorRef.current?.setValue("SELECT * FROM data LIMIT 100");
+                    }}
                     style={{
                       padding: "8px 14px", cursor: "pointer",
                       borderBottom: "1px solid #1e2026",
-                      borderLeft: `3px solid ${activeFile?.id === file.id ? "#10b981" : "transparent"}`,
-                      background: activeFile?.id === file.id ? "#1e2026" : "transparent",
+                      borderLeft: `3px solid ${activeTab.file?.id === file.id ? "#10b981" : "transparent"}`,
+                      background: activeTab.file?.id === file.id ? "#1e2026" : "transparent",
                     }}
                   >
                     <div style={{ fontSize: 12, fontWeight: 500, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>
@@ -1354,6 +1445,121 @@ async function loadHistory(conn: ConnectionConfig | null) {
       {/* Main content */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
 
+        {/* Tab bar */}
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          background: "#0e0f11",
+          borderBottom: "1px solid #1e2026",
+          overflowX: "auto",
+          flexShrink: 0,
+          minHeight: 38,
+        }}>
+          {tabs.map(tab => (
+            <div
+              key={tab.id}
+              onClick={() => {
+                setActiveTabId(tab.id);
+                // Restore editor content for this tab
+                setTimeout(() => editorRef.current?.setValue(tab.sql ?? ""), 0);
+              }}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "0 12px",
+                height: 38,
+                cursor: "pointer",
+                borderRight: "1px solid #1e2026",
+                borderBottom: `2px solid ${tab.id === activeTabId ? "#6c63ff" : "transparent"}`,
+                background: tab.id === activeTabId ? "#13141a" : "transparent",
+                flexShrink: 0,
+                maxWidth: 200,
+                minWidth: 120,
+                transition: "background .1s",
+              }}
+            >
+              {/* Connection colour dot */}
+              {tab.connection && (
+                <div style={{
+                  width: 6, height: 6, borderRadius: "50%",
+                  background: tab.connection.color, flexShrink: 0,
+                }} />
+              )}
+              {tab.file && (
+                <div style={{
+                  width: 6, height: 6, borderRadius: "50%",
+                  background: "#10b981", flexShrink: 0,
+                }} />
+              )}
+
+              {/* Tab title */}
+              <span style={{
+                fontSize: 12,
+                color: tab.id === activeTabId ? "#e8e9ec" : "#6b7280",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                flex: 1,
+                fontFamily: "monospace",
+              }}>
+                {tab.title}
+              </span>
+
+              {/* Close button — only show if more than one tab */}
+              {tabs.length > 1 && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const idx = tabs.findIndex(t => t.id === tab.id);
+                    const newTabs = tabs.filter(t => t.id !== tab.id);
+                    setTabs(newTabs);
+                    // Activate adjacent tab
+                    if (tab.id === activeTabId) {
+                      const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
+                      setActiveTabId(nextTab.id);
+                      setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
+                    }
+                  }}
+                  style={{
+                    background: "none", border: "none",
+                    color: "#4b5563", cursor: "pointer",
+                    fontSize: 14, lineHeight: 1,
+                    padding: "2px 4px", flexShrink: 0,
+                    borderRadius: 3,
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "#4b5563")}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+
+          {/* New tab button */}
+          <button
+            onClick={() => {
+              const newTab = createTab();
+              setTabs(prev => [...prev, newTab]);
+              setActiveTabId(newTab.id);
+              setTimeout(() => editorRef.current?.setValue(""), 0);
+            }}
+            style={{
+              background: "none", border: "none",
+              color: "#4b5563", cursor: "pointer",
+              fontSize: 18, lineHeight: 1,
+              padding: "0 12px", height: 38,
+              flexShrink: 0,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.color = "#e8e9ec")}
+            onMouseLeave={e => (e.currentTarget.style.color = "#4b5563")}
+            title="New tab (Cmd+T)"
+          >
+            +
+          </button>
+        </div>
+
         {/* Toolbar */}
         <div style={{
           display: "flex", alignItems: "center", gap: 10, padding: "8px 14px",
@@ -1361,19 +1567,19 @@ async function loadHistory(conn: ConnectionConfig | null) {
           flexShrink: 0, flexWrap: "wrap", minHeight: 44,
         }}>
           {/* Active connection pill */}
-          {activeConnection && (
+          {activeTab.connection && (
               <div style={{
                   display: "flex", alignItems: "center", gap: 8, padding: "4px 10px",
                   background: "#1e2026", borderRadius: 6,
-                  border: `1px solid ${activeConnection.color}44`,
+                  border: `1px solid ${activeTab.connection.color}44`,
                   minWidth: 0, overflow: "hidden",
                 }}>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: activeConnection.color, flexShrink: 0 }} />
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: activeTab.connection.color, flexShrink: 0 }} />
                   <span style={{ fontSize: 12, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {activeConnection.name}
+                    {activeTab.connection.name}
                   </span>
-                  <EngineBadge engine={activeConnection.engine} />
-                  {activeConnection.readOnly && (
+                  <EngineBadge engine={activeTab.connection.engine} />
+                  {activeTab.connection.readOnly && (
                     <span style={{
                       fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
                       background: "rgba(245,158,11,0.12)", color: "#f59e0b",
@@ -1387,35 +1593,35 @@ async function loadHistory(conn: ConnectionConfig | null) {
           )}
 
           {/* Active file pill */}
-          {activeFile && (
+          {activeTab.file && (
             <div style={{
               display: "flex", alignItems: "center", gap: 8, padding: "4px 10px",
               background: "#1e2026", borderRadius: 6, border: "1px solid rgba(16,185,129,0.3)",
             }}>
               <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981", flexShrink: 0 }} />
-              <span style={{ fontSize: 12, color: "#e8e9ec" }}>{activeFile.name}</span>
+              <span style={{ fontSize: 12, color: "#e8e9ec" }}>{activeTab.file.name}</span>
               <span style={{
                 fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
                 background: "rgba(16,185,129,0.12)", color: "#10b981",
                 textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "monospace",
               }}>
-                {activeFile.type}
+                {activeTab.file.type}
               </span>
             </div>
           )}
 
           <button
             onClick={runQuery}
-            disabled={loading || (!activeConnection && !activeFile)}
+            disabled={activeTab.loading || (!activeTab.connection && !activeTab.file)}
             style={{
               padding: "6px 14px",
-              background: loading || (!activeConnection && !activeFile) ? "#2d2f36" : "#6c63ff",
+              background: activeTab.loading || (!activeTab.connection && !activeTab.file) ? "#2d2f36" : "#6c63ff",
               color: "white", border: "none", borderRadius: 6,
-              cursor: loading || (!activeConnection && !activeFile) ? "not-allowed" : "pointer",
+              cursor: activeTab.loading || (!activeTab.connection && !activeTab.file) ? "not-allowed" : "pointer",
               fontSize: 12, fontFamily: "monospace", flexShrink: 0, whiteSpace: "nowrap",
             }}
           >
-            {loading ? "Running..." : "▶ Run (Cmd+Enter)"}
+            {activeTab.loading ? "Running..." : "▶ Run (Cmd+Enter)"}
           </button>
           <button
             onClick={() => {
@@ -1436,10 +1642,10 @@ async function loadHistory(conn: ConnectionConfig | null) {
           >
             ⏱ History
           </button>
-          {duration !== null && !loading && (
+          {activeTab.duration !== null && !activeTab.loading && (
             <span style={{ color: "#6b7280", fontSize: 11, whiteSpace: "nowrap" }}>
-              {result ? `${result.rowCount} rows · ` : ""}{duration}ms
-              {result?.truncated && (
+              {activeTab.result ? `${activeTab.result.rowCount} rows · ` : ""}{activeTab.duration}ms
+              {activeTab.result?.truncated && (
                 <span style={{ color: "#f59e0b", marginLeft: 8 }}>
                   ⚠ first 10,000 rows shown
                 </span>
@@ -1467,13 +1673,15 @@ async function loadHistory(conn: ConnectionConfig | null) {
               top: 0,
               background: "#13141a",
             }}>
-              <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
-                Recent queries
+             <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+                {activeTab.connection
+                  ? `${activeTab.connection.name} — recent queries`
+                  : "All recent queries"}
               </span>
               <button
                 onClick={async () => {
                   await invoke("clear_history", {
-                    connectionId: activeConnectionRef.current?.id ?? ""
+                    connectionId: activeTab.connection?.id ?? ""
                   });
                   setHistory([]);
                 }}
@@ -1538,10 +1746,10 @@ async function loadHistory(conn: ConnectionConfig | null) {
         {/*End History Panel */}
 
         {/* Join tables panel — only shown when a file is active */}
-        {activeFile && (
+        {activeTab.file && (
           <JoinTablesPanel
-            activeConnection={activeConnection}
-            onSelectionChange={setJoinTables}
+            activeConnection={activeTab.connection}
+            onSelectionChange={activeTab.joinTables}
           />
         )}
 
@@ -1572,22 +1780,22 @@ async function loadHistory(conn: ConnectionConfig | null) {
 
         {/* Results area */}
         <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column", minHeight: 0 }}>
-          {error && (
+          {activeTab.error && (
             <div style={{ padding: "10px 14px", background: "rgba(239,68,68,0.1)", borderBottom: "1px solid rgba(239,68,68,0.2)", color: "#ef4444", fontSize: 12, wordBreak: "break-word", flexShrink: 0 }}>
-              ❌ {error}
+              ❌ {activeTab.error}
             </div>
           )}
-          {result && result.rows.length === 0 && (
+          {activeTab.result && activeTab.result.rows.length === 0 && (
             <div style={{ padding: "16px", color: "#6b7280", fontSize: 13 }}>
               Query executed successfully — 0 rows returned
             </div>
           )}
-          {result && result.rows.length > 0 && <ResultsGrid result={result} />}
-          {!result && !error && !loading && (
+          {activeTab.result && activeTab.result.rows.length > 0 && <ResultsGrid result={activeTab.result} />}
+          {!activeTab.result && !activeTab.error && !activeTab.loading && (
             <div style={{ padding: "40px 16px", color: "#374151", fontSize: 13, textAlign: "center" }}>
-              {activeFile
+              {activeTab.file
                 ? "Write a query using \"data\" as the table name, or join DB tables above"
-                : activeConnection
+                : activeTab.connection
                 ? "Write a query and press Cmd+Enter to run it"
                 : "Select a connection or open a file to get started"}
             </div>
