@@ -1,9 +1,36 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use libloading::{Symbol};
 use std::ffi::{c_char, CStr, CString};
 use std::sync::OnceLock;
+
+use sha2::{Sha256, Digest};
+
+fn verify_dll(path: &str, expected_hex: &str) -> bool {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("FATAL: Could not read {}: {}", path, e);
+            return false;
+        }
+    };
+    let hash = hex::encode(Sha256::digest(&bytes));
+    if hash != expected_hex {
+        eprintln!("FATAL: Hash mismatch for {}", path);
+        eprintln!("  Expected: {}", expected_hex);
+        eprintln!("  Got:      {}", hash);
+        return false;
+    }
+    true
+}
+
+// DLL integrity hashes — regenerate after every DLL rebuild
+const HASH_CONNECTIONMANAGER: &str = "0875e229f45b6b732e2aecb12eaa8989a6a1f435b43330300ad8caec15cc0968";
+const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
+const HASH_QUERYEXECUTOR: &str = "c7b90b63eb1916ea36ddd7b8017e2ab24330550512df95e8c5fe496ec0c28680";
+const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
+const HASH_SCHEMAEXPLORER: &str = "cae8c9eb870ceeadfc956f0f05262f09883b184a701ab69f34e2e553838a5106";
+const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 
 static QUERY_EXECUTOR:     OnceLock<libloading::Library> = OnceLock::new();
 static CONNECTION_MANAGER: OnceLock<libloading::Library> = OnceLock::new();
@@ -122,15 +149,55 @@ fn delete_credential(target: String) -> bool {
 
 #[tauri::command]
 fn build_connection_string(
-    credential_ref: String, engine: String, host: String,
-    port: u16, database: String, username: String,
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
     ssl_mode: Option<String>,
+    sql_instance: Option<String>,
+    windows_auth: Option<bool>,
 ) -> Result<String, String> {
-    let entry = keyring::Entry::new(&credential_ref, &username)
-        .map_err(|e| e.to_string())?;
-    let password = entry.get_password().unwrap_or_default();
     let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+    let instance = sql_instance.unwrap_or_default();
+    let win_auth = windows_auth.unwrap_or(false);
+
+    // Only fetch password if not using Windows Auth
+    let password = if !win_auth {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        entry.get_password().unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     let conn_str = match engine.to_lowercase().as_str() {
+        "sqlserver" => {
+            let server = if !instance.is_empty() {
+                format!("{}\\{}", host, instance)
+            } else {
+                format!("{},{}", host, port)
+            };
+
+            let encrypt = match ssl.as_str() {
+                "require"     => "yes",
+                "verify-full" => "strict",
+                _             => "no",  // prefer and none both default to no for SQL Server
+            };
+
+            if win_auth {
+                format!(
+                    "Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
+                    server, database, encrypt
+                )
+            } else {
+                format!(
+                    "Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
+                    server, database, username, password, encrypt
+                )
+            }
+        },
         "mysql" => {
             let ssl_param = match ssl.as_str() {
                 "none"        => "SslMode=None;",
@@ -154,6 +221,7 @@ fn build_connection_string(
         "sqlite" => format!("Data Source={}", database),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
+
     Ok(conn_str)
 }
 
@@ -330,6 +398,23 @@ fn clear_history(connection_id: String) -> bool {
 }
 
 fn main() {
+
+     // Verify all native DLL integrity before loading
+    let dlls = [
+        ("natives/ConnectionManager.dll", HASH_CONNECTIONMANAGER),
+        ("natives/FileQueryEngine.dll",   HASH_FILEQUERYENGINE),
+        ("natives/QueryExecutor.dll",     HASH_QUERYEXECUTOR),
+        ("natives/QueryHistory.dll",      HASH_QUERYHISTORY),
+        ("natives/SchemaExplorer.dll",    HASH_SCHEMAEXPLORER),
+        ("natives/duckdb.dll",            HASH_DUCKDB),
+    ];
+
+    for (path, expected) in &dlls {
+        if !verify_dll(path, expected) {
+            eprintln!("FATAL: DLL integrity check failed for {} — aborting", path);
+            std::process::exit(1);
+        }
+    }
 
     get_query_executor();
     get_connection_manager();

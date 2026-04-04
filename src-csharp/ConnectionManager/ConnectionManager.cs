@@ -21,6 +21,8 @@ public class ConnectionConfig
     public string FilePath { get; set; } = "";
     public string SslMode { get; set; } = "prefer";
     public bool ReadOnly { get; set; } = false;
+    public string SqlInstance { get; set; } = "";
+    public bool WindowsAuth { get; set; } = false;
 }
 
 public class ConnectionListResult
@@ -42,6 +44,8 @@ public class SaveConnectionRequest
     public string FolderPath { get; set; } = "";
     public string SslMode { get; set; } = "prefer";
     public bool ReadOnly { get; set; } = false;
+    public string SqlInstance { get; set; } = "";
+    public bool WindowsAuth { get; set; } = false;
 }
 
 public static class ConnectionManagerLib
@@ -113,7 +117,7 @@ public static class ConnectionManagerLib
             if (!IsValidIdentifier(request.Database))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
 
-            if (!IsValidIdentifier(request.Username))
+            if (!request.WindowsAuth && !IsValidIdentifier(request.Username))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid username '{request.Username}' — only alphanumeric characters, underscores, hyphens, dots allowed");
 
             if (!IsValidEngine(request.Engine))
@@ -137,7 +141,10 @@ public static class ConnectionManagerLib
             }
 
             if (!Directory.Exists(folderPath))
+            {
                 Directory.CreateDirectory(folderPath);
+                SecureFolder(folderPath);
+            }
 
             // Generate a safe filename from the connection name
             string safeName = request.Name.ToLower().Replace(" ", "-");
@@ -160,6 +167,8 @@ public static class ConnectionManagerLib
                     credential_ref = "{credentialRef}"
                     ssl_mode = "{request.SslMode}"
                     read_only = {(request.ReadOnly ? "true" : "false")}
+                    sql_instance = "{request.SqlInstance}"
+                    windows_auth = {(request.WindowsAuth ? "true" : "false")}
 
                     [display]
                     color = "{request.Color}"
@@ -255,7 +264,9 @@ public static class ConnectionManagerLib
             Group = values.GetValueOrDefault("display.group", ""),
             FilePath = filePath,
             SslMode = values.GetValueOrDefault("connection.ssl_mode", "prefer"),
-            ReadOnly = values.GetValueOrDefault("connection.read_only", "false") == "true"
+            ReadOnly = values.GetValueOrDefault("connection.read_only", "false") == "true",
+            SqlInstance = values.GetValueOrDefault("connection.sql_instance", ""),
+            WindowsAuth = values.GetValueOrDefault("connection.windows_auth", "false") == "true"
         };
 
         // Validate all fields before returning
@@ -268,7 +279,7 @@ public static class ConnectionManagerLib
         if (config.Engine != "sqlite" && !IsValidIdentifier(config.Database))
             throw new Exception($"Invalid database value in {Path.GetFileName(filePath)}: '{config.Database}'");
 
-        if (!IsValidIdentifier(config.Username))
+        if (!config.WindowsAuth && !IsValidIdentifier(config.Username))
             throw new Exception($"Invalid username value in {Path.GetFileName(filePath)}: '{config.Username}'");
 
         if (!IsValidEngine(config.Engine))
@@ -340,6 +351,33 @@ public static class ConnectionManagerLib
         }
 
         return result;
+    }
+    private static void SecureFolder(string folderPath)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            var info = new System.IO.DirectoryInfo(folderPath);
+            var security = info.GetAccessControl();
+
+            // Remove inherited permissions
+            security.SetAccessRuleProtection(true, false);
+
+            // Add current user with full control only
+            string currentUser = System.Security.Principal.WindowsIdentity
+                .GetCurrent().Name;
+            security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                currentUser,
+                System.Security.AccessControl.FileSystemRights.FullControl,
+                System.Security.AccessControl.InheritanceFlags.ContainerInherit |
+                System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                System.Security.AccessControl.PropagationFlags.None,
+                System.Security.AccessControl.AccessControlType.Allow
+            ));
+
+            info.SetAccessControl(security);
+        }
+        catch { /* Non-fatal — log and continue */ }
     }
 }
 

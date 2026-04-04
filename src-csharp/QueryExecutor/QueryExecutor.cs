@@ -129,6 +129,7 @@ public static class QueryExecutor
                     {
                         "postgres" => ExecutePostgres(connectionString, stmt),
                         "sqlite" => ExecuteSqlite(connectionString, stmt),
+                        "sqlserver" => SqlServerExecutor.Execute(connectionString, stmt, false),
                         _ => ExecuteMySql(connectionString, stmt),
                     };
                 }
@@ -140,6 +141,7 @@ public static class QueryExecutor
             {
                 "postgres" => ExecutePostgres(connectionString, lastStatement),
                 "sqlite" => ExecuteSqlite(connectionString, lastStatement),
+                "sqlserver" => SqlServerExecutor.Execute(connectionString, lastStatement, readOnly),
                 _ => ExecuteMySql(connectionString, lastStatement),
             };
         }
@@ -156,6 +158,7 @@ public static class QueryExecutor
         using var conn = new MySqlConnection(connectionString);
         conn.Open();
         using var cmd = conn.CreateCommand();
+        cmd.CommandTimeout = 30;
         cmd.CommandText = sql;
         using var reader = cmd.ExecuteReader();
         return SerialiseReader(reader);
@@ -166,6 +169,7 @@ public static class QueryExecutor
         using var conn = new NpgsqlConnection(connectionString);
         conn.Open();
         using var cmd = conn.CreateCommand();
+        cmd.CommandTimeout = 30;
         cmd.CommandText = sql;
         using var reader = cmd.ExecuteReader();
         return SerialiseReader(reader);

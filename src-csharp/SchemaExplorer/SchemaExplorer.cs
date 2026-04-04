@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Data.SqlClient;
 using MySqlConnector;
 using Npgsql;
 
@@ -53,6 +54,7 @@ public static class SchemaExplorerLib
                 "mysql" => GetMySqlSchema(connectionString),
                 "postgres" => GetPostgresSchema(connectionString),
                 "sqlite" => GetSqliteSchema(connectionString),
+                "sqlserver" => GetSqlServerSchema(connectionString),
                 _ => throw new Exception($"Unsupported engine: {engine}")
             };
 
@@ -271,6 +273,58 @@ public static class SchemaExplorerLib
         return tables;
     }
 
+    private static List<TableInfo> GetSqlServerSchema(string connectionString)
+    {
+        var tables = new Dictionary<string, TableInfo>();
+
+        // Use ODBC for SQL Server
+        var tableResult = SqlServerOdbc.Query(connectionString, @"
+        SELECT TABLE_NAME, TABLE_SCHEMA
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE'
+        ORDER BY TABLE_NAME");
+
+        foreach (var row in tableResult)
+        {
+            var name = row[0] ?? "";
+            if (string.IsNullOrEmpty(name)) continue;
+            tables[name] = new TableInfo { Name = name, Schema = row[1] ?? "" };
+        }
+
+        var colResult = SqlServerOdbc.Query(connectionString, @"
+        SELECT
+            c.TABLE_NAME,
+            c.COLUMN_NAME,
+            c.DATA_TYPE,
+            c.IS_NULLABLE,
+            CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        LEFT JOIN (
+            SELECT ku.TABLE_NAME, ku.COLUMN_NAME
+            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
+                ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
+            WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+        ) pk ON pk.TABLE_NAME = c.TABLE_NAME
+            AND pk.COLUMN_NAME = c.COLUMN_NAME
+        ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION");
+
+        foreach (var row in colResult)
+        {
+            var tableName = row[0] ?? "";
+            if (!tables.ContainsKey(tableName)) continue;
+            tables[tableName].Columns.Add(new ColumnInfo
+            {
+                Name = row[1] ?? "",
+                DataType = row[2] ?? "",
+                IsNullable = row[3] == "YES",
+                IsPrimaryKey = row[4] == "1"
+            });
+        }
+
+        return new List<TableInfo>(tables.Values);
+    }
+
     // ---- winsqlite3 P/Invoke ----------------------------------
 
     private const string SqliteDll = "winsqlite3.dll";
@@ -299,4 +353,80 @@ public static class SchemaExplorerLib
 
     [DllImport(SqliteDll, EntryPoint = "sqlite3_column_int")]
     private static extern int SqliteColumnInt(IntPtr stmt, int col);
+}
+internal static class SqlServerOdbc
+{
+    private const short SQL_SUCCESS = 0;
+    private const short SQL_SUCCESS_WITH_INFO = 1;
+    private const short SQL_HANDLE_ENV = 1;
+    private const short SQL_HANDLE_DBC = 2;
+    private const short SQL_HANDLE_STMT = 3;
+    private const int SQL_ATTR_ODBC_VERSION = 200;
+    private const int SQL_OV_ODBC3 = 3;
+    private const short SQL_NTS = -3;
+    private const short SQL_C_WCHAR = -8;
+    private const int SQL_NULL_DATA = -1;
+    private const string OdbcDll = "odbc32.dll";
+
+    [DllImport(OdbcDll)] static extern short SQLAllocHandle(short t, IntPtr i, out IntPtr o);
+    [DllImport(OdbcDll)] static extern short SQLSetEnvAttr(IntPtr h, int a, IntPtr v, int l);
+    [DllImport(OdbcDll)] static extern short SQLDriverConnectW(IntPtr c, IntPtr w, [MarshalAs(UnmanagedType.LPWStr)] string s, short sl, IntPtr o, short ol, out short al, short d);
+    [DllImport(OdbcDll)] static extern short SQLAllocStmt(IntPtr c, out IntPtr s);
+    [DllImport(OdbcDll)] static extern short SQLExecDirectW(IntPtr s, [MarshalAs(UnmanagedType.LPWStr)] string q, int l);
+    [DllImport(OdbcDll)] static extern short SQLNumResultCols(IntPtr s, out short n);
+    [DllImport(OdbcDll)] static extern short SQLFetch(IntPtr s);
+    [DllImport(OdbcDll)] static extern short SQLGetData(IntPtr s, short c, short t, IntPtr v, int b, out int ind);
+    [DllImport(OdbcDll)] static extern short SQLFreeHandle(short t, IntPtr h);
+    [DllImport(OdbcDll)] static extern short SQLDisconnect(IntPtr h);
+
+    public static List<string?[]> Query(string connectionString, string sql)
+    {
+        IntPtr hEnv = IntPtr.Zero, hDbc = IntPtr.Zero, hStmt = IntPtr.Zero;
+        var results = new List<string?[]>();
+
+        try
+        {
+            SQLAllocHandle(SQL_HANDLE_ENV, IntPtr.Zero, out hEnv);
+            SQLSetEnvAttr(hEnv, SQL_ATTR_ODBC_VERSION, new IntPtr(SQL_OV_ODBC3), 0);
+            SQLAllocHandle(SQL_HANDLE_DBC, hEnv, out hDbc);
+
+            short outLen;
+            short rc = SQLDriverConnectW(hDbc, IntPtr.Zero, connectionString,
+                SQL_NTS, IntPtr.Zero, 0, out outLen, 0);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                return results;
+
+            SQLAllocStmt(hDbc, out hStmt);
+            rc = SQLExecDirectW(hStmt, sql, SQL_NTS);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                return results;
+
+            SQLNumResultCols(hStmt, out short colCount);
+
+            IntPtr buf = Marshal.AllocHGlobal(4096);
+            try
+            {
+                while (SQLFetch(hStmt) == SQL_SUCCESS)
+                {
+                    var row = new string?[colCount];
+                    for (short i = 1; i <= colCount; i++)
+                    {
+                        SQLGetData(hStmt, i, SQL_C_WCHAR, buf, 4096, out int ind);
+                        row[i - 1] = ind == SQL_NULL_DATA ? null
+                            : Marshal.PtrToStringUni(buf, ind / 2);
+                    }
+                    results.Add(row);
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+        finally
+        {
+            if (hStmt != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+            if (hDbc != IntPtr.Zero) { SQLDisconnect(hDbc); SQLFreeHandle(SQL_HANDLE_DBC, hDbc); }
+            if (hEnv != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_ENV, hEnv);
+        }
+
+        return results;
+    }
 }

@@ -27,6 +27,8 @@ interface ConnectionConfig {
   filePath: string;
   sslMode: string;
   readOnly: boolean;
+  sqlInstance: string;
+  windowsAuth: boolean;
 }
 
 interface ConnectionListResult {
@@ -159,6 +161,8 @@ function JoinTablesPanel({
       database: activeConnection.database,
       username: activeConnection.username,
       sslMode: activeConnection.sslMode ?? "prefer",
+      sqlInstance: activeConnection.sqlInstance ?? "",
+      windowsAuth: activeConnection.windowsAuth ?? false,
     })
       .then((result) => {
         const parsed = JSON.parse(result);
@@ -277,7 +281,7 @@ function AddConnectionForm({
   const [form, setForm] = useState({
     name: "", engine: "mysql", host: "", port: "", database: "",
     username: "", password: "", color: "#6c63ff", group: "",
-    sslMode: "prefer", readOnly: false,
+    sslMode: "prefer", readOnly: false, sqlInstance: "", windowsAuth: false
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -294,10 +298,18 @@ function AddConnectionForm({
 
   // Save connection handler
   async function handleSave() {
-    if (!form.name || !form.host || !form.database || !form.username) {
-      setError("Name, host, database and username are required");
+    if (!form.name || !form.host || !form.database) {
+      setError("Name, host and database are required");
       return;
     }
+    
+    // Username only required when not using Windows Auth
+    if (!form.windowsAuth && !form.username) {
+      setError("Username is required for SQL authentication");
+      return;
+    }
+
+
     setSaving(true);
     setError(null); // ← local state, not updateActiveTab
     try {
@@ -309,7 +321,7 @@ function AddConnectionForm({
         port: parseInt(form.port) || defaultPort[form.engine] || 3306,
         database: form.database, username: form.username,
         color: form.color, group: form.group, folderPath: connectionsFolder,
-        sslMode: form.sslMode, readOnly: form.readOnly,
+        sslMode: form.sslMode, readOnly: form.readOnly, sqlInstance: form.sqlInstance, windowsAuth: form.windowsAuth,
       };
       const result = await invoke<string>("save_connection", {
         requestJson: JSON.stringify(request),
@@ -337,20 +349,22 @@ function AddConnectionForm({
         Add connection
       </div>
 
-      {[
-        { label: "Name", key: "name", placeholder: "My Database", type: "text" },
-        { label: "Host", key: "host", placeholder: "localhost", type: "text" },
-        { label: "Port", key: "port", placeholder: "3306", type: "text" },
-        { label: "Database", key: "database", placeholder: "mydb", type: "text" },
-        { label: "Username", key: "username", placeholder: "root", type: "text" },
-        { label: "Password", key: "password", placeholder: "••••••••", type: "password" },
+     {[
+        { label: "Name",     key: "name",     placeholder: "My Database", type: "text" },
+        { label: "Host",     key: "host",     placeholder: "localhost",   type: "text" },
+        { label: "Port",     key: "port",     placeholder: "3306",        type: "text" },
+        { label: "Database", key: "database", placeholder: "mydb",        type: "text" },
+        ...(!form.windowsAuth ? [
+          { label: "Username", key: "username", placeholder: "root",     type: "text" },
+          { label: "Password", key: "password", placeholder: "••••••••", type: "password" },
+        ] : []),
         { label: "Group", key: "group", placeholder: "Production", type: "text" },
       ].map(({ label, key, placeholder, type }) => (
         <label key={key} style={labelStyle}>
           {label}
           <input
             style={fieldStyle} type={type}
-            value={form[key as keyof typeof form]}
+            value={form[key as keyof typeof form] as string}
             onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
             placeholder={placeholder}
           />
@@ -367,6 +381,37 @@ function AddConnectionForm({
           <option value="sqlite">SQLite</option>
         </select>
       </label>
+
+      {/*SQL Server Specific Settings*/}
+      {form.engine === "sqlserver" && (
+        <>
+          <label style={labelStyle}>
+            Instance Name <span style={{ color: "#4b5563" }}>(optional)</span>
+            <input
+              style={fieldStyle}
+              type="text"
+              placeholder="SQLEXPRESS"
+              value={form.sqlInstance}
+              onChange={e => setForm(f => ({ ...f, sqlInstance: e.target.value }))}
+            />
+          </label>
+
+          <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={form.windowsAuth}
+              onChange={e => setForm(f => ({ ...f, windowsAuth: e.target.checked }))}
+              style={{ width: 14, height: 14, cursor: "pointer" }}
+            />
+            <div>
+              <div style={{ fontSize: 12, color: "#e8e9ec", marginBottom: 2 }}>Windows Authentication</div>
+              <div style={{ fontSize: 10, color: "#4b5563" }}>
+                Use current Windows user — no password required
+              </div>
+            </div>
+          </label>
+        </>
+      )}
 
       <label style={labelStyle}>
         SSL Mode
@@ -441,8 +486,8 @@ function ResultsGrid({ result }: { result: QueryResult }) {
 
   const columns = result.columns.map((col, i) =>
     columnHelper.accessor((row) => row[i], {
-      id: col,
-      header: col,
+      id: col && col.trim() ? `${col}_${i}` : `col_${i}`, // ← always unique
+      header: col && col.trim() ? col : `(col ${i + 1})`,  // ← friendly display name
       cell: (info) => {
         const val = info.getValue();
         if (val === null)
@@ -706,9 +751,6 @@ function useDebounce<T>(value: T, delay: number): T {
 // ---- Main App ---------------------------------------------
 function App() {
   const editorRef = useRef<any>(null);
-  const activeConnectionRef = useRef<ConnectionConfig | null>(null);
-  const activeFileRef = useRef<FileSession | null>(null);
-  const resultClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
   const [tabs, setTabs] = useState<Tab[]>([createTab("tab-1")]);
@@ -722,7 +764,7 @@ function App() {
   const [showAddForm, setShowAddForm] = useState(false);
   const { size: editorHeight, onMouseDown: onEditorDragStart } = useResizable(220, 80, 600);
 
-  const CONNECTIONS_FOLDER = "C:/Users/keith/source/repos/DevSql/connections";
+const [connectionsFolder, setConnectionsFolder] = useState("");
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
@@ -733,13 +775,16 @@ function App() {
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const LOCK_AFTER_MS = 15 * 60 * 1000; // 15 minutes
   const activeTabRef = useRef<Tab>(activeTab);
-  
+  const runQueryRef = useRef<() => Promise<void>>(async () => {});
+  const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const schemaCache = useRef<Map<string, SchemaResult>>(new Map());
+const handleJoinSelectionChange = useCallback((tables: string[]) => {
+  updateActiveTab({ joinTables: tables });
+}, [activeTabId])
+const autocompleteRegistered = useRef(false);
+
+
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
-
-
-  // Keep refs in sync
-  useEffect(() => { activeConnectionRef.current = activeTab.connection; }, [activeTab.connection]);
-  useEffect(() => { activeFileRef.current = activeTab.file; }, [activeTab.file]);
 
   // Sidebar resize
   useEffect(() => {
@@ -767,12 +812,6 @@ function App() {
     document.body.style.userSelect = "none";
   }
 
-  // Result auto-clear on unmount
-  useEffect(() => {
-    return () => { if (resultClearTimer.current) clearTimeout(resultClearTimer.current); };
-  }, []);
-
-  useEffect(() => { loadConnections(); }, []);
   useEffect(() => { schemaRef.current = schema; }, [schema]);
 
   useEffect(() => {
@@ -801,12 +840,24 @@ function App() {
 
   //END Active Tab Schema helper
 
-  async function loadConnections() {
+  useEffect(() => {
+    import("@tauri-apps/api/path").then(({ homeDir, join }) => {
+      homeDir().then(async home => {
+        const folder = await join(home, ".devsql", "connections");
+        console.log("Connections folder:", folder);
+        setConnectionsFolder(folder);
+        loadConnections(folder);
+      });
+    });
+  }, []);
+
+  async function loadConnections(folder: string) {
+    if (!folder) return;
     try {
-      const raw = await invoke<string>("list_connections", { folderPath: CONNECTIONS_FOLDER });
+      const raw = await invoke<string>("list_connections", { folderPath: folder });
       const parsed: ConnectionListResult = JSON.parse(raw);
       setConnections(parsed.connections ?? []);
-      if (parsed.connections?.length > 0 && !activeConnectionRef.current) {
+      if (parsed.connections?.length > 0 && !activeTabRef.current.connection) {
         updateActiveTab({ connection: parsed.connections[0], title: parsed.connections[0].name });
       }
     } catch (e) {
@@ -914,6 +965,8 @@ function App() {
             username:   conn.username,
             tableNames: tab.joinTables.join(","),
             sslMode:    conn.sslMode ?? "prefer",
+            sqlInstance: conn.sqlInstance ?? "",
+            windowsAuth: conn.windowsAuth ?? false,
           });
         } else {
           raw = await invoke<string>("query_file", {
@@ -933,6 +986,8 @@ function App() {
           database:      conn.database,
           username:      conn.username,
           sslMode:       conn.sslMode ?? "prefer",
+          sqlInstance:   conn.sqlInstance ?? "",
+          windowsAuth:   conn.windowsAuth ?? false,
         });
 
         raw = await invoke<string>("execute_query", {
@@ -942,8 +997,7 @@ function App() {
           readOnly: conn.readOnly ?? false,
         });
       } else {
-        updateActiveTab({ loading: false });
-        alert("Select a connection or open a file first");
+        updateActiveTab({ loading: false, error: "Select a connection or open a file first" });
         return;
       }
 
@@ -966,55 +1020,15 @@ function App() {
       updateActiveTab({ loading: false, error: String(e) });
     }
   }, [locked, showHistory, activeTabId]);
+
+  useEffect(() => { runQueryRef.current = runQuery; }, [runQuery]);
   //End Run Query Function
 
   const handleEditorMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
 
-      // Cmd+Enter to run
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runQuery());
-
-      // Cmd+T — new tab
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT, () => {
-        const currentSql = editorRef.current?.getValue() ?? "";
-        const newTab = createTab();
-        setTabs(prev => {
-          const updated = prev.map(t =>
-            t.id === editorRef.current ? { ...t, sql: currentSql } : t
-          );
-          return [...updated, newTab];
-        });
-        setActiveTabId(newTab.id);
-        setTimeout(() => editorRef.current?.setValue(""), 0);
-      });
-
-      // Cmd+W — close tab
-      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
-        const currentSql = editorRef.current?.getValue() ?? "";
-        setTabs(prev => {
-          if (prev.length <= 1) return prev;
-          const idx = prev.findIndex(t => t.id === editorRef.current);
-          // Save current SQL then remove current tab
-          const updated = prev.map(t =>
-            t.id === editorRef.current ? { ...t, sql: currentSql } : t
-          );
-          const newTabs = updated.filter(t => t.id !== editorRef.current);
-          const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
-          setActiveTabId(nextTab.id);
-          setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
-          return newTabs;
-        });
-      });
-
-    // Save SQL to tab on every change
-    editor.onDidChangeModelContent(() => {
-      const sql = editor.getValue();
-      setTabs(prev => prev.map(t =>
-        t.id === editorRef.current?.id ? { ...t, sql } : t
-      ));
-    });
-
-      // Register SQL autocomplete provider
+    if (!autocompleteRegistered.current) {
+      autocompleteRegistered.current = true;
       monaco.languages.registerCompletionItemProvider("sql", {
         triggerCharacters: [" ", ".", "\n"],
         provideCompletionItems: (model, position) => {
@@ -1077,21 +1091,86 @@ function App() {
           return { suggestions };
         },
       });
+    }
+
+      // Cmd+Enter to run
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+        runQueryRef.current();
+      });
+
+      // Cmd+T — new tab
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT, () => {
+        const currentSql = editorRef.current?.getValue() ?? "";
+        const newTab = createTab();
+        setTabs(prev => {
+          const updated = prev.map(t =>
+            t.id === editorRef.current ? { ...t, sql: currentSql } : t
+          );
+          return [...updated, newTab];
+        });
+        setActiveTabId(newTab.id);
+        setTimeout(() => editorRef.current?.setValue(""), 0);
+      });
+
+      // Cmd+W — close tab
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
+        const currentSql = editorRef.current?.getValue() ?? "";
+        setTabs(prev => {
+          if (prev.length <= 1) return prev;
+          const idx = prev.findIndex(t => t.id === editorRef.current);
+          // Save current SQL then remove current tab
+          const updated = prev.map(t =>
+            t.id === editorRef.current ? { ...t, sql: currentSql } : t
+          );
+          const newTabs = updated.filter(t => t.id !== editorRef.current);
+          const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
+          setActiveTabId(nextTab.id);
+          setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
+          return newTabs;
+        });
+      });
+
+    // Save SQL to tab on every change
+    editor.onDidChangeModelContent(() => {
+      const sql = editor.getValue();
+      if (sqlSaveTimer.current) clearTimeout(sqlSaveTimer.current);
+      sqlSaveTimer.current = setTimeout(() => {
+        setTabs(prev => prev.map(t =>
+          t.id === editorRef.current ? { ...t, sql } : t
+        ));
+      }, 300);
+    });
   };
 
 async function loadSchema(conn: ConnectionConfig) {
+  // Return cached schema if available
+  if (schemaCache.current.has(conn.id)) {
+    setSchema(schemaCache.current.get(conn.id)!);
+    return;
+  }
+
+   // Evict oldest entry if cache exceeds 5 items
+  if (schemaCache.current.size >= 5) {
+    const firstKey = schemaCache.current.keys().next().value;
+    schemaCache.current.delete(firstKey);
+  }
+
   setSchema(null);
   setSchemaLoading(true);
   try {
     const raw = await invoke<string>("get_schema", {
       credentialRef: conn.credentialRef,
-      engine: conn.engine,
-      host: conn.host,
-      port: conn.port,
-      database: conn.database,
-      username: conn.username,
+      engine:        conn.engine,
+      host:          conn.host,
+      port:          conn.port,
+      database:      conn.database,
+      username:      conn.username,
+      sslMode:       conn.sslMode ?? "prefer",
+      sqlInstance:   conn.sqlInstance ?? "",
+      windowsAuth:   conn.windowsAuth ?? false,
     });
     const parsed: SchemaResult = JSON.parse(raw);
+    schemaCache.current.set(conn.id, parsed); // cache it
     setSchema(parsed);
   } catch (e) {
     console.error("Schema load failed:", e);
@@ -1120,7 +1199,6 @@ async function saveToHistory(
       rowCount,
       success,
     });
-    console.log("History save result:", result);
   } catch (e) {
     console.error("Failed to save history:", e);
   }
@@ -1133,15 +1211,13 @@ async function loadHistory(conn: ConnectionConfig | null) {
     return;
   }
   try {
-    console.log("Loading history for:", conn?.id ?? "all");
     const raw = await invoke<string>("get_history", {
       connectionId: conn?.id ?? "",
       limit: 100,
     });
-    console.log("History raw:", raw);
+
     const parsed = JSON.parse(raw);
-    console.log("Loading with conn?.id:", conn?.id ?? "empty");
-    console.log("History save result:", activeTab.result);
+
     setHistory(parsed.entries ?? []);
   } catch (e) {
     console.error("Failed to load history:", e);
@@ -1226,9 +1302,9 @@ async function loadHistory(conn: ConnectionConfig | null) {
         {showAddForm ? (
           <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
             <AddConnectionForm
-              connectionsFolder={CONNECTIONS_FOLDER}
-              onSave={() => { setShowAddForm(false); loadConnections(); }}
-              onCancel={() => setShowAddForm(false)}
+                connectionsFolder={connectionsFolder}
+                onSave={() => { setShowAddForm(false); loadConnections(connectionsFolder); }}
+                onCancel={() => setShowAddForm(false)}
             />
           </div>
         ) : (
@@ -1309,7 +1385,7 @@ async function loadHistory(conn: ConnectionConfig | null) {
                           {/* Refresh button */}
                           <div style={{ padding: "5px 14px 3px", display: "flex", justifyContent: "flex-end" }}>
                             <button
-                              onClick={(e) => { e.stopPropagation(); loadSchema(conn); }}
+                              onClick={(e) => { e.stopPropagation(); schemaCache.current.delete(conn.id); loadSchema(conn); }}
                               style={{ background: "none", border: "none", color: "#4b5563", cursor: "pointer", fontSize: 10, fontFamily: "monospace", padding: "2px 4px" }}
                               title="Refresh schema"
                             >
@@ -1685,7 +1761,7 @@ async function loadHistory(conn: ConnectionConfig | null) {
           <button
             onClick={() => {
               setShowHistory(h => !h);
-              if (!showHistory) loadHistory(activeConnectionRef.current);
+              if (!showHistory) loadHistory(activeTab.connection);
             }}
             style={{
               padding: "6px 14px",
@@ -1808,7 +1884,7 @@ async function loadHistory(conn: ConnectionConfig | null) {
         {activeTab.file && (
           <JoinTablesPanel
             activeConnection={activeTab.connection}
-            onSelectionChange={(tables) => updateActiveTab({ joinTables: tables })}
+            onSelectionChange={handleJoinSelectionChange}
           />
         )}
 

@@ -113,6 +113,8 @@ public static class QueryHistoryLib
                     {success}
                 )";
 
+                insertSql = ScrubSql(insertSql);
+
                 IntPtr insertStmt = IntPtr.Zero;
                 SqlitePrepareV2(db, insertSql, -1, ref insertStmt, IntPtr.Zero);
                 int rc = SqliteStep(insertStmt);
@@ -229,6 +231,15 @@ public static class QueryHistoryLib
         SqlitePrepareV2(db, sql, -1, ref stmt, IntPtr.Zero);
         SqliteStep(stmt);
         SqliteFinalize(stmt);
+    }
+    private static string ScrubSql(string sql)
+    {
+        // Mask literal string values in WHERE clauses that look like passwords
+        return System.Text.RegularExpressions.Regex.Replace(
+            sql,
+            @"(?i)(password|pwd|secret|token|key)\s*=\s*'[^']*'",
+            "$1='***'"
+        );
     }
 
     // ---- winsqlite3 P/Invoke ----------------------------------
