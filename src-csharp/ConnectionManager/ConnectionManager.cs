@@ -46,6 +46,7 @@ public class SaveConnectionRequest
     public bool ReadOnly { get; set; } = false;
     public string SqlInstance { get; set; } = "";
     public bool WindowsAuth { get; set; } = false;
+    public string ExistingFilePath { get; set; } = "";
 }
 
 public static class ConnectionManagerLib
@@ -148,7 +149,16 @@ public static class ConnectionManagerLib
 
             // Generate a safe filename from the connection name
             string safeName = request.Name.ToLower().Replace(" ", "-");
-            string filePath = Path.Combine(folderPath, $"{safeName}.toml");
+            string newPath = Path.Combine(request.FolderPath, $"{safeName}.toml");
+            string filePath = newPath;
+
+            // If editing an existing connection and the name changed, delete the old file
+            if (!string.IsNullOrEmpty(request.ExistingFilePath)
+                && request.ExistingFilePath != newPath
+                && File.Exists(request.ExistingFilePath))
+            {
+                File.Delete(request.ExistingFilePath);
+            }
 
             // Generate a unique credential ref key
             string credentialRef = $"devsql:{safeName}:{request.Username}";

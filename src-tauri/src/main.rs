@@ -25,7 +25,7 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "0875e229f45b6b732e2aecb12eaa8989a6a1f435b43330300ad8caec15cc0968";
+const HASH_CONNECTIONMANAGER: &str = "5250b93127421c440d62341ff6969ed796037864c1ca1b502849686a9be63678";
 const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
 const HASH_QUERYEXECUTOR: &str = "c7b90b63eb1916ea36ddd7b8017e2ab24330550512df95e8c5fe496ec0c28680";
 const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
@@ -397,6 +397,211 @@ fn clear_history(connection_id: String) -> bool {
     }
 }
 
+#[tauri::command]
+fn test_connection(
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    ssl_mode: Option<String>,
+    sql_instance: Option<String>,
+    windows_auth: Option<bool>,
+) -> Result<String, String> {
+    // Build the connection string the same way as build_connection_string
+    let _ = ssl_mode; 
+    let instance = sql_instance.unwrap_or_default();
+    let win_auth = windows_auth.unwrap_or(false);
+
+    let password = if !win_auth {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        entry.get_password().unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let conn_str = match engine.to_lowercase().as_str() {
+        "mysql" => format!(
+            "Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;ConnectionTimeout=5;",
+            host, port, database, username, password),
+        "postgres" => format!(
+            "Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;Timeout=5;",
+            host, port, database, username, password),
+        "sqlite" => format!("Data Source={}", database),
+        "sqlserver" => {
+            let server = if !instance.is_empty() {
+                format!("{}\\{}", host, instance)
+            } else {
+                format!("{},{}", host, port)
+            };
+            if win_auth {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;", server, database)
+            } else {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;", server, database, username, password)
+            }
+        },
+        _ => return Err(format!("Unsupported engine: {}", engine)),
+    };
+
+    // Run a minimal test query
+    let test_sql = match engine.to_lowercase().as_str() {
+        "sqlserver" => "SELECT 1",
+        "postgres"  => "SELECT 1",
+        "sqlite"    => "SELECT 1",
+        _           => "SELECT 1",
+    };
+
+    let result = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_query_executor()
+            .get(b"execute_query")
+            .map_err(|e| e.to_string())?;
+
+        let c_conn   = CString::new(conn_str).unwrap();
+        let c_sql    = CString::new(test_sql).unwrap();
+        let c_engine = CString::new(engine).unwrap();
+        let c_ro     = CString::new("false").unwrap();
+
+        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
+                       c_engine.as_ptr(), c_ro.as_ptr());
+        if ptr.is_null() { return Err("No response".to_string()); }
+        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    };
+
+    let parsed: serde_json::Value = serde_json::from_str(&result)
+        .unwrap_or(serde_json::Value::Null);
+
+    if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
+        Err(err.to_string())
+    } else {
+        Ok("Connected successfully".to_string())
+    }
+}
+
+#[tauri::command]
+fn migrate_credential(
+    old_target: String,
+    new_target: String,
+    username: String,
+) -> bool {
+    // Read password from old entry
+    let old_entry = match keyring::Entry::new(&old_target, &username) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let password = match old_entry.get_password() {
+        Ok(p) => p,
+        Err(_) => return false, // no old credential — nothing to migrate
+    };
+
+    // Write to new entry
+    let new_entry = match keyring::Entry::new(&new_target, &username) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    if new_entry.set_password(&password).is_err() {
+        return false;
+    }
+
+    // Delete old entry
+    let _ = old_entry.delete_password();
+    true
+}
+
+#[tauri::command]
+fn export_results(
+    path: String,
+    format: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<Option<String>>>,
+) -> Result<(), String> {
+    match format.as_str() {
+        "csv"  => export_csv(&path, &columns, &rows),
+        "json" => export_json(&path, &columns, &rows),
+        _      => Err(format!("Unsupported format: {}", format)),
+    }
+}
+
+fn export_csv(
+    path: &str,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path)
+        .map_err(|e| e.to_string())?;
+
+    // Write BOM for Excel compatibility
+    file.write_all(&[0xEF, 0xBB, 0xBF])
+        .map_err(|e| e.to_string())?;
+
+    // Header row
+    let header = columns.iter()
+        .map(|c| csv_escape(c))
+        .collect::<Vec<_>>()
+        .join(",");
+    writeln!(file, "{}", header).map_err(|e| e.to_string())?;
+
+    // Data rows
+    for row in rows {
+        let line = row.iter()
+            .map(|cell| match cell {
+                Some(v) => csv_escape(v),
+                None    => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(file, "{}", line).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn csv_escape(value: &str) -> String {
+    // Wrap in quotes if value contains comma, quote, newline, or leading/trailing space
+    if value.contains(',')
+        || value.contains('"')
+        || value.contains('\n')
+        || value.contains('\r')
+        || value.starts_with(' ')
+        || value.ends_with(' ')
+    {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn export_json(
+    path: &str,
+    columns: &[String],
+    rows: &[Vec<Option<String>>],
+) -> Result<(), String> {
+    let records: Vec<serde_json::Map<String, serde_json::Value>> = rows.iter()
+        .map(|row| {
+            let mut map = serde_json::Map::new();
+            for (i, col) in columns.iter().enumerate() {
+                let val = row.get(i)
+                    .and_then(|v| v.as_deref())
+                    .map(|v| serde_json::Value::String(v.to_string()))
+                    .unwrap_or(serde_json::Value::Null);
+                map.insert(col.clone(), val);
+            }
+            map
+        })
+        .collect();
+
+    let json = serde_json::to_string_pretty(&records)
+        .map_err(|e| e.to_string())?;
+
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn main() {
 
      // Verify all native DLL integrity before loading
@@ -440,7 +645,10 @@ fn main() {
             get_schema,
             add_history_entry,
             get_history,
-            clear_history])
+            clear_history,
+            test_connection,
+            migrate_credential,
+            export_results])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

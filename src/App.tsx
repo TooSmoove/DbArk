@@ -273,18 +273,35 @@ function AddConnectionForm({
   onSave,
   onCancel,
   connectionsFolder,
+  editingConnection,
 }: {
   onSave: () => void;
   onCancel: () => void;
   connectionsFolder: string;
+  editingConnection: Connection | null;
 }) {
   const [form, setForm] = useState({
-    name: "", engine: "mysql", host: "", port: "", database: "",
-    username: "", password: "", color: "#6c63ff", group: "",
-    sslMode: "prefer", readOnly: false, sqlInstance: "", windowsAuth: false
+    name:         editingConnection?.name        ?? "",
+    engine:       editingConnection?.engine      ?? "mysql",
+    host:         editingConnection?.host        ?? "",
+    port:         editingConnection?.port?.toString() ?? "",
+    database:     editingConnection?.database    ?? "",
+    username:     editingConnection?.username    ?? "",
+    password:     "", // never pre-fill password
+    color:        editingConnection?.color       ?? "#6c63ff",
+    group:        editingConnection?.group       ?? "",
+    sslMode:      editingConnection?.sslMode     ?? "prefer",
+    readOnly:     editingConnection?.readOnly    ?? false,
+    sqlInstance:  editingConnection?.sqlInstance ?? "",
+    windowsAuth:  editingConnection?.windowsAuth ?? false,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<"success" | "error" | null>(null);
+  const [testMessage, setTestMessage] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
 
   const fieldStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", background: "#0e0f11",
@@ -298,43 +315,59 @@ function AddConnectionForm({
 
   // Save connection handler
   async function handleSave() {
-    if (!form.name || !form.host || !form.database) {
-      setError("Name, host and database are required");
-      return;
-    }
-    
-    // Username only required when not using Windows Auth
-    if (!form.windowsAuth && !form.username) {
-      setError("Username is required for SQL authentication");
-      return;
-    }
-
-
+    // ... existing validation ...
     setSaving(true);
-    setError(null); // ← local state, not updateActiveTab
+    setError(null);
     try {
-      const defaultPort: Record<string, number> = {
-        mysql: 3306, sqlserver: 1433, postgres: 5432, sqlite: 0,
-      };
       const request = {
-        name: form.name, engine: form.engine, host: form.host,
-        port: parseInt(form.port) || defaultPort[form.engine] || 3306,
-        database: form.database, username: form.username,
-        color: form.color, group: form.group, folderPath: connectionsFolder,
-        sslMode: form.sslMode, readOnly: form.readOnly, sqlInstance: form.sqlInstance, windowsAuth: form.windowsAuth,
+        name:        form.name,
+        engine:      form.engine,
+        host:        form.host,
+        port:        parseInt(form.port) || defaultPort[form.engine] || 3306,
+        database:    form.database,
+        username:    form.username,
+        color:       form.color,
+        group:       form.group,
+        folderPath:  connectionsFolder,
+        sslMode:     form.sslMode,
+        readOnly:    form.readOnly,
+        sqlInstance: form.sqlInstance,
+        windowsAuth: form.windowsAuth,
+        // Pass existing filePath when editing so ConnectionManager overwrites it
+        existingFilePath: editingConnection?.filePath ?? "",
       };
       const result = await invoke<string>("save_connection", {
         requestJson: JSON.stringify(request),
       });
       if (result.startsWith("ERROR")) { setError(result); return; }
 
+      const newRef = `devsql:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
+
       if (form.password) {
+       console.log("store_credential target:", newRef);
+      console.log("store_credential username:", form.username);
+        // User entered a new password — store it under the new ref
         await invoke<boolean>("store_credential", {
-          target: `devsql:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`,
+          target:   newRef,
           username: form.username,
           password: form.password,
         });
+        // Clean up old ref if name changed
+        if (editingConnection && editingConnection.credentialRef !== newRef) {
+          await invoke("delete_credential", { target: editingConnection.credentialRef });
+        }
+      } else if (editingConnection) {
+        // No new password — migrate old credential to new ref if name changed
+        const oldRef = editingConnection.credentialRef;
+        if (oldRef !== newRef) {
+          await invoke("migrate_credential", {
+            oldTarget: oldRef,
+            newTarget: newRef,
+            username:  form.username,
+          });
+        }
       }
+
       onSave();
     } catch (e) {
       setError(String(e));
@@ -346,7 +379,7 @@ function AddConnectionForm({
   return (
     <div style={{ padding: "12px 14px", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column" }}>
       <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 12, color: "#e8e9ec" }}>
-        Add connection
+        {editingConnection ? "Edit connection" : "Add connection"}
       </div>
 
      {[
@@ -355,8 +388,7 @@ function AddConnectionForm({
         { label: "Port",     key: "port",     placeholder: "3306",        type: "text" },
         { label: "Database", key: "database", placeholder: "mydb",        type: "text" },
         ...(!form.windowsAuth ? [
-          { label: "Username", key: "username", placeholder: "root",     type: "text" },
-          { label: "Password", key: "password", placeholder: "••••••••", type: "password" },
+          { label: "Username", key: "username", placeholder: "root", type: "text" },
         ] : []),
         { label: "Group", key: "group", placeholder: "Production", type: "text" },
       ].map(({ label, key, placeholder, type }) => (
@@ -367,9 +399,50 @@ function AddConnectionForm({
             value={form[key as keyof typeof form] as string}
             onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
             placeholder={placeholder}
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
           />
         </label>
       ))}
+
+      {/* Password field — rendered separately for full control */}
+      {!form.windowsAuth && (
+        <label style={labelStyle}>
+          Password
+          <div style={{ position: "relative", marginTop: 3 }}>
+            <input
+              style={{ ...fieldStyle, marginTop: 0, paddingRight: 36 }}
+              type={showPassword ? "text" : "password"}
+              value={form.password}
+              onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+              placeholder={editingConnection ? "Enter new password to change" : "••••••••"}
+              autoComplete="new-password"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword(s => !s)}
+              style={{
+                position: "absolute", right: 8, top: "50%",
+                transform: "translateY(-50%)",
+                background: "none", border: "none",
+                color: "#6b7280", cursor: "pointer",
+                fontSize: 12, padding: "2px 4px",
+              }}
+            >
+              {showPassword ? "🙈" : "👁"}
+            </button>
+          </div>
+          {editingConnection && (
+            <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, lineHeight: 1.5 }}>
+              Updates the password DbArk uses to connect. Change the password on the server first, then update it here.
+            </div>
+          )}
+        </label>
+      )}
 
       <label style={labelStyle}>
         Engine
@@ -454,6 +527,68 @@ function AddConnectionForm({
       </label>
 
       {error && <div style={{ fontSize: 11, color: "#ef4444", marginBottom: 8, wordBreak: "break-word" }}>{error}</div>}
+
+      {/* Test connection */}
+      <div style={{ marginBottom: 8 }}>
+        <button
+          onClick={async () => {
+            if (!form.host || !form.database) {
+              setTestResult("error");
+              setTestMessage("Host and database are required to test");
+              return;
+            }
+            setTesting(true);
+            setTestResult(null);
+            setTestMessage("");
+            try {
+              const msg = await invoke<string>("test_connection", {
+                credentialRef: editingConnection?.credentialRef ??
+                  `devsql:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`,
+                engine:      form.engine,
+                host:        form.host,
+                port:        parseInt(form.port) || defaultPort[form.engine] || 3306,
+                database:    form.database,
+                username:    form.username,
+                sslMode:     form.sslMode,
+                sqlInstance: form.sqlInstance,
+                windowsAuth: form.windowsAuth,
+              });
+              setTestResult("success");
+              setTestMessage(msg);
+            } catch (e) {
+              setTestResult("error");
+              setTestMessage(String(e));
+            } finally {
+              setTesting(false);
+            }
+          }}
+          disabled={testing}
+          style={{
+            width: "100%", padding: "7px 0",
+            background: "transparent",
+            color: testing ? "#4b5563" : "#9ca3af",
+            border: "1px solid #2d2f36",
+            borderRadius: 6, cursor: testing ? "not-allowed" : "pointer",
+            fontSize: 12, fontFamily: "monospace",
+          }}
+        >
+          {testing ? "Testing…" : "⚡ Test connection"}
+        </button>
+
+        {testResult && (
+          <div style={{
+            marginTop: 6, padding: "6px 10px", borderRadius: 6, fontSize: 11,
+            fontFamily: "monospace",
+            background: testResult === "success"
+              ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
+            color: testResult === "success" ? "#10b981" : "#ef4444",
+            border: `1px solid ${testResult === "success"
+              ? "rgba(16,185,129,0.2)" : "rgba(239,68,68,0.2)"}`,
+          }}>
+            {testResult === "success" ? "✓ " : "✗ "}{testMessage}
+          </div>
+        )}
+      </div>
 
       <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
         <button onClick={handleSave} disabled={saving} style={{
@@ -783,6 +918,15 @@ const handleJoinSelectionChange = useCallback((tables: string[]) => {
 }, [activeTabId])
 const autocompleteRegistered = useRef(false);
 
+const [contextMenu, setContextMenu] = useState<{
+  x: number;
+  y: number;
+  connection: ConnectionConfig;
+} | null>(null);
+
+const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
+const [deletingConnection, setDeletingConnection] = useState<ConnectionConfig | null>(null);
+const [showExportMenu, setShowExportMenu] = useState(false);
 
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
@@ -857,6 +1001,32 @@ const autocompleteRegistered = useRef(false);
       const raw = await invoke<string>("list_connections", { folderPath: folder });
       const parsed: ConnectionListResult = JSON.parse(raw);
       setConnections(parsed.connections ?? []);
+
+      if (parsed.connections?.length > 0) {
+        const currentConn = activeTabRef.current.connection;
+        
+        setTabs(prev => prev.map(tab => {
+          if (!tab.connection) return tab;
+          const fresh = parsed.connections.find(c => c.id === tab.connection!.id);
+          if (fresh) {
+            schemaCache.current.delete(fresh.id);
+            return { ...tab, connection: fresh, error: null, result: null };
+          }
+          return tab;
+        }));
+
+        // If active tab's connection was refreshed, reload schema
+        if (currentConn) {
+          const freshConn = parsed.connections.find(c => c.id === currentConn.id);
+          if (freshConn) {
+            schemaConnectionId.current = null;
+            setSchema(null);
+            setExpandedTables(new Set());
+            loadSchema(freshConn);
+          }
+        }
+      }
+
       if (parsed.connections?.length > 0 && !activeTabRef.current.connection) {
         updateActiveTab({ connection: parsed.connections[0], title: parsed.connections[0].name });
       }
@@ -1142,87 +1312,116 @@ const autocompleteRegistered = useRef(false);
     });
   };
 
-async function loadSchema(conn: ConnectionConfig) {
-  // Return cached schema if available
-  if (schemaCache.current.has(conn.id)) {
-    setSchema(schemaCache.current.get(conn.id)!);
-    return;
+  async function loadSchema(conn: ConnectionConfig) {
+    // Return cached schema if available
+    if (schemaCache.current.has(conn.id)) {
+      setSchema(schemaCache.current.get(conn.id)!);
+      return;
+    }
+
+    // Evict oldest entry if cache exceeds 5 items
+    if (schemaCache.current.size >= 5) {
+      const firstKey = schemaCache.current.keys().next().value;
+      schemaCache.current.delete(firstKey);
+    }
+
+    setSchema(null);
+    setSchemaLoading(true);
+    try {
+      const raw = await invoke<string>("get_schema", {
+        credentialRef: conn.credentialRef,
+        engine:        conn.engine,
+        host:          conn.host,
+        port:          conn.port,
+        database:      conn.database,
+        username:      conn.username,
+        sslMode:       conn.sslMode ?? "prefer",
+        sqlInstance:   conn.sqlInstance ?? "",
+        windowsAuth:   conn.windowsAuth ?? false,
+      });
+      const parsed: SchemaResult = JSON.parse(raw);
+      schemaCache.current.set(conn.id, parsed); // cache it
+      setSchema(parsed);
+    } catch (e) {
+      console.error("Schema load failed:", e);
+    } finally {
+      setSchemaLoading(false);
+    }
   }
 
-   // Evict oldest entry if cache exceeds 5 items
-  if (schemaCache.current.size >= 5) {
-    const firstKey = schemaCache.current.keys().next().value;
-    schemaCache.current.delete(firstKey);
+  async function saveToHistory(
+    conn: ConnectionConfig,
+    sql: string,
+    durationMs: number,
+    rowCount: number,
+    success: boolean
+  ) {
+    try {
+      // Use setTimeout to ensure this runs after execute_query fully completes
+      await new Promise(resolve => setTimeout(resolve, 0));
+      
+      const result = await invoke<boolean>("add_history_entry", {
+        connectionId:   conn.id,
+        connectionName: conn.name,
+        sql:            sql.trim(),
+        executedAt:     Date.now(),
+        durationMs,
+        rowCount,
+        success,
+      });
+    } catch (e) {
+      console.error("Failed to save history:", e);
+    }
   }
 
-  setSchema(null);
-  setSchemaLoading(true);
-  try {
-    const raw = await invoke<string>("get_schema", {
-      credentialRef: conn.credentialRef,
-      engine:        conn.engine,
-      host:          conn.host,
-      port:          conn.port,
-      database:      conn.database,
-      username:      conn.username,
-      sslMode:       conn.sslMode ?? "prefer",
-      sqlInstance:   conn.sqlInstance ?? "",
-      windowsAuth:   conn.windowsAuth ?? false,
-    });
-    const parsed: SchemaResult = JSON.parse(raw);
-    schemaCache.current.set(conn.id, parsed); // cache it
-    setSchema(parsed);
-  } catch (e) {
-    console.error("Schema load failed:", e);
-  } finally {
-    setSchemaLoading(false);
-  }
-}
+  //Load query history for a connection
+  async function loadHistory(conn: ConnectionConfig | null) {
+    if (!conn) {
+      setHistory([]);
+      return;
+    }
+    try {
+      const raw = await invoke<string>("get_history", {
+        connectionId: conn?.id ?? "",
+        limit: 100,
+      });
 
-async function saveToHistory(
-  conn: ConnectionConfig,
-  sql: string,
-  durationMs: number,
-  rowCount: number,
-  success: boolean
-) {
-  try {
-    // Use setTimeout to ensure this runs after execute_query fully completes
-    await new Promise(resolve => setTimeout(resolve, 0));
-    
-    const result = await invoke<boolean>("add_history_entry", {
-      connectionId:   conn.id,
-      connectionName: conn.name,
-      sql:            sql.trim(),
-      executedAt:     Date.now(),
-      durationMs,
-      rowCount,
-      success,
-    });
-  } catch (e) {
-    console.error("Failed to save history:", e);
-  }
-}
+      const parsed = JSON.parse(raw);
 
-//Load query history for a connection
-async function loadHistory(conn: ConnectionConfig | null) {
-  if (!conn) {
-    setHistory([]);
-    return;
+      setHistory(parsed.entries ?? []);
+    } catch (e) {
+      console.error("Failed to load history:", e);
+    }
   }
-  try {
-    const raw = await invoke<string>("get_history", {
-      connectionId: conn?.id ?? "",
-      limit: 100,
-    });
 
-    const parsed = JSON.parse(raw);
+  async function exportResults(format: "csv" | "json") {
+    const result = activeTab.result;
+    if (!result) return;
 
-    setHistory(parsed.entries ?? []);
-  } catch (e) {
-    console.error("Failed to load history:", e);
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({
+        filters: [{
+          name: format === "csv" ? "CSV file" : "JSON file",
+          extensions: [format],
+        }],
+        defaultPath: `query-results.${format}`,
+      });
+
+      if (!path) return; // user cancelled
+
+      await invoke("export_results", {
+        path,
+        format,
+        columns: result.columns,
+        rows:    result.rows,
+      });
+
+    } catch (e) {
+      console.error("Export failed:", e);
+      updateActiveTab({ error: `Export failed: ${String(e)}` });
+    }
   }
-}
 
   return (
     <div style={{
@@ -1285,6 +1484,124 @@ async function loadHistory(conn: ConnectionConfig | null) {
         </div>
       )}
 
+      {/* Connection Context menu */}
+      {contextMenu && (
+        <>
+          {/* Backdrop to close on click outside */}
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999 }}
+            onClick={() => setContextMenu(null)}
+          />
+          <div style={{
+            position: "fixed",
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 1000,
+            background: "#1e2026",
+            border: "1px solid #2d2f36",
+            borderRadius: 8,
+            padding: "4px 0",
+            minWidth: 160,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+          }}>
+            <button
+              onClick={() => {
+                setEditingConnection(contextMenu.connection);
+                setShowAddForm(true);
+                setContextMenu(null);
+              }}
+              style={{
+                display: "block", width: "100%", padding: "8px 16px",
+                background: "none", border: "none", color: "#e8e9ec",
+                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
+                textAlign: "left",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+              ✏️ Edit connection
+            </button>
+            <button
+              onClick={() => {
+                setDeletingConnection(contextMenu.connection);
+                setContextMenu(null);
+              }}
+              style={{
+                display: "block", width: "100%", padding: "8px 16px",
+                background: "none", border: "none", color: "#ef4444",
+                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
+                textAlign: "left",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+              🗑️ Delete connection
+            </button>
+          </div>
+        </>
+      )}
+      {/* END Connection Context menu */}
+      {/* Delete confirmation */}
+      {deletingConnection && (
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(0,0,0,0.6)" }}
+            onClick={() => setDeletingConnection(null)} />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            zIndex: 1000, background: "#1e2026",
+            border: "1px solid #2d2f36", borderRadius: 12,
+            padding: "24px 28px", minWidth: 340,
+            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec", marginBottom: 8 }}>
+              Delete connection
+            </div>
+            <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 20, lineHeight: 1.6 }}>
+              Delete <strong style={{ color: "#e8e9ec" }}>{deletingConnection.name}</strong>?
+              This removes the TOML file and keychain entry. This cannot be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={async () => {
+                  try {
+                    await invoke("delete_connection", { filePath: deletingConnection.filePath });
+                    await invoke("delete_credential", { target: deletingConnection.credentialRef });
+                    // Clear from tabs if active
+                    setTabs(prev => prev.map(t =>
+                      t.connection?.id === deletingConnection.id
+                        ? { ...t, connection: null, title: "New tab" }
+                        : t
+                    ));
+                    setDeletingConnection(null);
+                    loadConnections(connectionsFolder);
+                  } catch (e) {
+                    console.error("Delete failed:", e);
+                  }
+                }}
+                style={{
+                  flex: 1, padding: "8px 0", background: "#ef4444", color: "white",
+                  border: "none", borderRadius: 6, cursor: "pointer",
+                  fontSize: 12, fontFamily: "monospace",
+                }}
+              >
+                Delete
+              </button>
+              <button
+                onClick={() => setDeletingConnection(null)}
+                style={{
+                  flex: 1, padding: "8px 0", background: "transparent", color: "#6b7280",
+                  border: "1px solid #2d2f36", borderRadius: 6, cursor: "pointer",
+                  fontSize: 12, fontFamily: "monospace",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {/* END Delete confirmation */}
       {/* Sidebar */}
       <div style={{
         width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth,
@@ -1302,9 +1619,17 @@ async function loadHistory(conn: ConnectionConfig | null) {
         {showAddForm ? (
           <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
             <AddConnectionForm
-                connectionsFolder={connectionsFolder}
-                onSave={() => { setShowAddForm(false); loadConnections(connectionsFolder); }}
-                onCancel={() => setShowAddForm(false)}
+              connectionsFolder={connectionsFolder}
+              editingConnection={editingConnection}
+              onSave={() => {
+                setShowAddForm(false);
+                setEditingConnection(null);
+                loadConnections(connectionsFolder);
+              }}
+              onCancel={() => {
+                setShowAddForm(false);
+                setEditingConnection(null);
+              }}
             />
           </div>
         ) : (
@@ -1342,6 +1667,10 @@ async function loadHistory(conn: ConnectionConfig | null) {
                       setSchema(null);
                       setExpandedTables(new Set());
                       loadSchema(conn);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenu({ x: e.clientX, y: e.clientY, connection: conn });
                     }}
                     style={{
                       padding: "9px 14px",
@@ -1777,6 +2106,69 @@ async function loadHistory(conn: ConnectionConfig | null) {
           >
             ⏱ History
           </button>
+          {activeTab.result && (
+            <div style={{ position: "relative", display: "inline-block" }}>
+              <button
+                onClick={() => setShowExportMenu(e => !e)}
+                style={{
+                  padding: "6px 14px",
+                  background: "none",
+                  color: "#6b7280",
+                  border: "1px solid #2d2f36",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontFamily: "monospace",
+                  flexShrink: 0,
+                }}
+              >
+                ↓ Export
+              </button>
+
+              {showExportMenu && (
+                <>
+                  <div
+                    style={{ position: "fixed", inset: 0, zIndex: 99 }}
+                    onClick={() => setShowExportMenu(false)}
+                  />
+                  <div style={{
+                    position: "absolute",
+                    top: "calc(100% + 4px)",
+                    right: 0,
+                    zIndex: 100,
+                    background: "#1e2026",
+                    border: "1px solid #2d2f36",
+                    borderRadius: 8,
+                    padding: "4px 0",
+                    minWidth: 140,
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                  }}>
+                    {[
+                      { label: "Export as CSV",  format: "csv"  as const },
+                      { label: "Export as JSON", format: "json" as const },
+                    ].map(({ label, format }) => (
+                      <button
+                        key={format}
+                        onClick={() => { exportResults(format); setShowExportMenu(false); }}
+                        style={{
+                          display: "block", width: "100%",
+                          padding: "8px 16px",
+                          background: "none", border: "none",
+                          color: "#e8e9ec", fontSize: 12,
+                          fontFamily: "monospace", cursor: "pointer",
+                          textAlign: "left",
+                        }}
+                        onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                        onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {activeTab.duration !== null && !activeTab.loading && (
             <span style={{ color: "#6b7280", fontSize: 11, whiteSpace: "nowrap" }}>
               {activeTab.result ? `${activeTab.result.rowCount} rows · ` : ""}{activeTab.duration}ms
