@@ -4,7 +4,8 @@ $dlls = @(
     "FileQueryEngine",
     "QueryExecutor",
     "QueryHistory",
-    "SchemaExplorer"
+    "SchemaExplorer",
+    "SshTunnel"
 )
 
 foreach ($dll in $dlls) {

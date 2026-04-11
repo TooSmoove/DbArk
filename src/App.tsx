@@ -29,6 +29,11 @@ interface ConnectionConfig {
   readOnly: boolean;
   sqlInstance: string;
   windowsAuth: boolean;
+  sshEnabled:  boolean;
+  sshHost:     string;
+  sshPort:     number;
+  sshUser:     string;
+  sshKeyPath:  string;
 }
 
 interface ConnectionListResult {
@@ -294,6 +299,12 @@ function AddConnectionForm({
     readOnly:     editingConnection?.readOnly    ?? false,
     sqlInstance:  editingConnection?.sqlInstance ?? "",
     windowsAuth:  editingConnection?.windowsAuth ?? false,
+    sshEnabled:  editingConnection?.sshEnabled  ?? false,
+    sshHost:     editingConnection?.sshHost     ?? "",
+    sshPort:     editingConnection?.sshPort?.toString() ?? "22",
+    sshUser:     editingConnection?.sshUser     ?? "",
+    sshKeyPath:  editingConnection?.sshKeyPath  ?? "",
+    sshPassword:  "", // never pre-fill SSH password
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -302,6 +313,8 @@ function AddConnectionForm({
   const [testResult, setTestResult] = useState<"success" | "error" | null>(null);
   const [testMessage, setTestMessage] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+
+
 
   const fieldStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", background: "#0e0f11",
@@ -335,6 +348,11 @@ function AddConnectionForm({
         windowsAuth: form.windowsAuth,
         // Pass existing filePath when editing so ConnectionManager overwrites it
         existingFilePath: editingConnection?.filePath ?? "",
+        sshEnabled:  form.sshEnabled,
+        sshHost:     form.sshHost,
+        sshPort:     parseInt(form.sshPort) || 22,
+        sshUser:     form.sshUser,
+        sshKeyPath:  form.sshKeyPath,
       };
       const result = await invoke<string>("save_connection", {
         requestJson: JSON.stringify(request),
@@ -342,6 +360,14 @@ function AddConnectionForm({
       if (result.startsWith("ERROR")) { setError(result); return; }
 
       const newRef = `devsql:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
+
+      if (form.sshEnabled && form.sshPassword) {
+        await invoke<boolean>("store_credential", {
+          target:   `devsql-ssh:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.sshUser}`,
+          username: form.sshUser,
+          password: form.sshPassword,
+        });
+      }
 
       if (form.password) {
        console.log("store_credential target:", newRef);
@@ -500,6 +526,107 @@ function AddConnectionForm({
         </select>
       </label>
 
+      {/* SSH Tunnel */}
+      <div style={{
+        borderTop: "1px solid #2d2f36",
+        marginTop: 8, paddingTop: 8,
+      }}>
+        <label style={{ ...labelStyle, display: "flex", alignItems: "center",
+          gap: 10, cursor: "pointer", marginBottom: 12 }}>
+          <input
+            type="checkbox"
+            checked={form.sshEnabled}
+            onChange={e => setForm(f => ({ ...f, sshEnabled: e.target.checked }))}
+            style={{ width: 14, height: 14, cursor: "pointer" }}
+          />
+          <div>
+            <div style={{ fontSize: 12, color: "#e8e9ec", marginBottom: 2 }}>
+              SSH Tunnel
+            </div>
+            <div style={{ fontSize: 10, color: "#4b5563" }}>
+              Connect via SSH port forwarding
+            </div>
+          </div>
+        </label>
+
+        {form.sshEnabled && (
+          <>
+            <label style={labelStyle}>
+              SSH Host
+              <input style={fieldStyle} type="text"
+                value={form.sshHost}
+                onChange={e => setForm(f => ({ ...f, sshHost: e.target.value }))}
+                placeholder="ec2-user@52.54.120.55"
+                autoCorrect="off" autoCapitalize="off" spellCheck={false}
+              />
+            </label>
+            <label style={labelStyle}>
+              SSH Port
+              <input style={fieldStyle} type="text"
+                value={form.sshPort}
+                onChange={e => setForm(f => ({ ...f, sshPort: e.target.value }))}
+                placeholder="22"
+              />
+            </label>
+            <label style={labelStyle}>
+              SSH Username
+              <input style={fieldStyle} type="text"
+                value={form.sshUser}
+                onChange={e => setForm(f => ({ ...f, sshUser: e.target.value }))}
+                placeholder="ec2-user"
+                autoCorrect="off" autoCapitalize="off" spellCheck={false}
+              />
+            </label>
+            <label style={labelStyle}>
+              Private Key File
+              <div style={{ display: "flex", gap: 6, marginTop: 3 }}>
+                <input
+                  style={{ ...fieldStyle, marginTop: 0, flex: 1 }}
+                  type="text"
+                  value={form.sshKeyPath}
+                  onChange={e => setForm(f => ({ ...f, sshKeyPath: e.target.value }))}
+                  placeholder="C:\Users\keith\.ssh\key.pem"
+                  autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                />
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const { open } = await import("@tauri-apps/plugin-dialog");
+                    const selected = await open({
+                      multiple: false,
+                      filters: [{ name: "PEM key", extensions: ["pem", "key", "ppk"] }],
+                    });
+                    if (selected && typeof selected === "string")
+                      setForm(f => ({ ...f, sshKeyPath: selected }));
+                  }}
+                  style={{
+                    padding: "6px 10px", background: "#1e2026",
+                    border: "1px solid #2d2f36", borderRadius: 6,
+                    color: "#9ca3af", cursor: "pointer", fontSize: 11,
+                    fontFamily: "monospace", flexShrink: 0,
+                  }}
+                >
+                  Browse
+                </button>
+              </div>
+            </label>
+            <label style={labelStyle}>
+              SSH Password <span style={{ color: "#4b5563" }}>(if key requires passphrase)</span>
+              <input
+                style={fieldStyle} type="password"
+                value={form.sshPassword ?? ""}
+                onChange={e => setForm(f => ({ ...f, sshPassword: e.target.value }))}
+                placeholder="leave blank if key has no passphrase"
+                autoComplete="new-password"
+                autoCorrect="off" autoCapitalize="off" spellCheck={false}
+              />
+            </label>
+          </>
+        )}
+      </div>
+      {/* END SSH Tunnel */}
+
+      {/* Read-only connection */}
       <label style={{ ...labelStyle, display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
         <input
           type="checkbox"
@@ -913,20 +1040,22 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
   const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schemaCache = useRef<Map<string, SchemaResult>>(new Map());
-const handleJoinSelectionChange = useCallback((tables: string[]) => {
-  updateActiveTab({ joinTables: tables });
-}, [activeTabId])
-const autocompleteRegistered = useRef(false);
+  const handleJoinSelectionChange = useCallback((tables: string[]) => {
+    updateActiveTab({ joinTables: tables });
+  }, [activeTabId])
+  const autocompleteRegistered = useRef(false);
 
-const [contextMenu, setContextMenu] = useState<{
-  x: number;
-  y: number;
-  connection: ConnectionConfig;
-} | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    connection: ConnectionConfig;
+  } | null>(null);
 
-const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
-const [deletingConnection, setDeletingConnection] = useState<ConnectionConfig | null>(null);
-const [showExportMenu, setShowExportMenu] = useState(false);
+  const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
+  const [deletingConnection, setDeletingConnection] = useState<ConnectionConfig | null>(null);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [tunnelPorts, setTunnelPorts] = useState<Record<string, number>>({});
+  const [tunnelLoading, setTunnelLoading] = useState<Record<string, boolean>>({});
 
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
@@ -955,6 +1084,43 @@ const [showExportMenu, setShowExportMenu] = useState(false);
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
   }
+
+  async function openTunnel(conn: ConnectionConfig): Promise<number | null> {
+    if (!conn.sshEnabled) return null;
+    if (tunnelPorts[conn.id]) return tunnelPorts[conn.id];
+
+    setTunnelLoading(prev => ({ ...prev, [conn.id]: true }));
+    try {
+      // Get SSH password from keychain if stored
+      let sshPassword = "";
+      try {
+        sshPassword = await invoke<string>("get_ssh_password", {
+          target:   `devsql-ssh:${conn.id}:${conn.sshUser}`,
+          username: conn.sshUser,
+        });
+      } catch { /* no SSH password stored — key-only auth */ }
+
+      const localPort = await invoke<number>("open_tunnel", {
+        tunnelId:    conn.id,
+        sshHost:     conn.sshHost,
+        sshPort:     conn.sshPort ?? 22,
+        sshUser:     conn.sshUser,
+        sshKeyPath:  conn.sshKeyPath ?? "",
+        sshPassword: sshPassword,
+        dbHost:      "127.0.0.1",
+        dbPort:      conn.port,
+      });
+
+      setTunnelPorts(prev => ({ ...prev, [conn.id]: localPort }));
+      return localPort;
+    } catch (e) {
+      updateActiveTab({ error: `SSH tunnel failed: ${String(e)}` });
+      return null;
+    } finally {
+      setTunnelLoading(prev => ({ ...prev, [conn.id]: false }));
+    }
+  }
+
 
   useEffect(() => { schemaRef.current = schema; }, [schema]);
 
@@ -1145,20 +1311,29 @@ const [showExportMenu, setShowExportMenu] = useState(false);
           });
         }
       } else if (tab.connection) {
-        const conn = tab.connection;
-        historyConn = conn;
+          const conn = tab.connection;
+          historyConn = conn;
 
-        const connectionString = await invoke<string>("build_connection_string", {
-          credentialRef: conn.credentialRef,
-          engine:        conn.engine,
-          host:          conn.host,
-          port:          conn.port,
-          database:      conn.database,
-          username:      conn.username,
-          sslMode:       conn.sslMode ?? "prefer",
-          sqlInstance:   conn.sqlInstance ?? "",
-          windowsAuth:   conn.windowsAuth ?? false,
-        });
+          // Open SSH tunnel if enabled
+          let tunnelPort: number | undefined;
+          if (conn.sshEnabled) {
+            const port = await openTunnel(conn);
+            if (!port) return; // tunnel failed — error already set
+            tunnelPort = port;
+          }
+
+          const connectionString = await invoke<string>("build_connection_string", {
+            credentialRef: conn.credentialRef,
+            engine:        conn.engine,
+            host:          conn.host,
+            port:          conn.port,
+            database:      conn.database,
+            username:      conn.username,
+            sslMode:       conn.sslMode ?? "prefer",
+            sqlInstance:   conn.sqlInstance ?? "",
+            windowsAuth:   conn.windowsAuth ?? false,
+            tunnelPort:    tunnelPort,  // ← pass tunnel port
+          });
 
         raw = await invoke<string>("execute_query", {
           connectionString,
@@ -2031,29 +2206,33 @@ const [showExportMenu, setShowExportMenu] = useState(false);
           flexShrink: 0, flexWrap: "wrap", minHeight: 44,
         }}>
           {/* Active connection pill */}
-          {activeTab.connection && (
-              <div style={{
-                  display: "flex", alignItems: "center", gap: 8, padding: "4px 10px",
-                  background: "#1e2026", borderRadius: 6,
-                  border: `1px solid ${activeTab.connection.color}44`,
-                  minWidth: 0, overflow: "hidden",
-                }}>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: activeTab.connection.color, flexShrink: 0 }} />
-                  <span style={{ fontSize: 12, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {activeTab.connection.name}
-                  </span>
-                  <EngineBadge engine={activeTab.connection.engine} />
-                  {activeTab.connection.readOnly && (
-                    <span style={{
-                      fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
-                      background: "rgba(245,158,11,0.12)", color: "#f59e0b",
-                      textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "monospace",
-                      flexShrink: 0,
-                    }}>
-                      read-only
-                    </span>
-                  )}
-                </div>
+          {activeTab.connection?.sshEnabled && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "4px 10px", borderRadius: 6,
+              background: tunnelPorts[activeTab.connection.id]
+                ? "rgba(16,185,129,0.1)"
+                : tunnelLoading[activeTab.connection.id]
+                ? "rgba(245,158,11,0.1)"
+                : "rgba(239,68,68,0.1)",
+              border: `1px solid ${tunnelPorts[activeTab.connection.id]
+                ? "rgba(16,185,129,0.2)"
+                : tunnelLoading[activeTab.connection.id]
+                ? "rgba(245,158,11,0.2)"
+                : "rgba(239,68,68,0.2)"}`,
+              fontSize: 11, fontFamily: "monospace",
+              color: tunnelPorts[activeTab.connection.id]
+                ? "#10b981"
+                : tunnelLoading[activeTab.connection.id]
+                ? "#f59e0b"
+                : "#ef4444",
+            }}>
+              {tunnelLoading[activeTab.connection.id]
+                ? "⏳ Opening tunnel…"
+                : tunnelPorts[activeTab.connection.id]
+                ? `🔒 SSH :${tunnelPorts[activeTab.connection.id]}`
+                : "⚠ No tunnel"}
+            </div>
           )}
 
           {/* Active file pill */}

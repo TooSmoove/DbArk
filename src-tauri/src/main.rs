@@ -25,13 +25,15 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "5250b93127421c440d62341ff6969ed796037864c1ca1b502849686a9be63678";
+const HASH_CONNECTIONMANAGER: &str = "fb94e251058153f1282fffc32c9dda371efbffd07bea7bc099e303386d47b79f";
 const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
 const HASH_QUERYEXECUTOR: &str = "c7b90b63eb1916ea36ddd7b8017e2ab24330550512df95e8c5fe496ec0c28680";
 const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
 const HASH_SCHEMAEXPLORER: &str = "cae8c9eb870ceeadfc956f0f05262f09883b184a701ab69f34e2e553838a5106";
+const HASH_SSHTUNNEL: &str = "4927f3bae0f0a3d2845e03932ba215c8784b7829f5872c58d71a7877f70ea4af";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 
+static SSH_TUNNEL: OnceLock<libloading::Library> = OnceLock::new();
 static QUERY_EXECUTOR:     OnceLock<libloading::Library> = OnceLock::new();
 static CONNECTION_MANAGER: OnceLock<libloading::Library> = OnceLock::new();
 static FILE_QUERY_ENGINE:  OnceLock<libloading::Library> = OnceLock::new();
@@ -70,6 +72,13 @@ fn get_query_history() -> &'static libloading::Library {
     QUERY_HISTORY.get_or_init(|| unsafe {
         libloading::Library::new("natives/QueryHistory.dll")
             .expect("Failed to load QueryHistory.dll")
+    })
+}
+
+fn get_ssh_tunnel() -> &'static libloading::Library {
+    SSH_TUNNEL.get_or_init(|| unsafe {
+        libloading::Library::new("natives/SshTunnel.dll")
+            .expect("Failed to load SshTunnel.dll")
     })
 }
 
@@ -158,12 +167,16 @@ fn build_connection_string(
     ssl_mode: Option<String>,
     sql_instance: Option<String>,
     windows_auth: Option<bool>,
+    tunnel_port: Option<u16>, // ← add this
 ) -> Result<String, String> {
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+    let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
 
-    // Only fetch password if not using Windows Auth
+    // If tunnel is active, connect via localhost tunnel port
+    let effective_host = if tunnel_port.is_some() { "127.0.0.1".to_string() } else { host };
+    let effective_port = tunnel_port.unwrap_or(port);
+
     let password = if !win_auth {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
@@ -173,31 +186,6 @@ fn build_connection_string(
     };
 
     let conn_str = match engine.to_lowercase().as_str() {
-        "sqlserver" => {
-            let server = if !instance.is_empty() {
-                format!("{}\\{}", host, instance)
-            } else {
-                format!("{},{}", host, port)
-            };
-
-            let encrypt = match ssl.as_str() {
-                "require"     => "yes",
-                "verify-full" => "strict",
-                _             => "no",  // prefer and none both default to no for SQL Server
-            };
-
-            if win_auth {
-                format!(
-                    "Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
-                    server, database, encrypt
-                )
-            } else {
-                format!(
-                    "Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
-                    server, database, username, password, encrypt
-                )
-            }
-        },
         "mysql" => {
             let ssl_param = match ssl.as_str() {
                 "none"        => "SslMode=None;",
@@ -206,7 +194,7 @@ fn build_connection_string(
                 _             => "SslMode=Preferred;",
             };
             format!("Server={};Port={};Database={};Uid={};Pwd={};{}",
-                host, port, database, username, password, ssl_param)
+                effective_host, effective_port, database, username, password, ssl_param)
         },
         "postgres" => {
             let ssl_param = match ssl.as_str() {
@@ -216,7 +204,26 @@ fn build_connection_string(
                 _             => "SSL Mode=Prefer;",
             };
             format!("Host={};Port={};Database={};Username={};Password={};{}",
-                host, port, database, username, password, ssl_param)
+                effective_host, effective_port, database, username, password, ssl_param)
+        },
+        "sqlserver" => {
+            let server = if !instance.is_empty() {
+                format!("{}\\{}", effective_host, instance)
+            } else {
+                format!("{},{}", effective_host, effective_port)
+            };
+            let encrypt = match ssl.as_str() {
+                "require"     => "yes",
+                "verify-full" => "strict",
+                _             => "no",
+            };
+            if win_auth {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
+                    server, database, encrypt)
+            } else {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
+                    server, database, username, password, encrypt)
+            }
         },
         "sqlite" => format!("Data Source={}", database),
         _ => return Err(format!("Unsupported engine: {}", engine)),
@@ -513,6 +520,93 @@ fn migrate_credential(
 }
 
 #[tauri::command]
+fn open_tunnel(
+    tunnel_id: String,
+    ssh_host: String,
+    ssh_port: i32,
+    ssh_user: String,
+    ssh_key_path: String,
+    ssh_password: String,
+    db_host: String,
+    db_port: i32,
+) -> Result<i32, String> {
+    unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char, i32,
+            *const c_char, *const c_char, *const c_char,
+            *const c_char, i32,
+        ) -> *const c_char> = get_ssh_tunnel()
+            .get(b"open_tunnel")
+            .map_err(|e| e.to_string())?;
+
+        let strings = (
+            CString::new(tunnel_id).unwrap(),
+            CString::new(ssh_host).unwrap(),
+            CString::new(ssh_user).unwrap(),
+            CString::new(ssh_key_path).unwrap(),
+            CString::new(ssh_password).unwrap(),
+            CString::new(db_host).unwrap(),
+        );
+
+        let ptr = func(
+            strings.0.as_ptr(), strings.1.as_ptr(), ssh_port,
+            strings.2.as_ptr(), strings.3.as_ptr(), strings.4.as_ptr(),
+            strings.5.as_ptr(), db_port,
+        );
+
+        if ptr.is_null() { return Err("null response".to_string()); }
+        let json = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+
+        // Parse the local port from the response
+        let val: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| e.to_string())?;
+
+        if let Some(err) = val.get("error").and_then(|e| e.as_str()) {
+            if !err.is_empty() && err != "null" {
+                return Err(err.to_string());
+            }
+        }
+
+        val.get("localPort")
+            .and_then(|p| p.as_i64())
+            .map(|p| p as i32)
+            .ok_or_else(|| "No local port in response".to_string())
+    }
+}
+
+#[tauri::command]
+fn close_tunnel(tunnel_id: String) {
+    unsafe {
+        if let Ok(func) = get_ssh_tunnel()
+            .get::<unsafe extern "C" fn(*const c_char)>(b"close_tunnel")
+        {
+            let c_id = CString::new(tunnel_id).unwrap();
+            func(c_id.as_ptr());
+        }
+    }
+}
+
+#[tauri::command]
+fn is_tunnel_open(tunnel_id: String) -> bool {
+    unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
+            match get_ssh_tunnel().get(b"is_tunnel_open") {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+        let c_id = CString::new(tunnel_id).unwrap();
+        func(c_id.as_ptr()) == 1
+    }
+}
+
+#[tauri::command]
+fn get_ssh_password(target: String, username: String) -> Result<String, String> {
+    let entry = keyring::Entry::new(&target, &username)
+        .map_err(|e| e.to_string())?;
+    entry.get_password().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn export_results(
     path: String,
     format: String,
@@ -612,6 +706,7 @@ fn main() {
         ("natives/QueryHistory.dll",      HASH_QUERYHISTORY),
         ("natives/SchemaExplorer.dll",    HASH_SCHEMAEXPLORER),
         ("natives/duckdb.dll",            HASH_DUCKDB),
+        ("natives/SshTunnel.dll", HASH_SSHTUNNEL),
     ];
 
     for (path, expected) in &dlls {
@@ -626,6 +721,7 @@ fn main() {
     get_file_query_engine();
     get_schema_explorer();
     get_query_history();
+    get_ssh_tunnel();
 
     tauri::Builder::default()
     .plugin(tauri_plugin_clipboard_manager::init())
@@ -648,7 +744,11 @@ fn main() {
             clear_history,
             test_connection,
             migrate_credential,
-            export_results])
+            export_results,
+            open_tunnel,
+            close_tunnel,
+            is_tunnel_open,
+            get_ssh_password])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

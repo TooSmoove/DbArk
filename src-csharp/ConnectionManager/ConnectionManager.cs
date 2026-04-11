@@ -23,6 +23,11 @@ public class ConnectionConfig
     public bool ReadOnly { get; set; } = false;
     public string SqlInstance { get; set; } = "";
     public bool WindowsAuth { get; set; } = false;
+    public bool SshEnabled { get; set; } = false;
+    public string SshHost { get; set; } = "";
+    public int SshPort { get; set; } = 22;
+    public string SshUser { get; set; } = "";
+    public string SshKeyPath { get; set; } = "";
 }
 
 public class ConnectionListResult
@@ -47,6 +52,11 @@ public class SaveConnectionRequest
     public string SqlInstance { get; set; } = "";
     public bool WindowsAuth { get; set; } = false;
     public string ExistingFilePath { get; set; } = "";
+    public bool SshEnabled { get; set; } = false;
+    public string SshHost { get; set; } = "";
+    public int SshPort { get; set; } = 22;
+    public string SshUser { get; set; } = "";
+    public string SshKeyPath { get; set; } = "";
 }
 
 public static class ConnectionManagerLib
@@ -180,6 +190,13 @@ public static class ConnectionManagerLib
                     sql_instance = "{request.SqlInstance}"
                     windows_auth = {(request.WindowsAuth ? "true" : "false")}
 
+                    [ssh]
+                    enabled = {(request.SshEnabled ? "true" : "false")}
+                    host = "{request.SshHost}"
+                    port = {request.SshPort}
+                    user = "{request.SshUser}"
+                    key_path = "{request.SshKeyPath}"
+
                     [display]
                     color = "{request.Color}"
                     group = "{request.Group}"
@@ -276,7 +293,12 @@ public static class ConnectionManagerLib
             SslMode = values.GetValueOrDefault("connection.ssl_mode", "prefer"),
             ReadOnly = values.GetValueOrDefault("connection.read_only", "false") == "true",
             SqlInstance = values.GetValueOrDefault("connection.sql_instance", ""),
-            WindowsAuth = values.GetValueOrDefault("connection.windows_auth", "false") == "true"
+            WindowsAuth = values.GetValueOrDefault("connection.windows_auth", "false") == "true",
+            SshEnabled = values.GetValueOrDefault("ssh.enabled", "false") == "true",
+            SshHost = values.GetValueOrDefault("ssh.host", ""),
+            SshPort = int.TryParse(values.GetValueOrDefault("ssh.port", "22"), out int sp) ? sp : 22,
+            SshUser = values.GetValueOrDefault("ssh.user", ""),
+            SshKeyPath = values.GetValueOrDefault("ssh.key_path", "")
         };
 
         // Validate all fields before returning
