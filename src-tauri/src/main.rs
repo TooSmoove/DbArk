@@ -27,7 +27,7 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 // DLL integrity hashes — regenerate after every DLL rebuild
 const HASH_CONNECTIONMANAGER: &str = "fb94e251058153f1282fffc32c9dda371efbffd07bea7bc099e303386d47b79f";
 const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
-const HASH_QUERYEXECUTOR: &str = "c7b90b63eb1916ea36ddd7b8017e2ab24330550512df95e8c5fe496ec0c28680";
+const HASH_QUERYEXECUTOR: &str = "2c0746b85c701a717cde99f19a6a4200d891539aef9bdf3f14dda8da14aaab40";
 const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
 const HASH_SCHEMAEXPLORER: &str = "cae8c9eb870ceeadfc956f0f05262f09883b184a701ab69f34e2e553838a5106";
 const HASH_SSHTUNNEL: &str = "4927f3bae0f0a3d2845e03932ba215c8784b7829f5872c58d71a7877f70ea4af";
@@ -333,32 +333,69 @@ fn query_file_with_db(
 
 #[tauri::command]
 fn get_schema(
-    credential_ref: String, engine: String, host: String,
-    port: u16, database: String, username: String,
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    _ssl_mode: Option<String>,
+    sql_instance: Option<String>,
+    windows_auth: Option<bool>,
 ) -> Result<String, String> {
-    let entry = keyring::Entry::new(&credential_ref, &username)
-        .map_err(|e| e.to_string())?;
-    let password = entry.get_password().unwrap_or_default();
-    let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};", host, port, database, username, password),
-        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};", host, port, database, username, password),
-        "sqlite"   => format!("Data Source={}", database),
-        _          => return Err(format!("Unsupported engine: {}", engine)),
+    let instance = sql_instance.unwrap_or_default();
+    let win_auth = windows_auth.unwrap_or(false);
+
+    let password = if !win_auth {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        entry.get_password().unwrap_or_default()
+    } else {
+        String::new()
     };
+
+    let mut connection_string = match engine.to_lowercase().as_str() {
+        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};",
+            host, port, database, username, password),
+        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};",
+            host, port, database, username, password),
+        "sqlite"   => format!("Data Source={}", database),
+        "sqlserver" => {
+            let server = if !instance.is_empty() {
+                format!("{}\\{}", host, instance)
+            } else {
+                format!("{},{}", host, port)
+            };
+            if win_auth {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    server, database)
+            } else {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    server, database, username, password)
+            }
+        },
+        _ => return Err(format!("Unsupported engine: {}", engine)),
+    };
+
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
-        ) -> *const c_char> = get_schema_explorer().get(b"get_schema").expect("get_schema");
+        ) -> *const c_char> = get_schema_explorer()
+            .get(b"get_schema")
+            .expect("get_schema");
         let cs  = CString::new(connection_string.as_str()).unwrap();
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
         Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
     };
+
+    // Zero out connection string
     unsafe {
         let bytes = connection_string.as_bytes_mut();
         for b in bytes.iter_mut() { *b = 0; }
     }
+
     result
 }
 
@@ -696,6 +733,87 @@ fn export_json(
     Ok(())
 }
 
+#[tauri::command]
+fn append_audit_log(
+    connection_name: String,
+    engine: String,
+    sql: String,
+    row_count: i32,
+    duration_ms: i32,
+    success: bool,
+) -> bool {
+    use std::io::Write;
+
+    let home: std::path::PathBuf = match dirs::home_dir() {
+        Some(h) => h,
+        None    => return false,
+    };
+
+    let log_path = home.join(".devsql").join("audit.log");
+
+    let timestamp = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
+    let status = if success { "SUCCESS" } else { "ERROR" };
+    let scrubbed = scrub_sql_for_log(&sql);
+
+    let entry = format!(
+        "[{}] {} | {} | {} | {}ms | {} rows | {}\n",
+        timestamp, status, connection_name, engine,
+        duration_ms, row_count, scrubbed
+    );
+
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f)  => f,
+        Err(_) => return false,
+    };
+
+    file.write_all(entry.as_bytes()).is_ok()
+}
+
+fn scrub_sql_for_log(sql: &str) -> String {
+    // Simple manual scrub without regex crate
+    let mut result = sql.to_string();
+    for keyword in &["password", "pwd", "secret", "token", "key"] {
+        let lower = result.to_lowercase();
+        let mut search_from = 0;
+        while let Some(idx) = lower[search_from..].find(keyword) {
+            let abs_idx = search_from + idx;
+            let after_keyword = &lower[abs_idx + keyword.len()..];
+            // Look for = 'value' pattern
+            let trimmed = after_keyword.trim_start();
+            if trimmed.starts_with('=') {
+                let after_eq = trimmed[1..].trim_start();
+                if after_eq.starts_with('\'') {
+                    if let Some(end_quote) = after_eq[1..].find('\'') {
+                        let full_match_len = keyword.len()
+                            + (after_keyword.len() - trimmed.len())
+                            + 1
+                            + (trimmed.len() - after_eq.len())
+                            + 1 + end_quote + 1;
+                        let replacement = format!("{}='***'", keyword);
+                        result.replace_range(abs_idx..abs_idx + full_match_len, &replacement);
+                        search_from = abs_idx + replacement.len();
+                        continue;
+                    }
+                }
+            }
+            search_from = abs_idx + keyword.len();
+        }
+    }
+    // Truncate long SQL for readability
+    if result.len() > 200 {
+        format!("{}…", &result[..200])
+    } else {
+        result
+    }
+}
+
 fn main() {
 
      // Verify all native DLL integrity before loading
@@ -748,7 +866,8 @@ fn main() {
             open_tunnel,
             close_tunnel,
             is_tunnel_open,
-            get_ssh_password])
+            get_ssh_password,
+            append_audit_log])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

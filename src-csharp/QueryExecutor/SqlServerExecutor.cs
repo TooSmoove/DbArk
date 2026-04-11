@@ -42,6 +42,7 @@ public static class SqlServerExecutor
     [DllImport(OdbcDll)] private static extern short SQLFreeHandle(short handleType, IntPtr handle);
     [DllImport(OdbcDll)] private static extern short SQLDisconnect(IntPtr connHandle);
     [DllImport(OdbcDll)] private static extern short SQLSetStmtAttrW(IntPtr stmtHandle, int attribute, IntPtr valuePtr, int stringLength);
+    [DllImport(OdbcDll)] private static extern short SQLRowCount(IntPtr stmtHandle, out int rowCount);
 
     // ---- Public entry point -------------------------------
     public static IntPtr Execute(string connectionString, string sql, bool readOnly)
@@ -245,5 +246,155 @@ public static class SqlServerExecutor
             || trimmed.StartsWith("DESCRIBE")
             || trimmed.StartsWith("EXPLAIN")
             || trimmed.StartsWith("WITH");
+    }
+    public static int ExecuteNonQuery(string connectionString, string sql)
+    {
+        IntPtr hEnv = IntPtr.Zero;
+        IntPtr hDbc = IntPtr.Zero;
+        IntPtr hStmt = IntPtr.Zero;
+
+        try
+        {
+            SQLAllocHandle(SQL_HANDLE_ENV, IntPtr.Zero, out hEnv);
+            SQLSetEnvAttr(hEnv, SQL_ATTR_ODBC_VERSION, new IntPtr(SQL_OV_ODBC3), 0);
+            SQLAllocHandle(SQL_HANDLE_DBC, hEnv, out hDbc);
+
+            short outLen;
+            short rc = SQLDriverConnectW(hDbc, IntPtr.Zero,
+                connectionString, SQL_NTS,
+                IntPtr.Zero, 0, out outLen, 0);
+
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                return -1;
+
+            SQLAllocStmt(hDbc, out hStmt);
+            SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT, new IntPtr(30), 0);
+
+            rc = SQLExecDirectW(hStmt, sql, SQL_NTS);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                return -1;
+
+            // Get row count
+            int rowCount;
+            SQLRowCount(hStmt, out rowCount);
+            return rowCount;
+        }
+        catch { return -1; }
+        finally
+        {
+            if (hStmt != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+            if (hDbc != IntPtr.Zero) { SQLDisconnect(hDbc); SQLFreeHandle(SQL_HANDLE_DBC, hDbc); }
+            if (hEnv != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_ENV, hEnv);
+        }
+    }
+    public static QueryResult ExecuteInternal(
+    string connectionString, string sql)
+    {
+        IntPtr hEnv = IntPtr.Zero;
+        IntPtr hDbc = IntPtr.Zero;
+        IntPtr hStmt = IntPtr.Zero;
+
+        try
+        {
+            SQLAllocHandle(SQL_HANDLE_ENV, IntPtr.Zero, out hEnv);
+            SQLSetEnvAttr(hEnv, SQL_ATTR_ODBC_VERSION,
+                new IntPtr(SQL_OV_ODBC3), 0);
+            SQLAllocHandle(SQL_HANDLE_DBC, hEnv, out hDbc);
+
+            short outLen;
+            short rc = SQLDriverConnectW(
+                hDbc, IntPtr.Zero,
+                connectionString, SQL_NTS,
+                IntPtr.Zero, 0, out outLen, 0);
+
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                return new QueryResult
+                {
+                    Error = GetDiagnostic(SQL_HANDLE_DBC, hDbc)
+                };
+
+            SQLAllocStmt(hDbc, out hStmt);
+            SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT,
+                new IntPtr(30), 0);
+
+            rc = SQLExecDirectW(hStmt, sql, SQL_NTS);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                return new QueryResult
+                {
+                    Error = GetDiagnostic(SQL_HANDLE_STMT, hStmt)
+                };
+
+            return SerialiseResultsInternal(hStmt);
+        }
+        catch (Exception ex)
+        {
+            return new QueryResult { Error = ex.Message };
+        }
+        finally
+        {
+            if (hStmt != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+            if (hDbc != IntPtr.Zero)
+            {
+                SQLDisconnect(hDbc);
+                SQLFreeHandle(SQL_HANDLE_DBC, hDbc);
+            }
+            if (hEnv != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_ENV, hEnv);
+        }
+    }
+
+    private static QueryResult SerialiseResultsInternal(IntPtr hStmt)
+    {
+        SQLNumResultCols(hStmt, out short colCount);
+
+        var columns = new List<string>();
+        IntPtr nameBuf = Marshal.AllocHGlobal(256 * 2);
+        try
+        {
+            for (short i = 1; i <= colCount; i++)
+            {
+                SQLDescribeColW(hStmt, i, nameBuf, 256,
+                    out short nameLen, out _, out _, out _, out _);
+                columns.Add(Marshal.PtrToStringUni(nameBuf, nameLen) ?? $"col{i}");
+            }
+        }
+        finally { Marshal.FreeHGlobal(nameBuf); }
+
+        var rows = new List<List<string?>>();
+        int rowLimit = 10_000;
+        int rowCount = 0;
+        bool truncated = false;
+
+        IntPtr dataBuf = Marshal.AllocHGlobal(SQL_COLUMN_BUFFER_SIZE);
+        try
+        {
+            while (SQLFetch(hStmt) == SQL_SUCCESS)
+            {
+                if (rowCount >= rowLimit) { truncated = true; break; }
+                var row = new List<string?>();
+                for (short i = 1; i <= colCount; i++)
+                {
+                    short rc2 = SQLGetData(hStmt, i, SQL_C_WCHAR,
+                        dataBuf, SQL_COLUMN_BUFFER_SIZE, out int indicator);
+                    if (indicator == SQL_NULL_DATA)
+                        row.Add(null);
+                    else if (rc2 == SQL_SUCCESS || rc2 == SQL_SUCCESS_WITH_INFO)
+                        row.Add(Marshal.PtrToStringUni(
+                            dataBuf, Math.Max(0, indicator / 2)));
+                    else
+                        row.Add(null);
+                }
+                rows.Add(row);
+                rowCount++;
+            }
+        }
+        finally { Marshal.FreeHGlobal(dataBuf); }
+
+        return new QueryResult
+        {
+            Columns = columns,
+            Rows = rows,
+            RowCount = rowCount,
+            Truncated = truncated,
+        };
     }
 }

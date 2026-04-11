@@ -42,11 +42,13 @@ interface ConnectionListResult {
 }
 
 interface QueryResult {
-  columns: string[];
-  rows: (string | null)[][];
-  rowCount: number;
+  columns:   string[];
+  rows:      (string | null)[][];
+  rowCount:  number;
   truncated?: boolean;
-  error?: string;
+  error?:    string;
+  isMessage?: boolean;
+  sql?:      string;  
 }
 
 interface FileSession {
@@ -86,30 +88,32 @@ interface HistoryEntry {
 }
 
 interface Tab {
-  id: string;
-  title: string;
-  sql: string;
-  connection: ConnectionConfig | null;
-  file: FileSession | null;
-  result: QueryResult | null;
-  error: string | null;
-  loading: boolean;
-  duration: number | null;
-  joinTables: string[];
+  id:          string;
+  title:       string;
+  sql:         string;
+  connection:  ConnectionConfig | null;
+  file:        FileSession | null;
+  results:     QueryResult[];     
+  activeResult: number;            
+  error:       string | null;
+  loading:     boolean;
+  duration:    number | null;
+  joinTables:  string[];
 }
 
 function createTab(id?: string): Tab {
   return {
-    id:         id ?? `tab-${Date.now()}`,
-    title:      "New tab",
-    sql:        "",
-    connection: null,
-    file:       null,
-    result:     null,
-    error:      null,
-    loading:    false,
-    duration:   null,
-    joinTables: [],
+    id:           id ?? `tab-${Date.now()}`,
+    title:        "New tab",
+    sql:          "",
+    connection:   null,
+    file:         null,
+    results:      [],        // ← was: result: null
+    activeResult: 0,
+    error:        null,
+    loading:      false,
+    duration:     null,
+    joinTables:   [],
   };
 }
 
@@ -1056,6 +1060,12 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [tunnelPorts, setTunnelPorts] = useState<Record<string, number>>({});
   const [tunnelLoading, setTunnelLoading] = useState<Record<string, boolean>>({});
+  const [auditLogEnabled, setAuditLogEnabled] = useState(false);
+
+  useEffect(() => {
+    const stored = localStorage.getItem("dbark_audit_log");
+    if (stored === "true") setAuditLogEnabled(true);
+  }, []);
 
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
@@ -1176,7 +1186,7 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
           const fresh = parsed.connections.find(c => c.id === tab.connection!.id);
           if (fresh) {
             schemaCache.current.delete(fresh.id);
-            return { ...tab, connection: fresh, error: null, result: null };
+           return { ...tab, connection: fresh, error: null, results: [], activeResult: 0 };
           }
           return tab;
         }));
@@ -1261,7 +1271,8 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         connection: null,
         title:      name,
         joinTables: [],
-        result:     null,
+        results:     [],
+        activeResult: 0,
         error:      null,
       });
 
@@ -1279,7 +1290,7 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
 
     const tab = activeTabRef.current;
 
-    updateActiveTab({ loading: true, error: null, result: null });
+    updateActiveTab({ loading: true, error: null, results: [], activeResult: 0 });
 
     const start = performance.now();
     let historyConn: ConnectionConfig | null = null;
@@ -1346,25 +1357,70 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         return;
       }
 
-      const parsed = JSON.parse(raw);
-      const ms = Math.round(performance.now() - start);
+    const parsed: { results?: QueryResult[]; error?: string } = JSON.parse(raw);
+    const ms = Math.round(performance.now() - start);
 
-      updateActiveTab({
-        loading:  false,
-        duration: ms,
-        result:   parsed.error ? null : parsed,
-        error:    parsed.error ?? null,
-      });
-
-      if (historyConn) {
-        await saveToHistory(historyConn, sql, ms, parsed.rowCount ?? 0, !parsed.error);
-        if (showHistory) loadHistory(historyConn);
-      }
-
-    } catch (e) {
-      updateActiveTab({ loading: false, error: String(e) });
+    // Top-level error (connection failed etc)
+    if (parsed.error) {
+      const tabId = activeTabRef.current.id;
+      setTabs(prev => prev.map(t =>
+        t.id === tabId
+          ? { ...t, loading: false, duration: ms, results: [], error: parsed.error! }
+          : t
+      ));
+      return;
     }
-  }, [locked, showHistory, activeTabId]);
+
+    const results = parsed.results ?? [];
+    const firstError = results.find(r => r.error);
+    const tabId = activeTabRef.current.id; // ← capture the ref, not the closure
+
+    setTabs(prev => prev.map(t =>
+      t.id === tabId
+        ? {
+            ...t,
+            loading:      false,
+            duration:     ms,
+            results:      results,
+            activeResult: 0,
+            error:        firstError?.error ?? null,
+          }
+        : t
+    ));
+
+    updateActiveTab({
+      loading:      false,
+      duration:     ms,
+      results:      results,
+      activeResult: 0,
+      error:        firstError?.error ?? null,
+    });
+
+    if (historyConn) {
+      await saveToHistory(historyConn, sql, ms, parsed.rowCount ?? 0, !parsed.error);
+      if (showHistory) loadHistory(historyConn);
+    }
+
+    if (historyConn && auditLogEnabled) {
+      invoke("append_audit_log", {
+        connectionName: historyConn.name,
+        engine:         historyConn.engine,
+        sql:            sql,
+        rowCount:       parsed.rowCount ?? 0,
+        durationMs:     ms,
+        success:        !parsed.error,
+      }).catch(() => {}); // fire and forget — never block query execution
+    }
+
+   } catch (e) {
+      const tabId = activeTabRef.current.id;
+      setTabs(prev => prev.map(t =>
+        t.id === tabId
+          ? { ...t, loading: false, error: String(e) }
+          : t
+      ));
+    }
+  }, [locked, showHistory, activeTabId, auditLogEnabled]);
 
   useEffect(() => { runQueryRef.current = runQuery; }, [runQuery]);
   //End Run Query Function
@@ -1570,8 +1626,8 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
   }
 
   async function exportResults(format: "csv" | "json") {
-    const result = activeTab.result;
-    if (!result) return;
+    const result = activeTab.results[activeTab.activeResult];
+    if (!result || result.isMessage) return;
 
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
@@ -1836,8 +1892,8 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                         file:       null,
                         title:      conn.name,
                         joinTables: [],
-                        result:     null,
-                        error:      null,
+                        results:     [],
+                        activeResult: 0,
                       });
                       setSchema(null);
                       setExpandedTables(new Set());
@@ -2020,7 +2076,8 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                         connection: activeTab.connection, // keep connection for join panel
                         title:      file.name,
                         joinTables: [],
-                        result:     null,
+                        results:    [],
+                        activeResult: 0,
                         error:      null,
                       });
                       editorRef.current?.setValue("SELECT * FROM data LIMIT 100");
@@ -2253,6 +2310,7 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
             </div>
           )}
 
+          {/* Run Query Button */}
           <button
             onClick={runQuery}
             disabled={activeTab.loading || (!activeTab.connection && !activeTab.file)}
@@ -2266,6 +2324,8 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
           >
             {activeTab.loading ? "Running..." : "▶ Run (Cmd+Enter)"}
           </button>
+
+          {/* Show History Button */}
           <button
             onClick={() => {
               setShowHistory(h => !h);
@@ -2285,7 +2345,32 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
           >
             ⏱ History
           </button>
-          {activeTab.result && (
+
+          {/* Audit Log Button */}
+          <button
+            onClick={() => {
+              const next = !auditLogEnabled;
+              setAuditLogEnabled(next);
+              localStorage.setItem("dbark_audit_log", String(next));
+            }}
+            title={auditLogEnabled ? "Audit log ON — click to disable" : "Audit log OFF — click to enable"}
+            style={{
+              padding: "6px 10px",
+              background: auditLogEnabled ? "rgba(16,185,129,0.1)" : "none",
+              color: auditLogEnabled ? "#10b981" : "#4b5563",
+              border: `1px solid ${auditLogEnabled ? "rgba(16,185,129,0.2)" : "#2d2f36"}`,
+              borderRadius: 6,
+              cursor: "pointer",
+              fontSize: 11,
+              fontFamily: "monospace",
+              flexShrink: 0,
+            }}
+          >
+            📋 {auditLogEnabled ? "Audit ON" : "Audit OFF"}
+          </button>
+
+          {/* Export menu — only show if there's a result to export */}
+          {activeTab.results.length > 0 && !activeTab.results[activeTab.activeResult]?.isMessage && (
             <div style={{ position: "relative", display: "inline-block" }}>
               <button
                 onClick={() => setShowExportMenu(e => !e)}
@@ -2348,12 +2433,19 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
               )}
             </div>
           )}
+
+          {/* Row Count Display */}
           {activeTab.duration !== null && !activeTab.loading && (
             <span style={{ color: "#6b7280", fontSize: 11, whiteSpace: "nowrap" }}>
-              {activeTab.result ? `${activeTab.result.rowCount} rows · ` : ""}{activeTab.duration}ms
-              {activeTab.result?.truncated && (
+              {activeTab.results.length > 1
+                ? `${activeTab.results.length} statements · `
+                : activeTab.results[0]?.rowCount
+                ? `${activeTab.results[0].rowCount} rows · `
+                : ""}
+              {activeTab.duration}ms
+              {activeTab.results.some(r => r.truncated) && (
                 <span style={{ color: "#f59e0b", marginLeft: 8 }}>
-                  ⚠ first 10,000 rows shown
+                  ⚠ some results truncated at 10,000 rows
                 </span>
               )}
             </span>
@@ -2485,27 +2577,135 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         />
 
         {/* Results area */}
-        <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          {/* Error display */}
           {activeTab.error && (
-            <div style={{ padding: "10px 14px", background: "rgba(239,68,68,0.1)", borderBottom: "1px solid rgba(239,68,68,0.2)", color: "#ef4444", fontSize: 12, wordBreak: "break-word", flexShrink: 0 }}>
+            <div style={{
+              padding: "10px 14px",
+              background: "rgba(239,68,68,0.1)",
+              borderBottom: "1px solid rgba(239,68,68,0.2)",
+              color: "#ef4444", fontSize: 12,
+              wordBreak: "break-word", flexShrink: 0,
+            }}>
               ❌ {activeTab.error}
             </div>
           )}
-          {activeTab.result && activeTab.result.rows.length === 0 && (
-            <div style={{ padding: "16px", color: "#6b7280", fontSize: 13 }}>
-              Query executed successfully — 0 rows returned
+
+          {/* Result tab bar — only shown when multiple results */}
+          {activeTab.results.length > 1 &&  (
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              background: "#0e0f11",
+              borderBottom: "1px solid #1e2026",
+              overflowX: "auto",
+              flexShrink: 0,
+            }}>
+              {activeTab.results.map((result, i) => (
+                <button
+                  key={i}
+                  onClick={() => updateActiveTab({ activeResult: i })}
+                  style={{
+                    padding: "6px 14px",
+                    background: "none",
+                    border: "none",
+                    borderBottom: `2px solid ${
+                      activeTab.activeResult === i ? "#6c63ff" : "transparent"
+                    }`,
+                    color: activeTab.activeResult === i ? "#e8e9ec" : "#6b7280",
+                    cursor: "pointer",
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
+                  }}
+                >
+                  {result.error
+                    ? `❌ Result ${i + 1}`
+                    : result.isMessage
+                    ? `✓ Result ${i + 1}`
+                    : `⊞ Result ${i + 1}`}
+                  {result.sql && (
+                    <span style={{
+                      marginLeft: 6,
+                      color: "#4b5563",
+                      fontSize: 10,
+                      maxWidth: 120,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      display: "inline-block",
+                      verticalAlign: "middle",
+                    }}>
+                      {result.sql}
+                    </span>
+                  )}
+                </button>
+              ))}
             </div>
           )}
-          {activeTab.result && activeTab.result.rows.length > 0 && <ResultsGrid result={activeTab.result} />}
-          {!activeTab.result && !activeTab.error && !activeTab.loading && (
-            <div style={{ padding: "40px 16px", color: "#374151", fontSize: 13, textAlign: "center" }}>
-              {activeTab.file
-                ? "Write a query using \"data\" as the table name, or join DB tables above"
-                : activeTab.connection
-                ? "Write a query and press Cmd+Enter to run it"
-                : "Select a connection or open a file to get started"}
-            </div>
-          )}
+
+          {/* Active result */}
+          {(() => {
+            const result = activeTab.results[activeTab.activeResult];
+            if (!result) {
+              if (!activeTab.error && !activeTab.loading) {
+                return (
+                  <div style={{ padding: "40px 16px", color: "#374151",
+                    fontSize: 13, textAlign: "center" }}>
+                    {activeTab.file
+                      ? "Write a query using \"data\" as the table name"
+                      : activeTab.connection
+                      ? "Write a query and press Cmd+Enter to run it"
+                      : "Select a connection or open a file to get started"}
+                  </div>
+                );
+              }
+              return null;
+            }
+
+            if (result.error) {
+              return (
+                <div style={{
+                  padding: "10px 14px",
+                  background: "rgba(239,68,68,0.1)",
+                  color: "#ef4444", fontSize: 12,
+                  wordBreak: "break-word",
+                }}>
+                  ❌ {result.error}
+                </div>
+              );
+            }
+
+            if (result.isMessage) {
+              return (
+                <div style={{
+                  padding: "20px 14px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                }}>
+                  <span style={{ color: "#10b981", fontSize: 18 }}>✓</span>
+                  <span style={{
+                    color: "#9ca3af",
+                    fontSize: 13,
+                    fontFamily: "monospace",
+                  }}>
+                    {result.rows[0]?.[0] ?? "Command completed successfully."}
+                  </span>
+                </div>
+              );
+            }
+
+            if (result.rows.length === 0) {
+              return (
+                <div style={{ padding: "16px", color: "#6b7280", fontSize: 13 }}>
+                  Query executed successfully — 0 rows returned
+                </div>
+              );
+            }
+
+            return <ResultsGrid result={result} />;
+          })()}
         </div>
       </div>
     </div>

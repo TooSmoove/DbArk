@@ -75,25 +75,18 @@ public static class QueryExecutor
 
     [UnmanagedCallersOnly(EntryPoint = "execute_query")]
     public static IntPtr ExecuteQuery(
-     IntPtr connectionStringPtr,
-     IntPtr sqlPtr,
-     IntPtr enginePtr,
-     IntPtr readOnlyPtr)   // ← add this
+    IntPtr connectionStringPtr,
+    IntPtr sqlPtr,
+    IntPtr enginePtr,
+    IntPtr readOnlyPtr)
     {
         try
         {
-            string? connectionString = Marshal.PtrToStringUTF8(connectionStringPtr);
-            string? sql = Marshal.PtrToStringUTF8(sqlPtr);
-            string? engine = Marshal.PtrToStringUTF8(enginePtr);
-            string? readOnlyStr = Marshal.PtrToStringUTF8(readOnlyPtr);
-            bool readOnly = readOnlyStr == "true";
+            var connectionString = Marshal.PtrToStringUTF8(connectionStringPtr) ?? "";
+            var sql = Marshal.PtrToStringUTF8(sqlPtr) ?? "";
+            var engine = Marshal.PtrToStringUTF8(enginePtr) ?? "";
+            var readOnly = Marshal.PtrToStringUTF8(readOnlyPtr) == "true";
 
-            if (string.IsNullOrEmpty(connectionString))
-                return Marshal.StringToCoTaskMemUTF8("{\"error\":\"Empty connection string\"}");
-            if (string.IsNullOrEmpty(sql))
-                return Marshal.StringToCoTaskMemUTF8("{\"error\":\"Empty SQL\"}");
-
-            // Split statements
             var statements = sql
                 .Split(';')
                 .Select(s => s.Trim())
@@ -101,117 +94,81 @@ public static class QueryExecutor
                 .ToList();
 
             if (statements.Count == 0)
-                return Marshal.StringToCoTaskMemUTF8("{\"error\":\"No statements found\"}");
+                return Marshal.StringToCoTaskMemUTF8("No statements found");
 
-            // Enforce read-only — check every statement
+            // Enforce read-only on all statements upfront
             if (readOnly)
             {
                 foreach (var stmt in statements)
                 {
                     if (!IsReadOnlyStatement(stmt))
-                    {
-                        var err = new ErrorResult
-                        {
-                            error = $"Connection is read-only — statement not allowed: {stmt.Split('\n')[0].Trim()}"
-                        };
-                        return Marshal.StringToCoTaskMemUTF8(
-                            JsonSerializer.Serialize(err, AppJsonContext.Default.ErrorResult));
-                    }
+                        return Marshal.StringToCoTaskMemUTF8($"Connection is read-only — statement not allowed: {stmt.Split('\n')[0].Trim()}");
                 }
             }
 
-            // Execute all but last, return last result
-            foreach (var stmt in statements.SkipLast(1))
+            var results = new List<QueryResult>();
+
+            foreach (var stmt in statements)
             {
-                try
-                {
-                    _ = engine?.ToLower() switch
-                    {
-                        "postgres" => ExecutePostgres(connectionString, stmt),
-                        "sqlite" => ExecuteSqlite(connectionString, stmt),
-                        "sqlserver" => SqlServerExecutor.Execute(connectionString, stmt, false),
-                        _ => ExecuteMySql(connectionString, stmt),
-                    };
-                }
-                catch { }
+                var result = ExecuteStatement(connectionString, stmt, engine);
+                results.Add(result);
+
+                // Stop at first error
+                if (result.Error != null)
+                    break;
             }
 
-            var lastStatement = statements.Last();
-            return engine?.ToLower() switch
-            {
-                "postgres" => ExecutePostgres(connectionString, lastStatement),
-                "sqlite" => ExecuteSqlite(connectionString, lastStatement),
-                "sqlserver" => SqlServerExecutor.Execute(connectionString, lastStatement, readOnly),
-                _ => ExecuteMySql(connectionString, lastStatement),
-            };
+            // After the foreach loop, temporarily replace the return with:
+            return Marshal.StringToCoTaskMemUTF8(
+                JsonSerializer.Serialize(
+                    new MultiResult { Results = results },
+                    AppJsonContext.Default.MultiResult));
         }
         catch (Exception ex)
         {
-            var errorResult = new ErrorResult { error = ex.Message };
-            return Marshal.StringToCoTaskMemUTF8(
-                JsonSerializer.Serialize(errorResult, AppJsonContext.Default.ErrorResult));
+            return Marshal.StringToCoTaskMemUTF8(ex.Message);
         }
     }
 
-    private static IntPtr ExecuteMySql(string connectionString, string sql)
+    private static int ExecuteNonQuery(
+        string connectionString, string sql, string engine)
     {
-        using var conn = new MySqlConnection(connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandTimeout = 30;
-        cmd.CommandText = sql;
-        using var reader = cmd.ExecuteReader();
-        return SerialiseReader(reader);
-    }
-
-    private static IntPtr ExecutePostgres(string connectionString, string sql)
-    {
-        using var conn = new NpgsqlConnection(connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandTimeout = 30;
-        cmd.CommandText = sql;
-        using var reader = cmd.ExecuteReader();
-        return SerialiseReader(reader);
-    }
-
-    private static IntPtr SerialiseReader(System.Data.IDataReader reader)
-    {
-        var columns = new List<string>();
-        for (int i = 0; i < reader.FieldCount; i++)
-            columns.Add(reader.GetName(i));
-
-        var rows = new List<List<string?>>();
-        int rowLimit = 10_000;
-        int rowCount = 0;
-        bool truncated = false;
-
-        while (reader.Read())
+        return engine.ToLower() switch
         {
-            if (rowCount >= rowLimit)
-            {
-                truncated = true;
-                break;
-            }
-            var row = new List<string?>();
-            for (int i = 0; i < reader.FieldCount; i++)
-                row.Add(reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString());
-            rows.Add(row);
-            rowCount++;
-        }
-
-        var result = new QueryResult
-        {
-            Columns = columns,
-            Rows = rows,
-            RowCount = rowCount,
-            Truncated = truncated
+            "postgres" => ExecuteNonQueryPostgres(connectionString, sql),
+            "sqlite" => ExecuteNonQuerySqlite(connectionString, sql),
+            "sqlserver" => SqlServerExecutor.ExecuteNonQuery(connectionString, sql),
+            _ => ExecuteNonQueryMySql(connectionString, sql),
         };
-
-        return Marshal.StringToCoTaskMemUTF8(
-            JsonSerializer.Serialize(result, AppJsonContext.Default.QueryResult));
     }
 
+    private static int ExecuteNonQueryMySql(string connectionString, string sql)
+    {
+        using var conn = new MySqlConnector.MySqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = 30;
+        return cmd.ExecuteNonQuery();
+    }
+
+    private static int ExecuteNonQueryPostgres(string connectionString, string sql)
+    {
+        using var conn = new Npgsql.NpgsqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = 30;
+        return cmd.ExecuteNonQuery();
+    }
+
+    private static int ExecuteNonQuerySqlite(string connectionString, string sql)
+    {
+        // SQLite via P/Invoke doesn't have a direct non-query path
+        // Use the existing Execute method and discard the result
+        ExecuteSqlite(connectionString, sql);
+        return -1; // SQLite P/Invoke doesn't return row counts easily
+    }
     // ---- SQLite via direct P/Invoke to winsqlite3.dll ----------------
     // winsqlite3.dll ships with Windows 10/11 — zero external dependencies
 
@@ -401,14 +358,153 @@ public static class QueryExecutor
             || trimmed.StartsWith("PRAGMA")
             || trimmed.StartsWith("WITH"); // CTEs — may contain SELECT
     }
+    private static QueryResult ExecuteStatement(
+    string connectionString, string sql, string engine)
+    {
+        try
+        {
+            var isSelect = IsReadOnlyStatement(sql);
+
+            // Temporary debug — return this info as a message result
+            // to see what's happening
+            if (isSelect)
+            {
+                var result1 = engine.ToLower() switch
+                {
+                    "postgres" => ExecutePostgresInternal(connectionString, sql),
+                    "sqlite" => ExecuteSqliteInternal(connectionString, sql),
+                    "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, sql),
+                    _ => ExecuteMySqlInternal(connectionString, sql),
+                };
+                result1.Sql = sql.Length > 80 ? sql[..80] + "…" : sql;
+
+                // Debug: if result is empty/null add diagnostic info
+                if (result1.Columns.Count == 0 && result1.Error == null)
+                {
+                    result1.Error = $"DEBUG: SELECT returned 0 columns. SQL: {sql[..Math.Min(50, sql.Length)]}";
+                }
+
+                return result1;
+            }
+
+            if (!isSelect)
+            {
+                int rowsAffected = ExecuteNonQuery(connectionString, sql, engine);
+                return new QueryResult
+                {
+                    Columns = new List<string> { "Message" },
+                    Rows = new List<List<string?>>
+                {
+                    new List<string?> { rowsAffected >= 0
+                        ? $"({rowsAffected} row{(rowsAffected == 1 ? "" : "s")} affected)"
+                        : "Command completed successfully." }
+                },
+                    RowCount = 0,
+                    Truncated = false,
+                    IsMessage = true,
+                    Sql = sql.Length > 80 ? sql[..80] + "…" : sql,
+                };
+            }
+
+            // SELECT — call internal methods that return QueryResult directly
+            var result = engine.ToLower() switch
+            {
+                "postgres" => ExecutePostgresInternal(connectionString, sql),
+                "sqlite" => ExecuteSqliteInternal(connectionString, sql),
+                "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, sql),
+                _ => ExecuteMySqlInternal(connectionString, sql),
+            };
+
+            result.Sql = sql.Length > 80 ? sql[..80] + "…" : sql;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            return new QueryResult
+            {
+                Error = ex.Message,
+                Sql = sql.Length > 80 ? sql[..80] + "…" : sql
+            };
+        }
+    }
+    private static QueryResult ExecuteMySqlInternal(
+    string connectionString, string sql)
+    {
+        using var conn = new MySqlConnector.MySqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = 30;
+        using var reader = cmd.ExecuteReader();
+        return ReaderToQueryResult(reader);
+    }
+
+    private static QueryResult ExecutePostgresInternal(
+        string connectionString, string sql)
+    {
+        using var conn = new Npgsql.NpgsqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = 30;
+        using var reader = cmd.ExecuteReader();
+        return ReaderToQueryResult(reader);
+    }
+
+    private static QueryResult ExecuteSqliteInternal(
+        string connectionString, string sql)
+    {
+        // SQLite uses P/Invoke — reuse existing IntPtr path and deserialise
+        var ptr = ExecuteSqlite(connectionString, sql);
+        var json = Marshal.PtrToStringUTF8(ptr) ?? "{}";
+        return JsonSerializer.Deserialize<QueryResult>(
+            json, AppJsonContext.Default.QueryResult)
+            ?? new QueryResult();
+    }
+    private static QueryResult ReaderToQueryResult(System.Data.IDataReader reader)
+    {
+        var columns = new List<string>();
+        var rows = new List<List<string?>>();
+        int rowLimit = 10_000;
+        bool truncated = false;
+
+        for (int i = 0; i < reader.FieldCount; i++)
+            columns.Add(reader.GetName(i));
+
+        int rowCount = 0;
+        while (reader.Read())
+        {
+            if (rowCount >= rowLimit) { truncated = true; break; }
+            var row = new List<string?>();
+            for (int i = 0; i < reader.FieldCount; i++)
+                row.Add(reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString());
+            rows.Add(row);
+            rowCount++;
+        }
+
+        return new QueryResult
+        {
+            Columns = columns,
+            Rows = rows,
+            RowCount = rowCount,
+            Truncated = truncated,
+        };
+    }
 }
 
 public class QueryResult
 {
-    public List<string> Columns { get; set; } = new();
-    public List<List<string?>> Rows { get; set; } = new();
-    public int RowCount { get; set; }
-    public bool Truncated { get; set; }
+    [JsonPropertyName("columns")] public List<string> Columns { get; set; } = new();
+    [JsonPropertyName("rows")] public List<List<string?>> Rows { get; set; } = new();
+    [JsonPropertyName("rowCount")] public int RowCount { get; set; }
+    [JsonPropertyName("truncated")] public bool Truncated { get; set; }
+    [JsonPropertyName("error")] public string? Error { get; set; }
+    [JsonPropertyName("isMessage")] public bool IsMessage { get; set; }
+    [JsonPropertyName("sql")] public string? Sql { get; set; }
+}
+public class MultiResult
+{
+    [JsonPropertyName("results")] public List<QueryResult> Results { get; set; } = new();
 }
 
 public class ErrorResult
@@ -417,8 +513,8 @@ public class ErrorResult
 }
 
 [JsonSerializable(typeof(QueryResult))]
-[JsonSerializable(typeof(List<string>))]
-[JsonSerializable(typeof(List<List<string?>>))]
+[JsonSerializable(typeof(MultiResult))]
 [JsonSerializable(typeof(ErrorResult))]
+[JsonSerializable(typeof(List<QueryResult>))]
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 internal partial class AppJsonContext : JsonSerializerContext { }
