@@ -71,11 +71,49 @@ interface TableInfo {
   columns: ColumnInfo[];
 }
 
-interface SchemaResult {
-  tables: TableInfo[];
-  error?: string;
+interface ProcedureInfo {
+  name:           string;
+  schema:         string;
+  parameterCount: number;
+  created?:       string;
 }
 
+interface FunctionInfo {
+  name:           string;
+  schema:         string;
+  functionType:   string; // scalar | table | window
+  parameterCount: number;
+}
+
+interface ViewInfo {
+  name:   string;
+  schema: string;
+}
+
+interface TriggerInfo {
+  name:      string;
+  tableName: string;
+  event:     string;
+  timing:    string;
+}
+
+interface IndexInfo {
+  name:      string;
+  tableName: string;
+  columns:   string;
+  isUnique:  boolean;
+  isPrimary: boolean;
+}
+
+interface SchemaResult {
+  tables:     TableInfo[];
+  procedures: ProcedureInfo[];
+  functions:  FunctionInfo[];
+  views:      ViewInfo[];
+  triggers:   TriggerInfo[];
+  indexes:    IndexInfo[];
+  error?:     string;
+}
 interface HistoryEntry {
   id: number;
   connectionId: string;
@@ -1014,6 +1052,64 @@ function useDebounce<T>(value: T, delay: number): T {
   return debounced;
 }
 
+{/*Renders a section in the schema sidebar for tables, views, or routines*/}
+function SchemaSection({
+  label, icon, count, sectionKey, expanded, onToggle,
+  children, emptyMessage,
+}: {
+  label:         string;
+  icon:          string;
+  count:         number;
+  sectionKey:    string;
+  expanded:      boolean;
+  onToggle:      () => void;
+  children:      React.ReactNode;
+  emptyMessage?: string;
+}) {
+  return (
+    <div style={{ borderTop: "1px solid #1e2026" }}>
+      <div
+        onClick={onToggle}
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "6px 14px", cursor: "pointer",
+          background: expanded ? "#0e0f11" : "transparent",
+          transition: "background .1s",
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = "#0e0f11")}
+        onMouseLeave={e => (e.currentTarget.style.background = expanded ? "#0e0f11" : "transparent")}
+      >
+        <span style={{ fontSize: 9, color: "#4b5563", width: 10, flexShrink: 0 }}>
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace",
+          fontWeight: 600, flex: 1, textTransform: "uppercase", letterSpacing: ".05em" }}>
+          {label}
+        </span>
+        <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace" }}>
+          {count}
+        </span>
+      </div>
+
+      {expanded && (
+        <div style={{ background: "#080909" }}>
+          {emptyMessage ? (
+            <div style={{ padding: "8px 14px 8px 20px", fontSize: 10,
+              color: "#374151", fontFamily: "monospace", fontStyle: "italic" }}>
+              {emptyMessage}
+            </div>
+          ) : count === 0 ? (
+            <div style={{ padding: "8px 14px 8px 20px", fontSize: 10,
+              color: "#374151", fontFamily: "monospace" }}>
+              None found
+            </div>
+          ) : children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---- Main App ---------------------------------------------
 function App() {
   const editorRef = useRef<any>(null);
@@ -1086,6 +1182,16 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
     window.addEventListener("mouseup", onUp);
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, []);
+
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+
+  function toggleSection(key: string) {
+    setExpandedSections(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }
 
   function onSidebarDragStart(e: React.MouseEvent) {
     sidebarDragging.current = true;
@@ -1940,106 +2046,267 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                         </div>
                       )}
 
-                      {schema && !schema.error && (
+                      {schema && !schema.error && (() => {
+                        const safeSchema = {
+                          tables:     schema.tables     ?? [],
+                          procedures: schema.procedures ?? [],
+                          functions:  schema.functions  ?? [],
+                          views:      schema.views      ?? [],
+                          triggers:   schema.triggers   ?? [],
+                          indexes:    schema.indexes    ?? [],
+                        };
+                        return (
                         <>
-                          {/* Refresh button */}
+                          {/* Refresh button — unchanged */}
                           <div style={{ padding: "5px 14px 3px", display: "flex", justifyContent: "flex-end" }}>
                             <button
-                              onClick={(e) => { e.stopPropagation(); schemaCache.current.delete(conn.id); loadSchema(conn); }}
-                              style={{ background: "none", border: "none", color: "#4b5563", cursor: "pointer", fontSize: 10, fontFamily: "monospace", padding: "2px 4px" }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                schemaCache.current.delete(conn.id);
+                                loadSchema(conn);
+                              }}
+                              style={{ background: "none", border: "none", color: "#4b5563",
+                                cursor: "pointer", fontSize: 10, fontFamily: "monospace", padding: "2px 4px" }}
                               title="Refresh schema"
                             >
                               ↻ refresh
                             </button>
                           </div>
 
-                          {/* Table list */}
-                          {schema.tables.map((table) => (
-                            <div key={table.name}>
-                              {/* Table row */}
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  padding: "5px 14px",
-                                  cursor: "pointer",
-                                  borderTop: "1px solid #1a1b21",
-                                }}
-                                onClick={() => {
-                                  // Toggle expand/collapse
-                                  const next = new Set(expandedTables);
-                                  next.has(table.name) ? next.delete(table.name) : next.add(table.name);
-                                  setExpandedTables(next);
-                                }}
-                                onDoubleClick={() => {
-                                  // Insert SELECT query into editor
-                                  const q = `SELECT * FROM ${table.name} LIMIT 100`;
-                                  editorRef.current?.setValue(q);
-                                  editorRef.current?.focus();
-                                }}
-                                title="Click to expand · Double-click to query"
-                              >
-                                <span style={{ fontSize: 9, color: "#4b5563", flexShrink: 0, width: 10 }}>
-                                  {expandedTables.has(table.name) ? "▾" : "▸"}
-                                </span>
-                                <span style={{
-                                  fontSize: 11,
-                                  color: "#9ca3af",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                  fontFamily: "monospace",
-                                  flex: 1,
-                                }}>
-                                  {table.name}
-                                </span>
-                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
-                                  {table.columns.length}
-                                </span>
-                              </div>
-
-                              {/* Column list — shown when table is expanded */}
-                              {expandedTables.has(table.name) && table.columns.map((col) => (
+                          {/* Tables section */}
+                          <SchemaSection
+                            label="Tables"
+                            icon="▤"
+                            count={safeSchema.tables.length}
+                            sectionKey={`${conn.id}-tables`}
+                            expanded={expandedSections.has(`${conn.id}-tables`)}
+                            onToggle={() => toggleSection(`${conn.id}-tables`)}
+                          >
+                            {safeSchema.tables.map(table => (
+                              <div key={table.name}>
                                 <div
-                                  key={col.name}
                                   style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 6,
-                                    padding: "3px 14px 3px 26px",
-                                    borderTop: "1px solid #111318",
+                                    display: "flex", alignItems: "center", gap: 6,
+                                    padding: "5px 14px", cursor: "pointer",
+                                    borderTop: "1px solid #1a1b21",
                                   }}
+                                  onClick={() => {
+                                    const next = new Set(expandedTables);
+                                    next.has(table.name) ? next.delete(table.name) : next.add(table.name);
+                                    setExpandedTables(next);
+                                  }}
+                                  onDoubleClick={() => {
+                                    editorRef.current?.setValue(`SELECT * FROM ${table.name} LIMIT 100`);
+                                    editorRef.current?.focus();
+                                  }}
+                                  title="Click to expand · Double-click to query"
                                 >
-                                  {/* PK indicator */}
-                                  {col.isPrimaryKey && (
-                                    <span style={{ fontSize: 8, color: "#f59e0b", flexShrink: 0 }} title="Primary key">🔑</span>
-                                  )}
-                                  <span style={{
-                                    fontSize: 11,
-                                    color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
-                                    fontFamily: "monospace",
-                                    flex: 1,
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                    whiteSpace: "nowrap",
-                                  }}>
-                                    {col.name}
+                                  <span style={{ fontSize: 9, color: "#4b5563", flexShrink: 0, width: 10 }}>
+                                    {expandedTables.has(table.name) ? "▾" : "▸"}
                                   </span>
-                                  <span style={{
-                                    fontSize: 9,
-                                    color: "#374151",
-                                    fontFamily: "monospace",
-                                    flexShrink: 0,
-                                  }}>
-                                    {col.dataType}
+                                  <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                    fontFamily: "monospace" }}>
+                                    {table.name}
+                                  </span>
+                                  <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
+                                    {table.columns?.length ?? 0}
                                   </span>
                                 </div>
-                              ))}
-                            </div>
-                          ))}
-                        </>
-                      )}
+                                {expandedTables.has(table.name) && (table.columns ?? []).map(col => (
+                                  <div key={col.name} style={{
+                                    display: "flex", alignItems: "center", gap: 6,
+                                    padding: "3px 14px 3px 26px", borderTop: "1px solid #111318",
+                                  }}>
+                                    {col.isPrimaryKey && (
+                                      <span style={{ fontSize: 8, color: "#f59e0b", flexShrink: 0 }}>🔑</span>
+                                    )}
+                                    <span style={{ fontSize: 11, color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
+                                      fontFamily: "monospace", flex: 1, overflow: "hidden",
+                                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      {col.name}
+                                    </span>
+                                    <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
+                                      {col.dataType}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                          </SchemaSection>
+
+                          {/* Stored Procedures */}
+                          <SchemaSection
+                            label="Stored Procedures"
+                            icon="⚙"
+                            count={safeSchema.procedures.length}
+                            sectionKey={`${conn.id}-procedures`}
+                            expanded={expandedSections.has(`${conn.id}-procedures`)}
+                            onToggle={() => toggleSection(`${conn.id}-procedures`)}
+                            emptyMessage={conn.engine === "sqlite"
+                              ? "SQLite doesn't support stored procedures"
+                              : undefined}
+                          >
+                            {safeSchema.procedures.map(proc => (
+                              <div key={`${proc.schema}.${proc.name}`}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 6,
+                                  padding: "5px 14px 5px 20px",
+                                  borderTop: "1px solid #1a1b21", cursor: "default",
+                                }}
+                              >
+                                <span style={{ fontSize: 10, color: "#6c63ff", flexShrink: 0 }}>ƒ</span>
+                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                  fontFamily: "monospace" }}>
+                                  {proc.name}
+                                </span>
+                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
+                                  {proc.parameterCount}p
+                                </span>
+                              </div>
+                            ))}
+                          </SchemaSection>
+
+                          {/* Functions */}
+                          <SchemaSection
+                            label="Functions"
+                            icon="λ"
+                            count={safeSchema.functions.length}
+                            sectionKey={`${conn.id}-functions`}
+                            expanded={expandedSections.has(`${conn.id}-functions`)}
+                            onToggle={() => toggleSection(`${conn.id}-functions`)}
+                            emptyMessage={conn.engine === "sqlite"
+                              ? "SQLite doesn't support user-defined functions"
+                              : undefined}
+                          >
+                            {safeSchema.functions.map(fn => (
+                              <div key={`${fn.schema}.${fn.name}`}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 6,
+                                  padding: "5px 14px 5px 20px",
+                                  borderTop: "1px solid #1a1b21",
+                                }}
+                              >
+                                <span style={{ fontSize: 10,
+                                  color: fn.functionType === "table" ? "#10b981" : "#f59e0b",
+                                  flexShrink: 0 }}>
+                                  λ
+                                </span>
+                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                  fontFamily: "monospace" }}>
+                                  {fn.name}
+                                </span>
+                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
+                                  {fn.functionType}
+                                </span>
+                              </div>
+                            ))}
+                          </SchemaSection>
+
+                          {/* Views */}
+                          <SchemaSection
+                            label="Views"
+                            icon="◫"
+                            count={safeSchema.views.length}
+                            sectionKey={`${conn.id}-views`}
+                            expanded={expandedSections.has(`${conn.id}-views`)}
+                            onToggle={() => toggleSection(`${conn.id}-views`)}
+                          >
+                            {safeSchema.views.map(view => (
+                              <div key={`${view.schema}.${view.name}`}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 6,
+                                  padding: "5px 14px 5px 20px",
+                                  borderTop: "1px solid #1a1b21", cursor: "pointer",
+                                }}
+                                onDoubleClick={() => {
+                                  editorRef.current?.setValue(`SELECT * FROM ${view.name} LIMIT 100`);
+                                  editorRef.current?.focus();
+                                }}
+                                title="Double-click to query"
+                              >
+                                <span style={{ fontSize: 9, color: "#3b82f6", flexShrink: 0 }}>◫</span>
+                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                  fontFamily: "monospace" }}>
+                                  {view.name}
+                                </span>
+                              </div>
+                            ))}
+                          </SchemaSection>
+
+                          {/* Triggers */}
+                          <SchemaSection
+                            label="Triggers"
+                            icon="⚡"
+                            count={safeSchema.triggers.length}
+                            sectionKey={`${conn.id}-triggers`}
+                            expanded={expandedSections.has(`${conn.id}-triggers`)}
+                            onToggle={() => toggleSection(`${conn.id}-triggers`)}
+                          >
+                            {safeSchema.triggers.map(trigger => (
+                              <div key={trigger.name}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 6,
+                                  padding: "5px 14px 5px 20px",
+                                  borderTop: "1px solid #1a1b21",
+                                }}
+                              >
+                                <span style={{ fontSize: 9, color: "#ef4444", flexShrink: 0 }}>⚡</span>
+                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                  fontFamily: "monospace" }}>
+                                  {trigger.name}
+                                </span>
+                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace",
+                                  flexShrink: 0, textAlign: "right" }}>
+                                  {trigger.timing} {trigger.event}
+                                </span>
+                              </div>
+                            ))}
+                          </SchemaSection>
+
+                          {/* Indexes */}
+                          <SchemaSection
+                            label="Indexes"
+                            icon="⊞"
+                            count={safeSchema.indexes.length}
+                            sectionKey={`${conn.id}-indexes`}
+                            expanded={expandedSections.has(`${conn.id}-indexes`)}
+                            onToggle={() => toggleSection(`${conn.id}-indexes`)}
+                          >
+                            {safeSchema.indexes.map(idx => (
+                              <div key={`${idx.tableName}.${idx.name}`}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 6,
+                                  padding: "5px 14px 5px 20px",
+                                  borderTop: "1px solid #1a1b21",
+                                }}
+                              >
+                                <span style={{ fontSize: 9,
+                                  color: idx.isPrimary ? "#f59e0b" : idx.isUnique ? "#6c63ff" : "#4b5563",
+                                  flexShrink: 0 }}>
+                                  {idx.isPrimary ? "🔑" : idx.isUnique ? "◈" : "◇"}
+                                </span>
+                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                  fontFamily: "monospace" }}>
+                                  {idx.name}
+                                </span>
+                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace",
+                                  flexShrink: 0, maxWidth: 80, overflow: "hidden",
+                                  textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                                  title={idx.columns}>
+                                  {idx.tableName}
+                                </span>
+                              </div>
+                            ))}
+                          </SchemaSection>
+                          </>
+                          );
+                        })()}
                     </div>
                   )}
                 </div>
