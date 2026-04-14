@@ -87,11 +87,7 @@ public static class QueryExecutor
             var engine = Marshal.PtrToStringUTF8(enginePtr) ?? "";
             var readOnly = Marshal.PtrToStringUTF8(readOnlyPtr) == "true";
 
-            var statements = sql
-                .Split(';')
-                .Select(s => s.Trim())
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .ToList();
+            var statements = SplitStatements(sql);
 
             if (statements.Count == 0)
                 return Marshal.StringToCoTaskMemUTF8("No statements found");
@@ -378,12 +374,6 @@ public static class QueryExecutor
                 };
                 result1.Sql = sql.Length > 80 ? sql[..80] + "…" : sql;
 
-                // Debug: if result is empty/null add diagnostic info
-                if (result1.Columns.Count == 0 && result1.Error == null)
-                {
-                    result1.Error = $"DEBUG: SELECT returned 0 columns. SQL: {sql[..Math.Min(50, sql.Length)]}";
-                }
-
                 return result1;
             }
 
@@ -489,6 +479,111 @@ public static class QueryExecutor
             RowCount = rowCount,
             Truncated = truncated,
         };
+    }
+    private static List<string> SplitStatements(string sql)
+    {
+        var statements = new List<string>();
+        var current = new System.Text.StringBuilder();
+        int depth = 0;
+        bool inString = false;
+        bool inDollarQuote = false;
+        char stringChar = '\0';
+        int i = 0;
+
+        while (i < sql.Length)
+        {
+            char c = sql[i];
+
+            // Handle dollar-quoted strings (Postgres $$...$$)
+            if (!inString && !inDollarQuote && i + 1 < sql.Length
+                && c == '$' && sql[i + 1] == '$')
+            {
+                inDollarQuote = true;
+                current.Append("$$");
+                i += 2;
+                continue;
+            }
+
+            if (inDollarQuote && i + 1 < sql.Length
+                && c == '$' && sql[i + 1] == '$')
+            {
+                inDollarQuote = false;
+                current.Append("$$");
+                i += 2;
+                continue;
+            }
+
+            // Inside dollar quote — append everything as-is
+            if (inDollarQuote)
+            {
+                current.Append(c);
+                i++;
+                continue;
+            }
+
+            // Handle regular string literals
+            if (inString)
+            {
+                current.Append(c);
+                if (c == stringChar && (i == 0 || sql[i - 1] != '\\'))
+                    inString = false;
+                i++;
+                continue;
+            }
+
+            if (c == '\'' || c == '"' || c == '`')
+            {
+                inString = true;
+                stringChar = c;
+                current.Append(c);
+                i++;
+                continue;
+            }
+
+            // Check for BEGIN keyword
+            if (i + 5 <= sql.Length &&
+                sql.Substring(i, 5).ToUpperInvariant() == "BEGIN" &&
+                (i == 0 || !char.IsLetterOrDigit(sql[i - 1])) &&
+                (i + 5 >= sql.Length || !char.IsLetterOrDigit(sql[i + 5])))
+            {
+                depth++;
+                current.Append(sql.Substring(i, 5));
+                i += 5;
+                continue;
+            }
+
+            // Check for END keyword
+            if (depth > 0 && i + 3 <= sql.Length &&
+                sql.Substring(i, 3).ToUpperInvariant() == "END" &&
+                (i == 0 || !char.IsLetterOrDigit(sql[i - 1])) &&
+                (i + 3 >= sql.Length || !char.IsLetterOrDigit(sql[i + 3])))
+            {
+                depth--;
+                current.Append(sql.Substring(i, 3));
+                i += 3;
+                continue;
+            }
+
+            // Semicolon — only split if not inside BEGIN...END or $$...$$
+            if (c == ';' && depth == 0 && !inDollarQuote)
+            {
+                var stmt = current.ToString().Trim();
+                if (!string.IsNullOrWhiteSpace(stmt))
+                    statements.Add(stmt);
+                current.Clear();
+                i++;
+                continue;
+            }
+
+            current.Append(c);
+            i++;
+        }
+
+        var last = current.ToString().Trim();
+        if (!string.IsNullOrWhiteSpace(last))
+            statements.Add(last);
+
+        return statements;
     }
 }
 

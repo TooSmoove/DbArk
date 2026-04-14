@@ -27,9 +27,9 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 // DLL integrity hashes — regenerate after every DLL rebuild
 const HASH_CONNECTIONMANAGER: &str = "fb94e251058153f1282fffc32c9dda371efbffd07bea7bc099e303386d47b79f";
 const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
-const HASH_QUERYEXECUTOR: &str = "2c0746b85c701a717cde99f19a6a4200d891539aef9bdf3f14dda8da14aaab40";
+const HASH_QUERYEXECUTOR: &str = "cfe2c78295bd80063a076158d04a703e4fc506b2afd09fbb10946e294c6b1520";
 const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
-const HASH_SCHEMAEXPLORER: &str = "45be0975586f0531e567137aa47d9d3ed0e88985a259e02ce45cc62082126875";
+const HASH_SCHEMAEXPLORER: &str = "69537b99b44620e4d607e177fc3a28718f6471fb454502a9cab6557d93a6b19e";
 const HASH_SSHTUNNEL: &str = "4927f3bae0f0a3d2845e03932ba215c8784b7829f5872c58d71a7877f70ea4af";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 
@@ -776,6 +776,167 @@ fn append_audit_log(
     file.write_all(entry.as_bytes()).is_ok()
 }
 
+#[tauri::command]
+fn get_object_definition(
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    ssl_mode: Option<String>,
+    sql_instance: Option<String>,
+    windows_auth: Option<bool>,
+    object_name: String,
+    object_type: String,
+    schema_name: Option<String>,
+) -> Result<String, String> {
+    let instance = sql_instance.unwrap_or_default();
+    let win_auth = windows_auth.unwrap_or(false);
+    let schema   = schema_name.unwrap_or_else(|| "dbo".to_string());
+    let _ssl     = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+
+    // SQLite — handle entirely in Rust via execute_query
+    // avoids P/Invoke conflicts with the SchemaExplorer DLL
+    if engine.to_lowercase() == "sqlite" {
+        let sqlite_type = match object_type.to_lowercase().as_str() {
+            "table"   => "table",
+            "view"    => "view",
+            "trigger" => "trigger",
+            "index"   => "index",
+            _ => return Ok(format!(
+                "{{\"definition\":null,\"error\":\"SQLite does not support {}\"}}",
+                object_type)),
+        };
+
+        let sql = format!(
+            "SELECT sql FROM sqlite_master WHERE name = '{}' AND type = '{}'",
+            object_name.replace('\'', "''"),
+            sqlite_type
+        );
+
+        let conn_str = format!("Data Source={}", database);
+
+        let raw = unsafe {
+            let func: libloading::Symbol<unsafe extern "C" fn(
+                *const c_char, *const c_char,
+                *const c_char, *const c_char,
+            ) -> *const c_char> = get_query_executor()
+                .get(b"execute_query")
+                .map_err(|e| e.to_string())?;
+
+            let c_conn   = CString::new(conn_str.as_str()).unwrap();
+            let c_sql    = CString::new(sql.as_str()).unwrap();
+            let c_engine = CString::new("sqlite").unwrap();
+            let c_ro     = CString::new("true").unwrap();
+
+            let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
+                           c_engine.as_ptr(), c_ro.as_ptr());
+            if ptr.is_null() { return Err("null response".to_string()); }
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        };
+
+        // Parse the result — first row, first column is the definition
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or(serde_json::Value::Null);
+
+        if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
+            if !err.is_empty() {
+                return Ok(format!("{{\"definition\":null,\"error\":\"{}\"}}", err));
+            }
+        }
+
+        let definition = parsed
+            .get("results")
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .and_then(|r| r.get("rows"))
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .and_then(|r| r.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if definition.is_empty() {
+            let msg = match object_type.as_str() {
+                "index" => format!("-- System-generated index '{}' — no CREATE INDEX statement available.", object_name),
+                _ => format!("-- No definition found for '{}'.", object_name),
+            };
+            return Ok(format!("{{\"definition\":\"{}\",\"error\":null}}",
+                msg.replace('"', "\\\"")));
+        }
+
+        return Ok(format!("{{\"definition\":{},\"error\":null}}",
+            serde_json::to_string(definition).unwrap_or_default()));
+    }
+
+    // All other engines — call SchemaExplorer DLL as before
+    let password = if !win_auth {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        entry.get_password().unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let mut conn_str = match engine.to_lowercase().as_str() {
+        "mysql"    => format!(
+            "Server={};Port={};Database={};Uid={};Pwd={};",
+            host, port, database, username, password),
+        "postgres" => format!(
+            "Host={};Port={};Database={};Username={};Password={};",
+            host, port, database, username, password),
+        "sqlserver" => {
+            let server = if !instance.is_empty() {
+                format!("{}\\{}", host, instance)
+            } else {
+                format!("{},{}", host, port)
+            };
+            if win_auth {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    server, database)
+            } else {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    server, database, username, password)
+            }
+        },
+        _ => return Err(format!("Unsupported engine: {}", engine)),
+    };
+
+    let result = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+            *const c_char, *const c_char,
+            *const c_char,
+        ) -> *const c_char> = get_schema_explorer()
+            .get(b"get_object_definition")
+            .map_err(|e| e.to_string())?;
+
+        let c_conn   = CString::new(conn_str.as_str()).unwrap();
+        let c_engine = CString::new(engine).unwrap();
+        let c_name   = CString::new(object_name).unwrap();
+        let c_type   = CString::new(object_type).unwrap();
+        let c_schema = CString::new(schema).unwrap();
+
+        let ptr = func(
+            c_conn.as_ptr(), c_engine.as_ptr(),
+            c_name.as_ptr(), c_type.as_ptr(),
+            c_schema.as_ptr(),
+        );
+
+        if ptr.is_null() { return Err("null response".to_string()); }
+        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    };
+
+    unsafe {
+        let bytes = conn_str.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+    }
+
+    result
+}
+
 fn scrub_sql_for_log(sql: &str) -> String {
     // Simple manual scrub without regex crate
     let mut result = sql.to_string();
@@ -811,6 +972,167 @@ fn scrub_sql_for_log(sql: &str) -> String {
         format!("{}…", &result[..200])
     } else {
         result
+    }
+}
+
+#[tauri::command]
+fn get_sqlite_objects(database: String) -> Result<String, String> {
+    let conn_str = format!("Data Source={}", database);
+
+    // Single query fetches all programmable objects at once
+    let sql = "SELECT type, name, tbl_name \
+               FROM sqlite_master \
+               WHERE type IN ('view','trigger','index') \
+               AND name NOT LIKE 'sqlite_%' \
+               ORDER BY type, name";
+
+    let raw = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_query_executor()
+            .get(b"execute_query")
+            .map_err(|e| e.to_string())?;
+
+        let c_conn   = CString::new(conn_str.as_str()).unwrap();
+        let c_sql    = CString::new(sql).unwrap();
+        let c_engine = CString::new("sqlite").unwrap();
+        let c_ro     = CString::new("true").unwrap();
+
+        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
+                       c_engine.as_ptr(), c_ro.as_ptr());
+        if ptr.is_null() { return Err("null response".to_string()); }
+        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    };
+
+    Ok(raw)
+}
+
+#[tauri::command]
+fn drop_object(
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    ssl_mode: Option<String>,
+    sql_instance: Option<String>,
+    windows_auth: Option<bool>,
+    object_name: String,
+    object_type: String,
+    schema_name: Option<String>,
+    table_name: Option<String>, // for triggers and indexes
+) -> Result<String, String> {
+    let instance   = sql_instance.unwrap_or_default();
+    let win_auth   = windows_auth.unwrap_or(false);
+    let schema     = schema_name.unwrap_or_else(|| "dbo".to_string());
+    let table      = table_name.unwrap_or_default();
+    let _ssl       = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+
+    let password = if !win_auth {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        entry.get_password().unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let mut conn_str = match engine.to_lowercase().as_str() {
+        "mysql"    => format!(
+            "Server={};Port={};Database={};Uid={};Pwd={};",
+            host, port, database, username, password),
+        "postgres" => format!(
+            "Host={};Port={};Database={};Username={};Password={};",
+            host, port, database, username, password),
+        "sqlite"   => format!("Data Source={}", database),
+        "sqlserver" => {
+            let server = if !instance.is_empty() {
+                format!("{}\\{}", host, instance)
+            } else {
+                format!("{},{}", host, port)
+            };
+            if win_auth {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    server, database)
+            } else {
+                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    server, database, username, password)
+            }
+        },
+        _ => return Err(format!("Unsupported engine: {}", engine)),
+    };
+
+    // Build DROP statement per engine and type
+    let drop_sql = build_drop_statement(
+        &engine, &object_type, &object_name, &schema, &table);
+
+    let result = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_query_executor()
+            .get(b"execute_query")
+            .map_err(|e| e.to_string())?;
+
+        let c_conn   = CString::new(conn_str.as_str()).unwrap();
+        let c_sql    = CString::new(drop_sql.as_str()).unwrap();
+        let c_engine = CString::new(engine.as_str()).unwrap();
+        let c_ro     = CString::new("false").unwrap();
+
+        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
+                       c_engine.as_ptr(), c_ro.as_ptr());
+        if ptr.is_null() { return Err("null response".to_string()); }
+        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    };
+
+    unsafe {
+        let bytes = conn_str.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+    }
+
+    result
+}
+
+fn build_drop_statement(
+    engine: &str, object_type: &str,
+    name: &str, schema: &str, table: &str,
+) -> String {
+    match engine.to_lowercase().as_str() {
+        "sqlserver" => match object_type {
+            "procedure" => format!("DROP PROCEDURE [{schema}].[{name}]"),
+            "function"  => format!("DROP FUNCTION [{schema}].[{name}]"),
+            "view"      => format!("DROP VIEW [{schema}].[{name}]"),
+            "trigger"   => format!("DROP TRIGGER [{name}]"),
+            "index"     => format!("DROP INDEX [{name}] ON [{schema}].[{table}]"),
+            "table"     => format!("DROP TABLE [{schema}].[{name}]"),
+            _           => format!("DROP {object_type} [{name}]"),
+        },
+        "mysql" => match object_type {
+            "procedure" => format!("DROP PROCEDURE `{name}`"),
+            "function"  => format!("DROP FUNCTION `{name}`"),
+            "view"      => format!("DROP VIEW `{name}`"),
+            "trigger"   => format!("DROP TRIGGER `{name}`"),
+            "index"     => format!("DROP INDEX `{name}` ON `{table}`"),
+            "table"     => format!("DROP TABLE `{name}`"),
+            _           => format!("DROP {object_type} `{name}`"),
+        },
+        "postgres" => match object_type {
+            "procedure" => format!("DROP PROCEDURE {schema}.{name}"),
+            "function"  => format!("DROP FUNCTION {schema}.{name}"),
+            "view"      => format!("DROP VIEW {schema}.{name}"),
+            "trigger"   => format!("DROP TRIGGER {name} ON {schema}.{table}"),
+            "index"     => format!("DROP INDEX {schema}.{name}"),
+            "table"     => format!("DROP TABLE {schema}.{name}"),
+            _           => format!("DROP {object_type} {name}"),
+        },
+        _ => match object_type { // SQLite
+            "view"    => format!("DROP VIEW {name}"),
+            "trigger" => format!("DROP TRIGGER {name}"),
+            "index"   => format!("DROP INDEX {name}"),
+            "table"   => format!("DROP TABLE {name}"),
+            _         => format!("DROP {object_type} {name}"),
+        },
     }
 }
 
@@ -867,7 +1189,10 @@ fn main() {
             close_tunnel,
             is_tunnel_open,
             get_ssh_password,
-            append_audit_log])
+            append_audit_log,
+            get_object_definition, 
+            get_sqlite_objects,
+            drop_object])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

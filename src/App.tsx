@@ -1126,7 +1126,7 @@ function App() {
   const [showAddForm, setShowAddForm] = useState(false);
   const { size: editorHeight, onMouseDown: onEditorDragStart } = useResizable(220, 80, 600);
 
-const [connectionsFolder, setConnectionsFolder] = useState("");
+  const [connectionsFolder, setConnectionsFolder] = useState("");
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
@@ -1149,6 +1149,16 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
     x: number;
     y: number;
     connection: ConnectionConfig;
+  } | null>(null);
+
+  const [schemaContextMenu, setSchemaContextMenu] = useState<{
+    x: number;
+    y: number;
+    name: string;
+    type: string; // table | procedure | function | view | trigger | index
+    schema: string;
+    connection: ConnectionConfig;
+    extra?: any;
   } | null>(null);
 
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
@@ -1248,6 +1258,61 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
 
   //Active Tab helper - load schema when connection changes
   const schemaConnectionId = useRef<string | null>(null);
+
+  const [dropConfirm, setDropConfirm] = useState<{
+    name:       string;
+    type:       string;
+    schema:     string;
+    tableName:  string;
+    dropSql:    string;
+    connection: ConnectionConfig;
+  } | null>(null);
+
+  function buildDropSql(
+    engine: string, type: string,
+    name: string, schema: string, table: string
+  ): string {
+    switch (engine) {
+      case "sqlserver":
+        switch (type) {
+          case "procedure": return `DROP PROCEDURE [${schema}].[${name}]`;
+          case "function":  return `DROP FUNCTION [${schema}].[${name}]`;
+          case "view":      return `DROP VIEW [${schema}].[${name}]`;
+          case "trigger":   return `DROP TRIGGER [${name}]`;
+          case "index":     return `DROP INDEX [${name}] ON [${schema}].[${table}]`;
+          case "table":     return `DROP TABLE [${schema}].[${name}]`;
+          default:          return `DROP ${type} [${name}]`;
+        }
+      case "mysql":
+        switch (type) {
+          case "procedure": return `DROP PROCEDURE \`${name}\``;
+          case "function":  return `DROP FUNCTION \`${name}\``;
+          case "view":      return `DROP VIEW \`${name}\``;
+          case "trigger":   return `DROP TRIGGER \`${name}\``;
+          case "index":     return `DROP INDEX \`${name}\` ON \`${table}\``;
+          case "table":     return `DROP TABLE \`${name}\``;
+          default:          return `DROP ${type} \`${name}\``;
+        }
+      case "postgres":
+        switch (type) {
+          case "procedure": return `DROP PROCEDURE ${schema}.${name}`;
+          case "function":  return `DROP FUNCTION ${schema}.${name}`;
+          case "view":      return `DROP VIEW ${schema}.${name}`;
+          case "trigger":   return `DROP TRIGGER ${name} ON ${schema}.${table}`;
+          case "index":     return `DROP INDEX ${schema}.${name}`;
+          case "table":     return `DROP TABLE ${schema}.${name}`;
+          default:          return `DROP ${type} ${name}`;
+        }
+      default: // sqlite
+        switch (type) {
+          case "view":    return `DROP VIEW ${name}`;
+          case "trigger": return `DROP TRIGGER ${name}`;
+          case "index":   return `DROP INDEX ${name}`;
+          case "table":   return `DROP TABLE ${name}`;
+          default:        return `DROP ${type} ${name}`;
+        }
+    }
+  }
 
   useEffect(() => {
     const conn = activeTab.connection;
@@ -1463,21 +1528,29 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         return;
       }
 
-    const parsed: { results?: QueryResult[]; error?: string } = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+
+    // File queries return single result shape — normalise to multi-result
+    const normalised: { results: QueryResult[]; error?: string } = 
+      parsed.results 
+        ? parsed  // already multi-result shape (DB query)
+        : parsed.error
+        ? { results: [], error: parsed.error }
+        : { results: [{ ...parsed, sql: "" }] }; // wrap single result
     const ms = Math.round(performance.now() - start);
 
     // Top-level error (connection failed etc)
-    if (parsed.error) {
+    if (normalised.error) {
       const tabId = activeTabRef.current.id;
       setTabs(prev => prev.map(t =>
         t.id === tabId
-          ? { ...t, loading: false, duration: ms, results: [], error: parsed.error! }
+          ? { ...t, loading: false, duration: ms, results: [], error: normalised.error! }
           : t
       ));
       return;
     }
 
-    const results = parsed.results ?? [];
+    const results = normalised.results ?? [];
     const firstError = results.find(r => r.error);
     const tabId = activeTabRef.current.id; // ← capture the ref, not the closure
 
@@ -1503,7 +1576,7 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
     });
 
     if (historyConn) {
-      await saveToHistory(historyConn, sql, ms, parsed.rowCount ?? 0, !parsed.error);
+      await saveToHistory(historyConn, sql, ms, normalised.rowCount ?? 0, !normalised.error);
       if (showHistory) loadHistory(historyConn);
     }
 
@@ -1512,9 +1585,9 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         connectionName: historyConn.name,
         engine:         historyConn.engine,
         sql:            sql,
-        rowCount:       parsed.rowCount ?? 0,
+        rowCount:       normalised.rowCount ?? 0,
         durationMs:     ms,
-        success:        !parsed.error,
+        success:        !normalised.error,
       }).catch(() => {}); // fire and forget — never block query execution
     }
 
@@ -1650,13 +1723,11 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
   };
 
   async function loadSchema(conn: ConnectionConfig) {
-    // Return cached schema if available
     if (schemaCache.current.has(conn.id)) {
       setSchema(schemaCache.current.get(conn.id)!);
       return;
     }
 
-    // Evict oldest entry if cache exceeds 5 items
     if (schemaCache.current.size >= 5) {
       const firstKey = schemaCache.current.keys().next().value;
       schemaCache.current.delete(firstKey);
@@ -1664,6 +1735,7 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
 
     setSchema(null);
     setSchemaLoading(true);
+
     try {
       const raw = await invoke<string>("get_schema", {
         credentialRef: conn.credentialRef,
@@ -1676,8 +1748,59 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         sqlInstance:   conn.sqlInstance ?? "",
         windowsAuth:   conn.windowsAuth ?? false,
       });
+
       const parsed: SchemaResult = JSON.parse(raw);
-      schemaCache.current.set(conn.id, parsed); // cache it
+
+      // For SQLite — fetch programmable objects separately via safe Rust path
+      if (conn.engine === "sqlite") {
+        try {
+          const objRaw = await invoke<string>("get_sqlite_objects", {
+            database: conn.database,
+          });
+
+          const objParsed = JSON.parse(objRaw);
+
+          // Multi-result shape — get the first result's rows
+          const rows: (string | null)[][] =
+            objParsed.results?.[0]?.rows ?? [];
+
+console.log("SQLite objects raw:", objRaw);
+console.log("SQLite objects parsed rows:", rows);
+
+          const views: ViewInfo[]     = [];
+          const triggers: TriggerInfo[] = [];
+          const indexes: IndexInfo[]  = [];
+
+          for (const row of rows) {
+            const type    = row[0] ?? "";
+            const name    = row[1] ?? "";
+            const tblName = row[2] ?? "";
+
+            if (type === "view") {
+              views.push({ name, schema: "" });
+            } else if (type === "trigger") {
+              triggers.push({
+                name, tableName: tblName,
+                event: "", timing: "",
+              });
+            } else if (type === "index") {
+              indexes.push({
+                name, tableName: tblName,
+                columns: "", isUnique: false, isPrimary: false,
+              });
+            }
+          }
+
+          parsed.views    = views;
+          parsed.triggers = triggers;
+          parsed.indexes  = indexes;
+        } catch (e) {
+          console.error("Failed to load SQLite objects:", e);
+          // Non-fatal — tables still show correctly
+        }
+      }
+
+      schemaCache.current.set(conn.id, parsed);
       setSchema(parsed);
     } catch (e) {
       console.error("Schema load failed:", e);
@@ -1757,6 +1880,60 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
     } catch (e) {
       console.error("Export failed:", e);
       updateActiveTab({ error: `Export failed: ${String(e)}` });
+    }
+  }
+
+  //Get Schma Object Definition (for tables, views, procs etc)
+  async function openDefinition(
+    name: string,
+    type: string,
+    schema: string,
+    conn: ConnectionConfig
+  ) {
+    try {
+      const raw = await invoke<string>("get_object_definition", {
+        credentialRef: conn.credentialRef,
+        engine:        conn.engine,
+        host:          conn.host,
+        port:          conn.port,
+        database:      conn.database,
+        username:      conn.username,
+        sslMode:       conn.sslMode ?? "prefer",
+        sqlInstance:   conn.sqlInstance ?? "",
+        windowsAuth:   conn.windowsAuth ?? false,
+        objectName:    name,
+        objectType:    type,
+        schemaName:    schema || "dbo",
+      });
+
+      const parsed: { definition?: string; error?: string } = JSON.parse(raw);
+
+      if (parsed.error) {
+        updateActiveTab({ error: parsed.error });
+        return;
+      }
+
+      // Save current SQL to active tab
+      const currentSql = editorRef.current?.getValue() ?? "";
+      const newTab = createTab();
+      newTab.title      = name;
+      newTab.sql        = parsed.definition ?? "";
+      newTab.connection = conn;
+
+      setTabs(prev => {
+        const updated = prev.map(t =>
+          t.id === activeTabId ? { ...t, sql: currentSql } : t
+        );
+        return [...updated, newTab];
+      });
+
+      setActiveTabId(newTab.id);
+      setTimeout(() => {
+        editorRef.current?.setValue(parsed.definition ?? "");
+      }, 0);
+
+    } catch (e) {
+      updateActiveTab({ error: `Failed to load definition: ${String(e)}` });
     }
   }
 
@@ -1878,6 +2055,159 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         </>
       )}
       {/* END Connection Context menu */}
+      {/* Schema object context menu */}
+      {schemaContextMenu && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999 }}
+            onClick={() => setSchemaContextMenu(null)}
+          />
+          <div style={{
+            position: "fixed",
+            left: schemaContextMenu.x,
+            top: schemaContextMenu.y,
+            zIndex: 1000,
+            background: "#1e2026",
+            border: "1px solid #2d2f36",
+            borderRadius: 8,
+            padding: "4px 0",
+            minWidth: 180,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+          }}>
+            {/* Header showing object name */}
+            <div style={{
+              padding: "6px 16px 6px",
+              fontSize: 10, color: "#4b5563",
+              fontFamily: "monospace",
+              borderBottom: "1px solid #2d2f36",
+              marginBottom: 4,
+            }}>
+              {schemaContextMenu.type.toUpperCase()} · {schemaContextMenu.name}
+            </div>
+
+            {schemaContextMenu.type === "index" ? (
+            <button
+              onClick={() => {
+                // Generate DROP + CREATE INDEX script from known data
+                // Find the index in the schema
+                const idx = schema?.indexes?.find(i => i.name === schemaContextMenu.name);
+                if (!idx) return;
+
+                const conn = schemaContextMenu.connection;
+                let script = "";
+
+                if (conn.engine === "sqlserver") {
+                  script = idx.isPrimary
+                    ? `-- Primary key constraints cannot be dropped with DROP INDEX\n-- Use ALTER TABLE instead:\nALTER TABLE [${idx.tableName}] DROP CONSTRAINT [${idx.name}];\n\n-- Recreate:\nALTER TABLE [${idx.tableName}] ADD CONSTRAINT [${idx.name}] PRIMARY KEY (${idx.columns});`
+                    : `DROP INDEX [${idx.name}] ON [${idx.tableName}];\n\nCREATE ${idx.isUnique ? "UNIQUE " : ""}INDEX [${idx.name}]\n    ON [${idx.tableName}] (${idx.columns});`;
+                } else if (conn.engine === "mysql") {
+                  script = idx.isPrimary
+                    ? `-- Primary key:\nALTER TABLE \`${idx.tableName}\` DROP PRIMARY KEY;\nALTER TABLE \`${idx.tableName}\` ADD PRIMARY KEY (${idx.columns});`
+                    : `DROP INDEX \`${idx.name}\` ON \`${idx.tableName}\`;\n\nCREATE ${idx.isUnique ? "UNIQUE " : ""}INDEX \`${idx.name}\`\n    ON \`${idx.tableName}\` (${idx.columns});`;
+                } else {
+                  script = idx.isPrimary
+                    ? `-- Primary key:\nALTER TABLE ${idx.tableName} DROP CONSTRAINT ${idx.name};\nALTER TABLE ${idx.tableName} ADD CONSTRAINT ${idx.name} PRIMARY KEY (${idx.columns});`
+                    : `DROP INDEX IF EXISTS ${idx.name};\n\nCREATE ${idx.isUnique ? "UNIQUE " : ""}INDEX ${idx.name}\n    ON ${idx.tableName} (${idx.columns});`;
+                }
+
+                editorRef.current?.setValue(script);
+                editorRef.current?.focus();
+                setSchemaContextMenu(null);
+              }}
+              style={{
+                display: "block", width: "100%", padding: "8px 16px",
+                background: "none", border: "none", color: "#e8e9ec",
+                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
+                textAlign: "left",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+              📄 Script Index
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                openDefinition(
+                  schemaContextMenu.name,
+                  schemaContextMenu.type,
+                  schemaContextMenu.schema,
+                  schemaContextMenu.connection,
+                );
+                setSchemaContextMenu(null);
+              }}
+              style={{
+                display: "block", width: "100%", padding: "8px 16px",
+                background: "none", border: "none", color: "#e8e9ec",
+                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
+                textAlign: "left",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+              📄 Open Definition
+            </button>
+          )}
+
+            {/* Quick query for tables and views */}
+            {(schemaContextMenu.type === "table" || schemaContextMenu.type === "view") && (
+              <button
+                onClick={() => {
+                  const limit = schemaContextMenu.connection.engine === "sqlserver"
+                    ? `SELECT TOP 100 * FROM ${schemaContextMenu.name}`
+                    : `SELECT * FROM ${schemaContextMenu.name} LIMIT 100`;
+                  editorRef.current?.setValue(limit);
+                  editorRef.current?.focus();
+                  setSchemaContextMenu(null);
+                }}
+                style={{
+                  display: "block", width: "100%", padding: "8px 16px",
+                  background: "none", border: "none", color: "#e8e9ec",
+                  fontSize: 12, fontFamily: "monospace", cursor: "pointer",
+                  textAlign: "left",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              >
+                ▶ Query Table
+              </button>
+            )}
+
+            {/* Drop Object button */}
+            <button
+              onClick={() => {
+                const dropSql = buildDropSql(
+                  schemaContextMenu.connection.engine,
+                  schemaContextMenu.type,
+                  schemaContextMenu.name,
+                  schemaContextMenu.schema,
+                  schemaContextMenu.extra?.tableName ?? "",
+                );
+                setDropConfirm({
+                  name:       schemaContextMenu.name,
+                  type:       schemaContextMenu.type,
+                  schema:     schemaContextMenu.schema,
+                  tableName:  schemaContextMenu.extra?.tableName ?? "",
+                  dropSql,
+                  connection: schemaContextMenu.connection,
+                });
+                setSchemaContextMenu(null);
+              }}
+              style={{
+                display: "block", width: "100%", padding: "8px 16px",
+                background: "none", border: "none", color: "#ef4444",
+                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
+                textAlign: "left",
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+            >
+              🗑️ Drop {schemaContextMenu.type}
+            </button>
+          </div>
+        </>
+      )}
+      {/* END Schema object context menu */}
       {/* Delete confirmation */}
       {deletingConnection && (
         <>
@@ -1939,6 +2269,119 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
         </>
       )}
       {/* END Delete confirmation */}
+      {/* Drop object confirmation */}
+      {dropConfirm && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999,
+              background: "rgba(0,0,0,0.6)" }}
+            onClick={() => setDropConfirm(null)}
+          />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%,-50%)",
+            zIndex: 1000, background: "#1e2026",
+            border: "1px solid #2d2f36", borderRadius: 12,
+            padding: "24px 28px", minWidth: 380, maxWidth: 520,
+            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+          }}>
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "center",
+              gap: 10, marginBottom: 12 }}>
+              <span style={{ fontSize: 20 }}>⚠️</span>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec" }}>
+                Drop {dropConfirm.type}
+              </div>
+            </div>
+
+            {/* Warning text */}
+            <div style={{ fontSize: 12, color: "#9ca3af",
+              marginBottom: 16, lineHeight: 1.6 }}>
+              This will permanently drop{" "}
+              <strong style={{ color: "#e8e9ec" }}>
+                {dropConfirm.name}
+              </strong>.
+              This action cannot be undone.
+            </div>
+
+            {/* SQL preview */}
+            <div style={{
+              background: "#0e0f11",
+              border: "1px solid #2d2f36",
+              borderRadius: 6,
+              padding: "10px 14px",
+              marginBottom: 20,
+              fontFamily: "monospace",
+              fontSize: 12,
+              color: "#ef4444",
+            }}>
+              {dropConfirm.dropSql}
+            </div>
+
+            {/* Buttons */}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={async () => {
+                  try {
+                    const conn = dropConfirm.connection;
+                    await invoke("drop_object", {
+                      credentialRef: conn.credentialRef,
+                      engine:        conn.engine,
+                      host:          conn.host,
+                      port:          conn.port,
+                      database:      conn.database,
+                      username:      conn.username,
+                      sslMode:       conn.sslMode ?? "prefer",
+                      sqlInstance:   conn.sqlInstance ?? "",
+                      windowsAuth:   conn.windowsAuth ?? false,
+                      objectName:    dropConfirm.name,
+                      objectType:    dropConfirm.type,
+                      schemaName:    dropConfirm.schema,
+                      tableName:     dropConfirm.tableName,
+                    });
+
+                    // Invalidate schema cache and reload
+                    schemaCache.current.delete(conn.id);
+                    schemaConnectionId.current = null;
+                    setSchema(null);
+                    setExpandedTables(new Set());
+                    setExpandedSections(new Set());
+                    loadSchema(conn);
+
+                    setDropConfirm(null);
+                  } catch (e) {
+                    // Show error in results area
+                    updateActiveTab({ error: `Drop failed: ${String(e)}` });
+                    setDropConfirm(null);
+                  }
+                }}
+                style={{
+                  flex: 1, padding: "8px 0",
+                  background: "#ef4444", color: "white",
+                  border: "none", borderRadius: 6,
+                  cursor: "pointer", fontSize: 12,
+                  fontFamily: "monospace", fontWeight: 600,
+                }}
+              >
+                Drop {dropConfirm.type}
+              </button>
+              <button
+                onClick={() => setDropConfirm(null)}
+                style={{
+                  flex: 1, padding: "8px 0",
+                  background: "transparent", color: "#6b7280",
+                  border: "1px solid #2d2f36", borderRadius: 6,
+                  cursor: "pointer", fontSize: 12,
+                  fontFamily: "monospace",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {/* END Drop object confirmation */}
       {/* Sidebar */}
       <div style={{
         width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth,
@@ -2083,7 +2526,15 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                             onToggle={() => toggleSection(`${conn.id}-tables`)}
                           >
                             {safeSchema.tables.map(table => (
-                              <div key={table.name}>
+                              <div key={table.name}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setSchemaContextMenu({
+                                    x: e.clientX, y: e.clientY,
+                                    name: table.name, type: "table",
+                                    schema: table.schema || "dbo", connection: conn,
+                                  });
+                                }}>
                                 <div
                                   style={{
                                     display: "flex", alignItems: "center", gap: 6,
@@ -2096,7 +2547,10 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                                     setExpandedTables(next);
                                   }}
                                   onDoubleClick={() => {
-                                    editorRef.current?.setValue(`SELECT * FROM ${table.name} LIMIT 100`);
+                                    const limit = conn.engine === "sqlserver"
+                                      ? `SELECT TOP 100 * FROM ${table.name}`
+                                      : `SELECT * FROM ${table.name} LIMIT 100`;
+                                    editorRef.current?.setValue(limit);
                                     editorRef.current?.focus();
                                   }}
                                   title="Click to expand · Double-click to query"
@@ -2149,6 +2603,14 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                           >
                             {safeSchema.procedures.map(proc => (
                               <div key={`${proc.schema}.${proc.name}`}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setSchemaContextMenu({
+                                    x: e.clientX, y: e.clientY,
+                                    name: proc.name, type: "procedure",
+                                    schema: proc.schema, connection: conn,
+                                  });
+                                }}
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
@@ -2182,6 +2644,14 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                           >
                             {safeSchema.functions.map(fn => (
                               <div key={`${fn.schema}.${fn.name}`}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setSchemaContextMenu({
+                                    x: e.clientX, y: e.clientY,
+                                    name: fn.name, type: "function",
+                                    schema: fn.schema, connection: conn,
+                                  });
+                                }}
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
@@ -2216,15 +2686,26 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                           >
                             {safeSchema.views.map(view => (
                               <div key={`${view.schema}.${view.name}`}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setSchemaContextMenu({
+                                    x: e.clientX, y: e.clientY,
+                                    name: view.name, type: "view",
+                                    schema: view.schema, connection: conn,
+                                  });
+                                }}
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
                                   borderTop: "1px solid #1a1b21", cursor: "pointer",
                                 }}
-                                onDoubleClick={() => {
-                                  editorRef.current?.setValue(`SELECT * FROM ${view.name} LIMIT 100`);
-                                  editorRef.current?.focus();
-                                }}
+                            onDoubleClick={() => {
+                              const limit = conn.engine === "sqlserver"
+                                ? `SELECT TOP 100 * FROM ${view.name}`
+                                : `SELECT * FROM ${view.name} LIMIT 100`;
+                              editorRef.current?.setValue(limit);
+                              editorRef.current?.focus();
+                            }}
                                 title="Double-click to query"
                               >
                                 <span style={{ fontSize: 9, color: "#3b82f6", flexShrink: 0 }}>◫</span>
@@ -2248,6 +2729,14 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                           >
                             {safeSchema.triggers.map(trigger => (
                               <div key={trigger.name}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setSchemaContextMenu({
+                                    x: e.clientX, y: e.clientY,
+                                    name: trigger.name, type: "trigger",
+                                    schema: trigger.tableName, connection: conn,
+                                  });
+                                }}
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
@@ -2279,6 +2768,22 @@ const [connectionsFolder, setConnectionsFolder] = useState("");
                           >
                             {safeSchema.indexes.map(idx => (
                               <div key={`${idx.tableName}.${idx.name}`}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setSchemaContextMenu({
+                                    x: e.clientX, y: e.clientY,
+                                    name: idx.name, type: "index",
+                                    schema: idx.tableName, connection: conn,
+                                    extra: conn.engine === "sqlite"
+                                      ? undefined  // ← SQLite: fetch from sqlite_master instead
+                                      : {
+                                          tableName: idx.tableName,
+                                          columns:   idx.columns,
+                                          isUnique:  idx.isUnique,
+                                          isPrimary: idx.isPrimary,
+                                        }
+                                  });
+                                }}
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",

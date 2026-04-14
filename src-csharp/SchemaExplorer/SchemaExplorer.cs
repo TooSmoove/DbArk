@@ -72,6 +72,11 @@ public class IndexInfo
     [JsonPropertyName("isUnique")] public bool IsUnique { get; set; }
     [JsonPropertyName("isPrimary")] public bool IsPrimary { get; set; }
 }
+public class DefinitionResult
+{
+    [JsonPropertyName("definition")] public string? Definition { get; set; }
+    [JsonPropertyName("error")] public string? Error { get; set; }
+}
 
 [JsonSerializable(typeof(SchemaResult))]
 [JsonSerializable(typeof(List<TableInfo>))]
@@ -80,6 +85,7 @@ public class IndexInfo
 [JsonSerializable(typeof(List<ViewInfo>))]
 [JsonSerializable(typeof(List<TriggerInfo>))]
 [JsonSerializable(typeof(List<IndexInfo>))]
+[JsonSerializable(typeof(DefinitionResult))]
 internal partial class AppJsonContext : JsonSerializerContext { }
 
 public static class SchemaExplorerLib
@@ -156,12 +162,11 @@ public static class SchemaExplorerLib
         return new SchemaResult
         {
             Tables = GetSqliteSchema(connectionString),
-            Views = GetSqliteViews(connectionString),
-            Triggers = GetSqliteTriggers(connectionString),
-            // SQLite has no stored procedures or functions
+            Views = new List<ViewInfo>(),      // ← fetched via Rust
+            Triggers = new List<TriggerInfo>(),   // ← fetched via Rust
             Procedures = new List<ProcedureInfo>(),
             Functions = new List<FunctionInfo>(),
-            Indexes = new List<IndexInfo>(),
+            Indexes = new List<IndexInfo>(),     // ← fetched via Rust
         };
     }
 
@@ -828,41 +833,6 @@ public static class SchemaExplorerLib
 
     // ---- SQLITE ---------------------------------------------------
 
-    private static List<ViewInfo> GetSqliteViews(string connectionString)
-    {
-        var list = new List<ViewInfo>();
-        try
-        {
-            var rows = SqliteQuery(connectionString,
-                "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name");
-            foreach (var row in rows)
-                if (row.Count > 0 && row[0] != null)
-                    list.Add(new ViewInfo { Name = row[0]!, Schema = "" });
-        }
-        catch { }
-        return list;
-    }
-
-    private static List<TriggerInfo> GetSqliteTriggers(string connectionString)
-    {
-        var list = new List<TriggerInfo>();
-        try
-        {
-            var rows = SqliteQuery(connectionString,
-                "SELECT name, tbl_name FROM sqlite_master WHERE type='trigger' ORDER BY name");
-            foreach (var row in rows)
-                list.Add(new TriggerInfo
-                {
-                    Name = row.Count > 0 ? row[0] ?? "" : "",
-                    TableName = row.Count > 1 ? row[1] ?? "" : "",
-                    Event = "",
-                    Timing = "",
-                });
-        }
-        catch { }
-        return list;
-    }
-
     // Minimal SQLite query helper using existing P/Invoke declarations
     private static List<List<string?>> SqliteQuery(string connectionString, string sql)
     {
@@ -906,6 +876,313 @@ public static class SchemaExplorerLib
         }
 
         return results;
+    }
+    [UnmanagedCallersOnly(EntryPoint = "get_object_definition")]
+    public static IntPtr GetObjectDefinition(
+    IntPtr connectionStringPtr,
+    IntPtr enginePtr,
+    IntPtr objectNamePtr,
+    IntPtr objectTypePtr,
+    IntPtr schemaNamePtr)
+    {
+        try
+        {
+            var connectionString = Marshal.PtrToStringUTF8(connectionStringPtr) ?? "";
+            var engine = Marshal.PtrToStringUTF8(enginePtr) ?? "";
+            var objectName = Marshal.PtrToStringUTF8(objectNamePtr) ?? "";
+            var objectType = Marshal.PtrToStringUTF8(objectTypePtr) ?? "";
+            var schemaName = Marshal.PtrToStringUTF8(schemaNamePtr) ?? "dbo";
+
+            var definition = engine.ToLower() switch
+            {
+                "sqlserver" => GetSqlServerDefinition(connectionString, objectName, objectType, schemaName),
+                "mysql" => GetMySqlDefinition(connectionString, objectName, objectType),
+                "postgres" => GetPostgresDefinition(connectionString, objectName, objectType, schemaName),
+                // SQLite handled in Rust — never reaches here
+                _ => throw new Exception($"Unsupported engine: {engine}")
+            };
+
+            var result = new DefinitionResult { Definition = definition, Error = null };
+            return Marshal.StringToCoTaskMemUTF8(
+                JsonSerializer.Serialize(result, AppJsonContext.Default.DefinitionResult));
+        }
+        catch (Exception ex)
+        {
+            var result = new DefinitionResult { Definition = null, Error = ex.Message };
+            return Marshal.StringToCoTaskMemUTF8(
+                JsonSerializer.Serialize(result, AppJsonContext.Default.DefinitionResult));
+        }
+    }
+
+    // ---- SQL SERVER -----------------------------------------------
+    private static string GetSqlServerDefinition(
+        string connectionString, string objectName,
+        string objectType, string schemaName)
+    {
+        if (objectType == "table")
+        {
+            // Generate CREATE TABLE script from schema info
+            var cols = SqlServerOdbc.Query(connectionString, $@"
+            SELECT
+                c.COLUMN_NAME,
+                c.DATA_TYPE,
+                c.CHARACTER_MAXIMUM_LENGTH,
+                c.IS_NULLABLE,
+                c.COLUMN_DEFAULT,
+                CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK,
+                COLUMNPROPERTY(OBJECT_ID('{schemaName}.{objectName}'),
+                    c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY
+            FROM INFORMATION_SCHEMA.COLUMNS c
+            LEFT JOIN (
+                SELECT ku.COLUMN_NAME
+                FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
+                    ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
+                WHERE tc.TABLE_NAME = '{objectName}'
+                    AND tc.TABLE_SCHEMA = '{schemaName}'
+                    AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+            ) pk ON pk.COLUMN_NAME = c.COLUMN_NAME
+            WHERE c.TABLE_NAME = '{objectName}'
+                AND c.TABLE_SCHEMA = '{schemaName}'
+            ORDER BY c.ORDINAL_POSITION");
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"CREATE TABLE [{schemaName}].[{objectName}] (");
+            var colDefs = new List<string>();
+            var pkCols = new List<string>();
+
+            foreach (var row in cols)
+            {
+                var colName = row[0] ?? "";
+                var dataType = row[1] ?? "";
+                var maxLen = row[2];
+                var nullable = row[3] == "YES";
+                var defaultVal = row[4];
+                var isPk = row[5] == "1";
+                var isIdentity = row[6] == "1";
+
+                var typeStr = maxLen != null && maxLen != "-1"
+                    ? $"{dataType}({maxLen})"
+                    : dataType == "nvarchar" || dataType == "varchar"
+                        ? $"{dataType}(MAX)"
+                        : dataType;
+
+                var colDef = $"    [{colName}] {typeStr.ToUpper()}";
+                if (isIdentity) colDef += " IDENTITY(1,1)";
+                if (!nullable) colDef += " NOT NULL";
+                if (nullable) colDef += " NULL";
+                if (defaultVal != null) colDef += $" DEFAULT {defaultVal}";
+
+                colDefs.Add(colDef);
+                if (isPk) pkCols.Add($"[{colName}]");
+            }
+
+            if (pkCols.Count > 0)
+                colDefs.Add($"    CONSTRAINT [PK_{objectName}] PRIMARY KEY ({string.Join(", ", pkCols)})");
+
+            sb.Append(string.Join(",\n", colDefs));
+            sb.AppendLine("\n);");
+            return sb.ToString();
+        }
+
+        // For SPs, functions, views, triggers — use OBJECT_DEFINITION
+        var rows = SqlServerOdbc.Query(connectionString,
+            $"SELECT OBJECT_DEFINITION(OBJECT_ID('{schemaName}.{objectName}'))");
+
+        var def = rows.FirstOrDefault()?[0]
+            ?? throw new Exception($"No definition found for {objectName}. " +
+                "The object may be encrypted or you may not have VIEW DEFINITION permission.");
+
+        return def;
+    }
+
+    // ---- MYSQL ----------------------------------------------------
+    private static string GetMySqlDefinition(
+        string connectionString, string objectName, string objectType)
+    {
+        using var conn = new MySqlConnector.MySqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+
+        cmd.CommandText = objectType switch
+        {
+            "procedure" => $"SHOW CREATE PROCEDURE `{objectName}`",
+            "function" => $"SHOW CREATE FUNCTION `{objectName}`",
+            "view" => $"SHOW CREATE VIEW `{objectName}`",
+            "trigger" => $"SHOW CREATE TRIGGER `{objectName}`",
+            "table" => $"SHOW CREATE TABLE `{objectName}`",
+            _ => throw new Exception($"Unsupported object type: {objectType}")
+        };
+
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read())
+            throw new Exception($"No definition found for {objectName}");
+
+        // SHOW CREATE returns definition in different columns per type
+        // Column 1 for tables, column 2 for routines/views/triggers
+        return objectType == "table"
+            ? reader.GetString(1)
+            : reader.GetString(2);
+    }
+
+    // ---- POSTGRES -------------------------------------------------
+    private static string GetPostgresDefinition(
+    string connectionString, string objectName,
+    string objectType, string schemaName)
+    {
+        using var conn = new Npgsql.NpgsqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+
+        if (objectType == "table")
+        {
+            cmd.CommandText = $@"
+        SELECT
+            c.column_name,
+            c.data_type,
+            c.character_maximum_length,
+            c.is_nullable,
+            c.column_default,
+            CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END AS is_pk
+        FROM information_schema.columns c
+        LEFT JOIN (
+            SELECT ku.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage ku
+                ON tc.constraint_name = ku.constraint_name
+            WHERE tc.table_name = '{objectName}'
+                AND tc.table_schema = '{schemaName}'
+                AND tc.constraint_type = 'PRIMARY KEY'
+        ) pk ON pk.column_name = c.column_name
+        WHERE c.table_name = '{objectName}'
+            AND c.table_schema = '{schemaName}'
+        ORDER BY c.ordinal_position";
+
+            using var reader = cmd.ExecuteReader();
+            var sb = new System.Text.StringBuilder();
+            var colDefs = new List<string>();
+            var pkCols = new List<string>();
+
+            sb.AppendLine($"CREATE TABLE {schemaName}.{objectName} (");
+
+            while (reader.Read())
+            {
+                var colName = reader.GetString(0);
+                var dataType = reader.GetString(1);
+                var maxLen = reader.IsDBNull(2) ? null : reader.GetInt32(2).ToString();
+                var nullable = reader.GetString(3) == "YES";
+                var defaultVal = reader.IsDBNull(4) ? null : reader.GetString(4);
+                var isPk = reader.GetBoolean(5);
+
+                var typeStr = maxLen != null ? $"{dataType}({maxLen})" : dataType;
+                var colDef = $"    {colName} {typeStr}";
+                if (!nullable) colDef += " NOT NULL";
+                if (defaultVal != null) colDef += $" DEFAULT {defaultVal}";
+
+                colDefs.Add(colDef);
+                if (isPk) pkCols.Add(colName);
+            }
+
+            if (pkCols.Count > 0)
+                colDefs.Add($"    PRIMARY KEY ({string.Join(", ", pkCols)})");
+
+            sb.Append(string.Join(",\n", colDefs));
+            sb.AppendLine("\n);");
+            return sb.ToString();
+        }
+
+        if (objectType == "view")
+        {
+            cmd.CommandText = $@"
+        SELECT view_definition
+        FROM information_schema.views
+        WHERE table_name = '{objectName}'
+            AND table_schema = '{schemaName}'";
+
+            var def = cmd.ExecuteScalar()?.ToString()
+                ?? throw new Exception($"No definition found for view '{objectName}'");
+
+            return $"CREATE OR REPLACE VIEW {schemaName}.{objectName} AS\n{def}";
+        }
+
+        if (objectType == "trigger")
+        {
+            cmd.CommandText = $@"
+                    SELECT
+                        t.tgname,
+                        c.relname,
+                        n.nspname,
+                        p.proname,
+                        CASE t.tgtype & 2
+                            WHEN 2 THEN 'BEFORE'
+                            ELSE 'AFTER'
+                        END AS timing,
+                        CASE
+                            WHEN t.tgtype & 4  > 0 THEN 'INSERT'
+                            WHEN t.tgtype & 8  > 0 THEN 'DELETE'
+                            WHEN t.tgtype & 16 > 0 THEN 'UPDATE'
+                            ELSE 'UNKNOWN'
+                        END AS event,
+                        CASE t.tgtype & 1
+                            WHEN 1 THEN 'FOR EACH ROW'
+                            ELSE 'FOR EACH STATEMENT'
+                        END AS orientation
+                    FROM pg_trigger t
+                    JOIN pg_class     c ON c.oid = t.tgrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN pg_proc      p ON p.oid = t.tgfoid
+                    WHERE t.tgname = '{objectName}'
+                        AND NOT t.tgisinternal";
+
+                        string triggerName, tableName, schemaN, functionName, timing, evt, orientation;
+
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            if (!reader.Read())
+                                throw new Exception(
+                                    $"No definition found for trigger '{objectName}'.");
+
+                            triggerName = reader.GetString(0);
+                            tableName = reader.GetString(1);
+                            schemaN = reader.GetString(2);
+                            functionName = reader.GetString(3);
+                            timing = reader.GetString(4);
+                            evt = reader.GetString(5);
+                            orientation = reader.GetString(6);
+                        } // ← reader fully disposed here before opening second command
+
+                        // Use a separate command for the function definition
+                        using var cmd2 = conn.CreateCommand();
+                        cmd2.CommandText = $@"
+                    SELECT pg_get_functiondef(p.oid)
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.proname = '{functionName}'
+                        AND n.nspname = '{schemaN}'
+                    LIMIT 1";
+
+                        var funcDef = cmd2.ExecuteScalar()?.ToString() ?? "";
+
+                        return $@"{funcDef}
+
+            -- Trigger definition
+            CREATE OR REPLACE TRIGGER {triggerName}
+            {timing} {evt} ON {schemaN}.{tableName}
+            {orientation} EXECUTE FUNCTION {functionName}();";
+        }
+
+        // Procedures and functions — existing code unchanged
+        cmd.CommandText = $@"
+        SELECT pg_get_functiondef(p.oid)
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE p.proname = '{objectName}'
+            AND n.nspname = '{schemaName}'
+        LIMIT 1";
+
+        var result = cmd.ExecuteScalar()?.ToString()
+            ?? throw new Exception($"No definition found for {objectName}");
+        return result;
     }
 
     // ---- winsqlite3 P/Invoke ----------------------------------
