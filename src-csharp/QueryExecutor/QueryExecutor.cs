@@ -359,53 +359,43 @@ public static class QueryExecutor
     {
         try
         {
-            var isSelect = IsReadOnlyStatement(sql);
-
-            // Temporary debug — return this info as a message result
-            // to see what's happening
-            if (isSelect)
-            {
-                var result1 = engine.ToLower() switch
-                {
-                    "postgres" => ExecutePostgresInternal(connectionString, sql),
-                    "sqlite" => ExecuteSqliteInternal(connectionString, sql),
-                    "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, sql),
-                    _ => ExecuteMySqlInternal(connectionString, sql),
-                };
-                result1.Sql = sql.Length > 80 ? sql[..80] + "…" : sql;
-
-                return result1;
-            }
+            // Apply smart DDL rewrite before executing
+            var rewrittenSql = RewriteDdlStatement(sql, engine);
+            var isSelect = IsReadOnlyStatement(rewrittenSql);
 
             if (!isSelect)
             {
-                int rowsAffected = ExecuteNonQuery(connectionString, sql, engine);
+                int rowsAffected = ExecuteNonQuery(connectionString, rewrittenSql, engine);
                 return new QueryResult
                 {
                     Columns = new List<string> { "Message" },
                     Rows = new List<List<string?>>
                 {
-                    new List<string?> { rowsAffected >= 0
-                        ? $"({rowsAffected} row{(rowsAffected == 1 ? "" : "s")} affected)"
-                        : "Command completed successfully." }
+                    new List<string?> {
+                        rowsAffected >= 0
+                            ? $"({rowsAffected} row{(rowsAffected == 1 ? "" : "s")} affected)"
+                            : "Command completed successfully."
+                    }
                 },
                     RowCount = 0,
                     Truncated = false,
                     IsMessage = true,
                     Sql = sql.Length > 80 ? sql[..80] + "…" : sql,
+                    // Flag if rewrite was applied
+                    WasRewritten = rewrittenSql != sql,
                 };
             }
 
-            // SELECT — call internal methods that return QueryResult directly
             var result = engine.ToLower() switch
             {
-                "postgres" => ExecutePostgresInternal(connectionString, sql),
-                "sqlite" => ExecuteSqliteInternal(connectionString, sql),
-                "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, sql),
-                _ => ExecuteMySqlInternal(connectionString, sql),
+                "postgres" => ExecutePostgresInternal(connectionString, rewrittenSql),
+                "sqlite" => ExecuteSqliteInternal(connectionString, rewrittenSql),
+                "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, rewrittenSql),
+                _ => ExecuteMySqlInternal(connectionString, rewrittenSql),
             };
 
             result.Sql = sql.Length > 80 ? sql[..80] + "…" : sql;
+            result.WasRewritten = rewrittenSql != sql;
             return result;
         }
         catch (Exception ex)
@@ -585,6 +575,82 @@ public static class QueryExecutor
 
         return statements;
     }
+    private static string RewriteDdlStatement(string sql, string engine)
+    {
+        var trimmed = sql.TrimStart();
+        var upper = trimmed.ToUpperInvariant();
+
+        // Already idempotent — don't rewrite
+        if (upper.Contains("OR ALTER") || upper.Contains("OR REPLACE"))
+            return sql;
+
+        // Only rewrite plain CREATE statements
+        if (!upper.StartsWith("CREATE "))
+            return sql;
+
+        return engine.ToLower() switch
+        {
+            "sqlserver" => RewriteSqlServer(sql, upper),
+            "mysql" => RewriteMySqlOrPostgres(sql, upper, "OR REPLACE"),
+            "postgres" => RewriteMySqlOrPostgres(sql, upper, "OR REPLACE"),
+            _ => sql, // SQLite — no rewrite
+        };
+    }
+
+    private static string RewriteSqlServer(string sql, string upper)
+    {
+        // SQL Server supports CREATE OR ALTER for:
+        // PROCEDURE, FUNCTION, VIEW, TRIGGER
+        string[] supported = { "PROCEDURE", "FUNCTION", "VIEW", "TRIGGER" };
+        foreach (var keyword in supported)
+        {
+            var pattern = $"CREATE {keyword}";
+            var idx = upper.IndexOf(pattern, StringComparison.Ordinal);
+            if (idx >= 0)
+            {
+                return sql.Substring(0, idx)
+                    + $"CREATE OR ALTER {keyword}"
+                    + sql.Substring(idx + pattern.Length);
+            }
+            // Handle CREATE   PROCEDURE with extra whitespace
+            var flexPattern = $"CREATE  {keyword}";
+            idx = upper.IndexOf(flexPattern, StringComparison.Ordinal);
+            if (idx >= 0)
+            {
+                // Find the actual keyword position after CREATE
+                var afterCreate = sql.IndexOf(keyword,
+                    idx + 6, StringComparison.OrdinalIgnoreCase);
+                if (afterCreate >= 0)
+                {
+                    return sql.Substring(0, idx)
+                        + $"CREATE OR ALTER {keyword}"
+                        + sql.Substring(afterCreate + keyword.Length);
+                }
+            }
+        }
+        return sql;
+    }
+
+    private static string RewriteMySqlOrPostgres(
+        string sql, string upper, string modifier)
+    {
+        // MySQL/Postgres support CREATE OR REPLACE for:
+        // PROCEDURE, FUNCTION, VIEW
+        // NOTE: Triggers do NOT support OR REPLACE in MySQL
+        string[] supported = { "PROCEDURE", "FUNCTION", "VIEW" };
+        foreach (var keyword in supported)
+        {
+            var pattern = $"CREATE {keyword}";
+            var idx = upper.IndexOf(pattern, StringComparison.Ordinal);
+            if (idx >= 0)
+            {
+                return sql.Substring(0, idx)
+                    + $"CREATE {modifier} {keyword}"
+                    + sql.Substring(idx + pattern.Length);
+            }
+        }
+        return sql;
+    }
 }
 
 public class QueryResult
@@ -596,6 +662,7 @@ public class QueryResult
     [JsonPropertyName("error")] public string? Error { get; set; }
     [JsonPropertyName("isMessage")] public bool IsMessage { get; set; }
     [JsonPropertyName("sql")] public string? Sql { get; set; }
+    [JsonPropertyName("wasRewritten")] public bool WasRewritten { get; set; }
 }
 public class MultiResult
 {

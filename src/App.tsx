@@ -49,6 +49,7 @@ interface QueryResult {
   error?:    string;
   isMessage?: boolean;
   sql?:      string;  
+  wasRewritten?: boolean; 
 }
 
 interface FileSession {
@@ -137,6 +138,8 @@ interface Tab {
   loading:     boolean;
   duration:    number | null;
   joinTables:  string[];
+  pendingEdits: PendingEdit[];
+  editingCell:  { rowIndex: number; colIndex: number } | null;
 }
 
 function createTab(id?: string): Tab {
@@ -152,7 +155,39 @@ function createTab(id?: string): Tab {
     loading:      false,
     duration:     null,
     joinTables:   [],
+    pendingEdits: [],
+    editingCell:  null,
   };
+}
+
+interface AppSettings {
+  queryTimeoutSecs:      number;
+  lockTimeoutMins:       number; // 0 = disabled
+  resultRowLimit:        number;
+  historyRetentionDays:  number; // 0 = forever
+  resultClearMins:       number; // 0 = never
+  auditLogEnabled:       boolean;
+  clipboardClearEnabled: boolean;
+  clipboardClearSecs:    number;
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  queryTimeoutSecs:      30,
+  lockTimeoutMins:       15,
+  resultRowLimit:        10_000,
+  historyRetentionDays:  90,
+  resultClearMins:       5,
+  auditLogEnabled:       false,
+  clipboardClearEnabled: true,
+  clipboardClearSecs:    60,
+};
+
+interface PendingEdit {
+  rowIndex:   number;
+  colIndex:   number;
+  colName:    string;
+  oldValue:   string | null;
+  newValue:   string;
 }
 
 // ---- Engine badge -----------------------------------------
@@ -357,6 +392,9 @@ function AddConnectionForm({
   const [showPassword, setShowPassword] = useState(false);
 
 
+  const defaultPort: Record<string, number> = {
+    mysql: 3306, sqlserver: 1433, postgres: 5432, sqlite: 0,
+  };
 
   const fieldStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", background: "#0e0f11",
@@ -412,8 +450,6 @@ function AddConnectionForm({
       }
 
       if (form.password) {
-       console.log("store_credential target:", newRef);
-      console.log("store_credential username:", form.username);
         // User entered a new password — store it under the new ref
         await invoke<boolean>("store_credential", {
           target:   newRef,
@@ -780,7 +816,47 @@ function AddConnectionForm({
 }
 
 // ---- Results grid -----------------------------------------
-function ResultsGrid({ result }: { result: QueryResult }) {
+function ResultsGrid({
+  result,
+  connection,
+  schema,
+  pendingEdits,
+  editingCell,
+  onCellEdit,
+  onCellCommit,
+  onCellCancel,
+  onCommitAll,
+  onRollbackAll,
+}: {
+  result:        QueryResult;
+  connection:    ConnectionConfig | null;
+  schema:        SchemaResult | null;
+  pendingEdits:  PendingEdit[];
+  editingCell:   { rowIndex: number; colIndex: number } | null;
+  onCellEdit:    (rowIndex: number, colIndex: number) => void;
+  onCellCommit:  (rowIndex: number, colIndex: number, value: string) => void;
+  onCellCancel:  () => void;
+  onCommitAll:   () => void;
+  onRollbackAll: () => void;
+}) {
+
+  // Detect table name from result.sql (best effort)
+  const tableName = useMemo(() => {
+    const sql = result.sql ?? "";
+    const match = sql.match(/FROM\s+[\[\`"]?(\w+)[\]\`"]?/i);
+    return match?.[1] ?? "";
+  }, [result.sql]);
+
+  const tableInfo = useMemo(() =>
+    schema?.tables.find(t =>
+      t.name.toLowerCase() === tableName.toLowerCase()),
+    [schema, tableName]);
+
+  const pkColumns  = tableInfo?.columns.filter(c => c.isPrimaryKey) ?? [];
+  const hasPk      = pkColumns.length > 0;
+  const isReadOnly = connection?.readOnly ?? false;
+  const canEdit    = !isReadOnly && hasPk && !!tableInfo;
+
   const parentRef = useRef<HTMLDivElement>(null);
   const [filterText, setFilterText] = useState("");
   const debouncedFilter = useDebounce(filterText, 300);
@@ -901,6 +977,50 @@ function ResultsGrid({ result }: { result: QueryResult }) {
         )}
       </div>
 
+      {/* Pending edits toolbar */}
+      {pendingEdits.length > 0 && (
+        <div style={{
+          padding: "6px 14px",
+          borderBottom: "1px solid #1e2026",
+          background: "rgba(245,158,11,0.08)",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexShrink: 0,
+        }}>
+          <span style={{
+            fontSize: 11, color: "#f59e0b",
+            fontFamily: "monospace", flex: 1,
+          }}>
+            ⚠ {pendingEdits.length} unsaved change{pendingEdits.length > 1 ? "s" : ""}
+          </span>
+          <button
+            onClick={onCommitAll}
+            style={{
+              padding: "4px 12px",
+              background: "#10b981", color: "white",
+              border: "none", borderRadius: 6,
+              cursor: "pointer", fontSize: 11,
+              fontFamily: "monospace",
+            }}
+          >
+            ✓ Commit
+          </button>
+          <button
+            onClick={onRollbackAll}
+            style={{
+              padding: "4px 12px",
+              background: "transparent", color: "#6b7280",
+              border: "1px solid #2d2f36", borderRadius: 6,
+              cursor: "pointer", fontSize: 11,
+              fontFamily: "monospace",
+            }}
+          >
+            ✕ Rollback
+          </button>
+        </div>
+      )}
+
       {/* Grid */}
       <div ref={parentRef} style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
         <table style={{
@@ -943,49 +1063,116 @@ function ResultsGrid({ result }: { result: QueryResult }) {
               const row = rows[virtualRow.index];
               return (
                 <tr key={row.id}>
-                  {row.getVisibleCells().map((cell) => (
+                  {row.getVisibleCells().map((cell, colIdx) => {
+                  const rowIdx     = virtualRow.index;
+                  const isEditing  = editingCell?.rowIndex === rowIdx
+                                  && editingCell?.colIndex === colIdx;
+                  const pending    = pendingEdits.find(
+                    e => e.rowIndex === rowIdx && e.colIndex === colIdx);
+                  const cellValue  = pending ? pending.newValue
+                                  : cell.getValue() as string | null;
+                  const isModified = !!pending;
+
+                  return (
                     <td
                       key={cell.id}
-                     onClick={() => {
+                      onDoubleClick={() => {
+                        if (!canEdit) return;
                         const val = cell.getValue() as string | null;
-                        if (val === null) return;
-                        const cellId = cell.id;
-
-                        import("@tauri-apps/plugin-clipboard-manager").then(({ writeText, readText, clear }) => {
-                          writeText(val).then(() => {
-                            setCopiedCell(cellId);
-                            setTimeout(() => setCopiedCell(null), 800);
-
-                            setTimeout(() => {
-                              readText().then(current => {
-                                if (current === val) {
-                                  clear().catch(() => {});
-                                }
-                              }).catch(() => {});
-                            }, 60_000);
-
-                          }).catch(() => {});
-                        });
+                        if (val === null && !hasPk) return;
+                        onCellEdit(rowIdx, colIdx);
                       }}
-                      title="Click to copy"
+                      title={
+                        isReadOnly  ? "Read-only connection"
+                        : !hasPk    ? "No primary key — editing disabled"
+                        : !tableInfo ? "Select from a single table to edit"
+                        : "Double-click to edit"
+                      }
                       style={{
-                        padding: "5px 14px",
+                        padding: isEditing ? "0" : "5px 14px",
                         borderBottom: "1px solid #1e2026",
-                        color: "#e8e9ec",
+                        color: isModified ? "#f59e0b" : "#e8e9ec",
                         whiteSpace: "nowrap",
                         maxWidth: 320,
                         overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        cursor: "pointer",
-                        background: copiedCell === cell.id
+                        textOverflow: isEditing ? "clip" : "ellipsis",
+                        cursor: canEdit ? "pointer" : "default",
+                        background: isEditing
+                          ? "rgba(108,99,255,0.15)"
+                          : isModified
+                          ? "rgba(245,158,11,0.08)"
+                          : copiedCell === cell.id
                           ? "rgba(108,99,255,0.15)"
                           : virtualRow.index % 2 === 0 ? "#0e0f11" : "#13141a",
                         transition: "background .15s",
                       }}
+                      onClick={() => {
+                        if (isEditing) return;
+                        const val = cell.getValue() as string | null;
+                        if (val === null) return;
+                        import("@tauri-apps/plugin-clipboard-manager").then(
+                          ({ writeText, readText, clear }) => {
+                            writeText(val).then(() => {
+                              setCopiedCell(cell.id);
+                              setTimeout(() => setCopiedCell(null), 800);
+                              setTimeout(() => {
+                                readText().then(current => {
+                                  if (current === val) clear().catch(() => {});
+                                }).catch(() => {});
+                              }, 60_000);
+                            }).catch(() => {});
+                          });
+                      }}
                     >
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      {isEditing ? (
+                        <input
+                          autoFocus
+                          defaultValue={cellValue ?? ""}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            minHeight: 30,
+                            padding: "5px 14px",
+                            background: "rgba(108,99,255,0.15)",
+                            border: "none",
+                            borderBottom: "2px solid #6c63ff",
+                            color: "#e8e9ec",
+                            fontSize: 13,
+                            fontFamily: "monospace",
+                            outline: "none",
+                            boxSizing: "border-box",
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") {
+                              onCellCommit(rowIdx, colIdx,
+                                (e.target as HTMLInputElement).value);
+                            }
+                            if (e.key === "Escape") {
+                              onCellCancel();
+                            }
+                          }}
+                          onBlur={e => {
+                            // Commit on blur if value changed
+                            const newVal = e.target.value;
+                            const orig   = cell.getValue() as string | null;
+                            if (newVal !== (orig ?? "")) {
+                              onCellCommit(rowIdx, colIdx, newVal);
+                            } else {
+                              onCellCancel();
+                            }
+                          }}
+                          onClick={e => e.stopPropagation()}
+                        />
+                      ) : (
+                        cellValue === null
+                          ? <span style={{ color: "#6b7280", fontStyle: "italic" }}>NULL</span>
+                          : isModified
+                          ? <span style={{ color: "#f59e0b" }}>{cellValue}</span>
+                          : cellValue
+                      )}
                     </td>
-                  ))}
+                  );
+                })}
                 </tr>
               );
             })}
@@ -1001,6 +1188,26 @@ function ResultsGrid({ result }: { result: QueryResult }) {
           </div>
         )}
       </div>
+
+      {/* Edit Status Indicator */}
+      {!canEdit && connection && (
+      <div style={{
+        padding: "4px 14px",
+        background: "#13141a",
+        borderTop: "1px solid #1e2026",
+        fontSize: 10, color: "#374151",
+        fontFamily: "monospace", flexShrink: 0,
+      }}>
+        {isReadOnly
+          ? "🔒 Read-only connection — editing disabled"
+          : !tableInfo
+          ? "ℹ Select from a single table to enable inline editing"
+          : !hasPk
+          ? "ℹ No primary key detected — inline editing disabled"
+          : null}
+      </div>
+    )}
+
     </div>
   );
 }
@@ -1110,6 +1317,71 @@ function SchemaSection({
   );
 }
 
+function SettingsSection({
+  label, children
+}: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{
+        fontSize: 10, fontWeight: 600, color: "#4b5563",
+        fontFamily: "monospace", textTransform: "uppercase",
+        letterSpacing: ".08em", marginBottom: 12,
+        paddingBottom: 6, borderBottom: "1px solid #2d2f36",
+      }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SettingsRow({
+  label, description, children
+}: {
+  label: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center",
+      justifyContent: "space-between", gap: 16,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 12, color: "#e8e9ec",
+          marginBottom: 2, fontFamily: "monospace",
+        }}>
+          {label}
+        </div>
+        <div style={{
+          fontSize: 10, color: "#4b5563",
+          fontFamily: "monospace", lineHeight: 1.5,
+        }}>
+          {description}
+        </div>
+      </div>
+      <div style={{ flexShrink: 0 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const selectStyle: React.CSSProperties = {
+  background: "#0e0f11",
+  border: "1px solid #2d2f36",
+  borderRadius: 6,
+  color: "#e8e9ec",
+  fontSize: 12,
+  fontFamily: "monospace",
+  padding: "5px 10px",
+  cursor: "pointer",
+  outline: "none",
+};
+
 // ---- Main App ---------------------------------------------
 function App() {
   const editorRef = useRef<any>(null);
@@ -1125,7 +1397,9 @@ function App() {
   const sidebarStartW = useRef(220);
   const [showAddForm, setShowAddForm] = useState(false);
   const { size: editorHeight, onMouseDown: onEditorDragStart } = useResizable(220, 80, 600);
-
+  const [settings, setSettings]           = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [showSettings, setShowSettings]   = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [connectionsFolder, setConnectionsFolder] = useState("");
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
@@ -1135,7 +1409,6 @@ function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [locked, setLocked] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const LOCK_AFTER_MS = 15 * 60 * 1000; // 15 minutes
   const activeTabRef = useRef<Tab>(activeTab);
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
   const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1144,6 +1417,27 @@ function App() {
     updateActiveTab({ joinTables: tables });
   }, [activeTabId])
   const autocompleteRegistered = useRef(false);
+
+  const groupedConnections = useMemo(() => {
+    const groups = new Map<string, ConnectionConfig[]>();
+
+    for (const conn of connections) {
+      const group = conn.group?.trim() || ""; 
+      const key   = group || "__ungrouped__";
+      const list  = groups.get(key) ?? [];
+      list.push(conn);
+      groups.set(key, list);
+    }
+
+    // Sort: named groups alphabetically, ungrouped last
+    const sorted = [...groups.entries()].sort(([a], [b]) => {
+      if (a === "__ungrouped__") return 1;
+      if (b === "__ungrouped__") return -1;
+      return a.localeCompare(b);
+    });
+
+    return sorted;
+  }, [connections]);
 
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -1167,6 +1461,38 @@ function App() {
   const [tunnelPorts, setTunnelPorts] = useState<Record<string, number>>({});
   const [tunnelLoading, setTunnelLoading] = useState<Record<string, boolean>>({});
   const [auditLogEnabled, setAuditLogEnabled] = useState(false);
+  const wasRewritten = activeTab.results.some(r => r.wasRewritten);
+
+  useEffect(() => {
+    invoke<string>("load_settings")
+      .then(raw => {
+        try {
+          const loaded = JSON.parse(raw);
+          // Map snake_case from Rust to camelCase
+          const mapped: AppSettings = {
+            queryTimeoutSecs:      loaded.query_timeout_secs      ?? 30,
+            lockTimeoutMins:       loaded.lock_timeout_mins       ?? 15,
+            resultRowLimit:        loaded.result_row_limit        ?? 10_000,
+            historyRetentionDays:  loaded.history_retention_days  ?? 90,
+            resultClearMins:       loaded.result_clear_mins       ?? 5,
+            auditLogEnabled:       loaded.audit_log_enabled       ?? false,
+            clipboardClearEnabled: loaded.clipboard_clear_enabled ?? true,
+            clipboardClearSecs:    loaded.clipboard_clear_secs    ?? 60,
+          };
+          const stored = localStorage.getItem("dbark_collapsed_groups");
+
+          if (stored) {
+            try {
+              setCollapsedGroups(new Set(JSON.parse(stored)));
+            } catch { /* ignore */ }
+          }
+          
+          setSettings(mapped);
+          setAuditLogEnabled(mapped.auditLogEnabled);
+        } catch { /* use defaults */ }
+      })
+      .catch(() => { /* use defaults */ });
+  }, []);
 
   useEffect(() => {
     const stored = localStorage.getItem("dbark_audit_log");
@@ -1209,6 +1535,21 @@ function App() {
     sidebarStartW.current = sidebarWidth;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
+  }
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  function toggleGroup(group: string) {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      next.has(group) ? next.delete(group) : next.add(group);
+      // Persist to localStorage
+      localStorage.setItem(
+        "dbark_collapsed_groups",
+        JSON.stringify([...next])
+      );
+      return next;
+    });
   }
 
   async function openTunnel(conn: ConnectionConfig): Promise<number | null> {
@@ -1382,6 +1723,45 @@ function App() {
     }
   }
 
+  function generateUpdateSql(
+    tableName:    string,
+    schemaName:   string,
+    edits:        PendingEdit[],
+    pkColumns:    ColumnInfo[],
+    pkValues:     (string | null)[],
+    engine:       string,
+  ): string {
+    const quote = (n: string) =>
+      engine === "sqlserver" ? `[${n}]`
+      : engine === "mysql"   ? `\`${n}\``
+      : n;
+
+    const quoteTable = () =>
+      engine === "sqlserver"
+        ? `[${schemaName || "dbo"}].[${tableName}]`
+        : engine === "mysql"
+        ? `\`${tableName}\``
+        : `${schemaName || "public"}.${tableName}`;
+
+    const quoteValue = (v: string | null) => {
+      if (v === null) return "NULL";
+      // Numeric — no quotes
+      if (/^-?\d+(\.\d+)?$/.test(v)) return v;
+      // Escape single quotes
+      return `'${v.replace(/'/g, "''")}'`;
+    };
+
+    const setClause = edits
+      .map(e => `    ${quote(e.colName)} = ${quoteValue(e.newValue)}`)
+      .join(",\n");
+
+    const whereClause = pkColumns
+      .map((pk, i) => `${quote(pk.name)} = ${quoteValue(pkValues[i])}`)
+      .join(" AND ");
+
+    return `UPDATE ${quoteTable()}\nSET\n${setClause}\nWHERE ${whereClause}`;
+  }
+  
   // Update active tab helper
   function updateActiveTab(updates: Partial<Tab>) {
     setTabs(prev => prev.map(t =>
@@ -1393,12 +1773,16 @@ function App() {
   const lastActivity = useRef(Date.now());
 
   function resetInactivityTimer() {
+    if (settings.lockTimeoutMins === 0) return; // disabled
     const now = Date.now();
-    if (now - lastActivity.current < 500) return; // throttle to max 2x per second
+    if (now - lastActivity.current < 500) return;
     lastActivity.current = now;
     if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     if (locked) return;
-    inactivityTimer.current = setTimeout(() => setLocked(true), LOCK_AFTER_MS);
+    inactivityTimer.current = setTimeout(
+      () => setLocked(true),
+      settings.lockTimeoutMins * 60 * 1000
+    );
   }
 
   useEffect(() => {
@@ -1452,6 +1836,199 @@ function App() {
       console.error("Failed to open file:", e);
     }
   }
+
+  async function scriptDropAndCreate(
+    name: string,
+    type: string,
+    schema: string,
+    conn: ConnectionConfig,
+    extra?: { tableName: string; columns: string; isUnique: boolean; isPrimary: boolean; }
+  ) {
+    // Get the CREATE definition first
+    const raw = await invoke<string>("get_object_definition", {
+      credentialRef: conn.credentialRef,
+      engine:        conn.engine,
+      host:          conn.host,
+      port:          conn.port,
+      database:      conn.database,
+      username:      conn.username,
+      sslMode:       conn.sslMode ?? "prefer",
+      sqlInstance:   conn.sqlInstance ?? "",
+      windowsAuth:   conn.windowsAuth ?? false,
+      objectName:    name,
+      objectType:    type,
+      schemaName:    schema || "dbo",
+    });
+
+    const parsed: { definition?: string; error?: string } = JSON.parse(raw);
+    if (parsed.error) { updateActiveTab({ error: parsed.error }); return; }
+
+    const definition = parsed.definition ?? "";
+
+    // Build DROP IF EXISTS per engine
+    const dropSql = buildDropIfExists(conn.engine, type, name, schema,
+      extra?.tableName ?? "");
+
+    const batchSep = conn.engine === "sqlserver" ? "\nGO\n\n" : "\n\n";
+    const fullScript = `${dropSql}${batchSep}${definition}`;
+
+    const currentSql = editorRef.current?.getValue() ?? "";
+    const newTab      = createTab();
+    newTab.title      = `Drop & Create ${name}`;
+    newTab.sql        = fullScript;
+    newTab.connection = conn;
+
+    setTabs(prev => {
+      const updated = prev.map(t =>
+        t.id === activeTabId ? { ...t, sql: currentSql } : t
+      );
+      return [...updated, newTab];
+    });
+    setActiveTabId(newTab.id);
+    setTimeout(() => editorRef.current?.setValue(fullScript), 0);
+  }
+
+  function buildDropIfExists(
+    engine: string, type: string,
+    name: string, schema: string, table: string
+  ): string {
+    switch (engine) {
+      case "sqlserver":
+        switch (type) {
+          case "procedure": return `DROP PROCEDURE IF EXISTS [${schema}].[${name}]`;
+          case "function":  return `DROP FUNCTION IF EXISTS [${schema}].[${name}]`;
+          case "view":      return `DROP VIEW IF EXISTS [${schema}].[${name}]`;
+          case "trigger":   return `DROP TRIGGER IF EXISTS [${name}]`;
+          case "table":     return `DROP TABLE IF EXISTS [${schema}].[${name}]`;
+          case "index":     return `DROP INDEX IF EXISTS [${name}] ON [${schema}].[${table}]`;
+          default:          return `DROP ${type} IF EXISTS [${name}]`;
+        }
+      case "mysql":
+        switch (type) {
+          case "procedure": return `DROP PROCEDURE IF EXISTS \`${name}\``;
+          case "function":  return `DROP FUNCTION IF EXISTS \`${name}\``;
+          case "view":      return `DROP VIEW IF EXISTS \`${name}\``;
+          case "trigger":   return `DROP TRIGGER IF EXISTS \`${name}\``;
+          case "table":     return `DROP TABLE IF EXISTS \`${name}\``;
+          case "index":     return `DROP INDEX IF EXISTS \`${name}\` ON \`${table}\``;
+          default:          return `DROP ${type} IF EXISTS \`${name}\``;
+        }
+      case "postgres":
+        switch (type) {
+          case "procedure": return `DROP PROCEDURE IF EXISTS ${schema}.${name}`;
+          case "function":  return `DROP FUNCTION IF EXISTS ${schema}.${name}`;
+          case "view":      return `DROP VIEW IF EXISTS ${schema}.${name}`;
+          case "trigger":   return `DROP TRIGGER IF EXISTS ${name} ON ${schema}.${table}`;
+          case "table":     return `DROP TABLE IF EXISTS ${schema}.${name}`;
+          case "index":     return `DROP INDEX IF EXISTS ${schema}.${name}`;
+          default:          return `DROP ${type} IF EXISTS ${name}`;
+        }
+      default: // SQLite
+        switch (type) {
+          case "view":    return `DROP VIEW IF EXISTS ${name}`;
+          case "trigger": return `DROP TRIGGER IF EXISTS ${name}`;
+          case "index":   return `DROP INDEX IF EXISTS ${name}`;
+          case "table":   return `DROP TABLE IF EXISTS ${name}`;
+          default:        return `DROP ${type} IF EXISTS ${name}`;
+        }
+    }
+  }
+
+  //Generate CRUD Scripts for Various Db Objects
+  function scriptTable(
+    table: TableInfo,
+    scriptType: "select" | "insert" | "update" | "delete",
+    engine: string
+  ): string {
+    const cols     = table.columns ?? [];
+    const pkCols   = cols.filter(c => c.isPrimaryKey);
+    const dataCols = cols.filter(c => !c.isPrimaryKey);
+
+    const quoteName = (n: string) =>
+      engine === "sqlserver" ? `[${n}]`
+      : engine === "mysql"   ? `\`${n}\``
+      : n;
+
+    const quoteTable = () =>
+      engine === "sqlserver"
+        ? `[${table.schema || "dbo"}].[${table.name}]`
+        : engine === "mysql"
+        ? `\`${table.name}\``
+        : `${table.schema || "public"}.${table.name}`;
+
+    const colList = (columns: ColumnInfo[]) =>
+      columns.map(c => quoteName(c.name)).join(", ");
+
+    const valueList = (columns: ColumnInfo[]) =>
+      columns.map(c => `<${c.name}, ${c.dataType}>`).join(", ");
+
+    const setList = (columns: ColumnInfo[]) =>
+      columns.map(c =>
+        `    ${quoteName(c.name)} = <${c.name}, ${c.dataType}>`
+      ).join(",\n");
+
+    const whereClause = (columns: ColumnInfo[]) =>
+      columns.length > 0
+        ? columns.map(c =>
+            `${quoteName(c.name)} = <${c.name}, ${c.dataType}>`
+          ).join(" AND ")
+        : `<primary_key> = <value>`;
+
+    const tbl = quoteTable();
+
+    switch (scriptType) {
+      case "select":
+        return `SELECT ${colList(cols)}\nFROM ${tbl}`;
+
+      case "insert":
+        return `INSERT INTO ${tbl}\n    (${colList(dataCols.length > 0 ? dataCols : cols)})\nVALUES\n    (${valueList(dataCols.length > 0 ? dataCols : cols)})`;
+
+      case "update":
+        return `UPDATE ${tbl}\nSET\n${setList(dataCols.length > 0 ? dataCols : cols)}\nWHERE ${whereClause(pkCols)}`;
+
+      case "delete":
+        return `DELETE FROM ${tbl}\nWHERE ${whereClause(pkCols)}`;
+
+      default:
+        return "";
+    }
+  }
+
+  function scriptExecute(proc: ProcedureInfo, engine: string): string {
+    const paramList = proc.parameterCount > 0
+      ? Array.from({ length: proc.parameterCount },
+          (_, i) => `<param${i + 1}>`)
+      : [];
+
+    switch (engine) {
+      case "sqlserver":
+        return `EXECUTE [${proc.schema}].[${proc.name}]${
+          paramList.length > 0
+            ? "\n    " + paramList.map((p, i) =>
+                `@param${i + 1} = ${p}`).join(",\n    ")
+            : ""
+        }`;
+      case "mysql":
+        return `CALL \`${proc.name}\`(${paramList.join(", ")})`;
+      case "postgres":
+        return `CALL ${proc.schema}.${proc.name}(${paramList.join(", ")})`;
+      default:
+        return `-- ${engine} does not support stored procedures`;
+    }
+  }
+
+  function setEditorScript(script: string) {
+    editorRef.current?.setValue(script);
+    editorRef.current?.focus();
+  }
+
+  const menuItemStyle: React.CSSProperties = {
+    display: "block", width: "100%", padding: "8px 16px",
+    background: "none", border: "none", color: "#e8e9ec",
+    fontSize: 12, fontFamily: "monospace", cursor: "pointer",
+    textAlign: "left",
+  };
+  //END CRUD Script function
 
   //Run Query Function
   const runQuery = useCallback(async () => {
@@ -1553,6 +2130,15 @@ function App() {
     const results = normalised.results ?? [];
     const firstError = results.find(r => r.error);
     const tabId = activeTabRef.current.id; // ← capture the ref, not the closure
+
+    // Result auto-clear — in runQuery after setting results:
+    if (settings.resultClearMins > 0) {
+      setTimeout(() => {
+        setTabs(prev => prev.map(t =>
+          t.id === tabId ? { ...t, results: [], error: null } : t
+        ));
+      }, settings.resultClearMins * 60 * 1000);
+    }
 
     setTabs(prev => prev.map(t =>
       t.id === tabId
@@ -1764,9 +2350,6 @@ function App() {
           const rows: (string | null)[][] =
             objParsed.results?.[0]?.rows ?? [];
 
-console.log("SQLite objects raw:", objRaw);
-console.log("SQLite objects parsed rows:", rows);
-
           const views: ViewInfo[]     = [];
           const triggers: TriggerInfo[] = [];
           const indexes: IndexInfo[]  = [];
@@ -1888,7 +2471,8 @@ console.log("SQLite objects parsed rows:", rows);
     name: string,
     type: string,
     schema: string,
-    conn: ConnectionConfig
+    conn: ConnectionConfig,
+    extra: any
   ) {
     try {
       const raw = await invoke<string>("get_object_definition", {
@@ -1935,6 +2519,152 @@ console.log("SQLite objects parsed rows:", rows);
     } catch (e) {
       updateActiveTab({ error: `Failed to load definition: ${String(e)}` });
     }
+  }
+
+  function handleCellEdit(rowIndex: number, colIndex: number) {
+  updateActiveTab({ editingCell: { rowIndex, colIndex } });
+}
+
+function handleCellCommit(
+  rowIndex: number, colIndex: number, newValue: string
+) {
+  const tab     = activeTabRef.current;
+  const result  = tab.results[tab.activeResult];
+  if (!result) return;
+
+  const colName  = result.columns[colIndex];
+  const oldValue = result.rows[rowIndex]?.[colIndex] ?? null;
+
+  // Remove any existing edit for this cell and add the new one
+  const existing = tab.pendingEdits.filter(
+    e => !(e.rowIndex === rowIndex && e.colIndex === colIndex)
+  );
+
+  // If value unchanged from original — don't add to pending
+  if (newValue === (oldValue ?? "")) {
+    updateActiveTab({ editingCell: null, pendingEdits: existing });
+    return;
+  }
+
+  updateActiveTab({
+    editingCell:  null,
+    pendingEdits: [...existing, {
+      rowIndex, colIndex, colName,
+      oldValue, newValue,
+    }],
+  });
+}
+
+  function handleCellCancel() {
+    updateActiveTab({ editingCell: null });
+  }
+
+  async function handleCommitAll() {
+    const tab    = activeTabRef.current;
+    const conn   = tab.connection;
+    const result = tab.results[tab.activeResult];
+    if (!conn || !result || tab.pendingEdits.length === 0) return;
+
+    // Find table info
+    const sqlText  = result.sql ?? "";
+    const match    = sqlText.match(/FROM\s+[\[\`"]?(\w+)[\]\`"]?/i);
+    const tableName = match?.[1] ?? "";
+    const tableInfo = schema?.tables.find(
+      t => t.name.toLowerCase() === tableName.toLowerCase());
+
+    if (!tableInfo) {
+      updateActiveTab({ error: "Cannot commit — table not found in schema" });
+      return;
+    }
+
+    const pkColumns = tableInfo.columns.filter(c => c.isPrimaryKey);
+    if (pkColumns.length === 0) {
+      updateActiveTab({ error: "Cannot commit — no primary key found" });
+      return;
+    }
+
+    // Group edits by row
+    const rowGroups = new Map<number, PendingEdit[]>();
+    for (const edit of tab.pendingEdits) {
+      const group = rowGroups.get(edit.rowIndex) ?? [];
+      group.push(edit);
+      rowGroups.set(edit.rowIndex, group);
+    }
+
+    // Execute one UPDATE per row
+    const errors: string[] = [];
+    for (const [rowIndex, edits] of rowGroups) {
+      const pkValues = pkColumns.map(pk => {
+        const pkColIdx = result.columns.indexOf(pk.name);
+        return pkColIdx >= 0 ? result.rows[rowIndex]?.[pkColIdx] ?? null : null;
+      });
+
+      const sql = generateUpdateSql(
+        tableInfo.name,
+        tableInfo.schema,
+        edits,
+        pkColumns,
+        pkValues,
+        conn.engine,
+      );
+
+      try {
+        const connStr = await invoke<string>("build_connection_string", {
+          credentialRef: conn.credentialRef,
+          engine:        conn.engine,
+          host:          conn.host,
+          port:          conn.port,
+          database:      conn.database,
+          username:      conn.username,
+          sslMode:       conn.sslMode ?? "prefer",
+          sqlInstance:   conn.sqlInstance ?? "",
+          windowsAuth:   conn.windowsAuth ?? false,
+        });
+
+        const raw = await invoke<string>("execute_query", {
+          connectionString: connStr,
+          sql,
+          engine:   conn.engine,
+          readOnly: false,
+        });
+
+        const parsed = JSON.parse(raw);
+        if (parsed.results?.[0]?.error) {
+          errors.push(parsed.results[0].error);
+        }
+      } catch (e) {
+        errors.push(String(e));
+      }
+    }
+
+    if (errors.length > 0) {
+      updateActiveTab({ error: `Commit failed: ${errors.join("; ")}` });
+      return;
+    }
+
+    // Apply edits to the result rows in state
+    setTabs(prev => prev.map(t => {
+      if (t.id !== activeTabId) return t;
+      const newResults = t.results.map((r, ri) => {
+        if (ri !== t.activeResult) return r;
+        const newRows = r.rows.map((row, rowIdx) => {
+          const rowEdits = tab.pendingEdits.filter(
+            e => e.rowIndex === rowIdx);
+          if (rowEdits.length === 0) return row;
+          const newRow = [...row];
+          for (const edit of rowEdits) {
+            newRow[edit.colIndex] = edit.newValue;
+          }
+          return newRow;
+        });
+        return { ...r, rows: newRows };
+      });
+      return { ...t, results: newResults, pendingEdits: [], editingCell: null };
+    }));
+  }
+
+  function handleRollbackAll() {
+    updateActiveTab({ pendingEdits: [], editingCell: null });
   }
 
   return (
@@ -2071,12 +2801,12 @@ console.log("SQLite objects parsed rows:", rows);
             border: "1px solid #2d2f36",
             borderRadius: 8,
             padding: "4px 0",
-            minWidth: 180,
+            minWidth: 200,
             boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
           }}>
-            {/* Header showing object name */}
+            {/* Header */}
             <div style={{
-              padding: "6px 16px 6px",
+              padding: "6px 16px",
               fontSize: 10, color: "#4b5563",
               fontFamily: "monospace",
               borderBottom: "1px solid #2d2f36",
@@ -2085,95 +2815,212 @@ console.log("SQLite objects parsed rows:", rows);
               {schemaContextMenu.type.toUpperCase()} · {schemaContextMenu.name}
             </div>
 
-            {schemaContextMenu.type === "index" ? (
-            <button
-              onClick={() => {
-                // Generate DROP + CREATE INDEX script from known data
-                // Find the index in the schema
-                const idx = schema?.indexes?.find(i => i.name === schemaContextMenu.name);
-                if (!idx) return;
-
-                const conn = schemaContextMenu.connection;
-                let script = "";
-
-                if (conn.engine === "sqlserver") {
-                  script = idx.isPrimary
-                    ? `-- Primary key constraints cannot be dropped with DROP INDEX\n-- Use ALTER TABLE instead:\nALTER TABLE [${idx.tableName}] DROP CONSTRAINT [${idx.name}];\n\n-- Recreate:\nALTER TABLE [${idx.tableName}] ADD CONSTRAINT [${idx.name}] PRIMARY KEY (${idx.columns});`
-                    : `DROP INDEX [${idx.name}] ON [${idx.tableName}];\n\nCREATE ${idx.isUnique ? "UNIQUE " : ""}INDEX [${idx.name}]\n    ON [${idx.tableName}] (${idx.columns});`;
-                } else if (conn.engine === "mysql") {
-                  script = idx.isPrimary
-                    ? `-- Primary key:\nALTER TABLE \`${idx.tableName}\` DROP PRIMARY KEY;\nALTER TABLE \`${idx.tableName}\` ADD PRIMARY KEY (${idx.columns});`
-                    : `DROP INDEX \`${idx.name}\` ON \`${idx.tableName}\`;\n\nCREATE ${idx.isUnique ? "UNIQUE " : ""}INDEX \`${idx.name}\`\n    ON \`${idx.tableName}\` (${idx.columns});`;
-                } else {
-                  script = idx.isPrimary
-                    ? `-- Primary key:\nALTER TABLE ${idx.tableName} DROP CONSTRAINT ${idx.name};\nALTER TABLE ${idx.tableName} ADD CONSTRAINT ${idx.name} PRIMARY KEY (${idx.columns});`
-                    : `DROP INDEX IF EXISTS ${idx.name};\n\nCREATE ${idx.isUnique ? "UNIQUE " : ""}INDEX ${idx.name}\n    ON ${idx.tableName} (${idx.columns});`;
-                }
-
-                editorRef.current?.setValue(script);
-                editorRef.current?.focus();
-                setSchemaContextMenu(null);
-              }}
-              style={{
-                display: "block", width: "100%", padding: "8px 16px",
-                background: "none", border: "none", color: "#e8e9ec",
-                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
-                textAlign: "left",
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
-              onMouseLeave={e => (e.currentTarget.style.background = "none")}
-            >
-              📄 Script Index
-            </button>
-          ) : (
-            <button
-              onClick={() => {
-                openDefinition(
-                  schemaContextMenu.name,
-                  schemaContextMenu.type,
-                  schemaContextMenu.schema,
-                  schemaContextMenu.connection,
-                );
-                setSchemaContextMenu(null);
-              }}
-              style={{
-                display: "block", width: "100%", padding: "8px 16px",
-                background: "none", border: "none", color: "#e8e9ec",
-                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
-                textAlign: "left",
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
-              onMouseLeave={e => (e.currentTarget.style.background = "none")}
-            >
-              📄 Open Definition
-            </button>
-          )}
-
-            {/* Quick query for tables and views */}
-            {(schemaContextMenu.type === "table" || schemaContextMenu.type === "view") && (
+            {/* Open Definition — all types except index */}
+            {schemaContextMenu.type !== "index" && (
               <button
                 onClick={() => {
-                  const limit = schemaContextMenu.connection.engine === "sqlserver"
-                    ? `SELECT TOP 100 * FROM ${schemaContextMenu.name}`
-                    : `SELECT * FROM ${schemaContextMenu.name} LIMIT 100`;
-                  editorRef.current?.setValue(limit);
-                  editorRef.current?.focus();
+                  openDefinition(
+                    schemaContextMenu.name,
+                    schemaContextMenu.type,
+                    schemaContextMenu.schema,
+                    schemaContextMenu.connection,
+                    schemaContextMenu.extra,
+                  );
                   setSchemaContextMenu(null);
                 }}
-                style={{
-                  display: "block", width: "100%", padding: "8px 16px",
-                  background: "none", border: "none", color: "#e8e9ec",
-                  fontSize: 12, fontFamily: "monospace", cursor: "pointer",
-                  textAlign: "left",
-                }}
+                style={menuItemStyle}
                 onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
                 onMouseLeave={e => (e.currentTarget.style.background = "none")}
               >
-                ▶ Query Table
+                📄 Open Definition
               </button>
             )}
 
-            {/* Drop Object button */}
+            {/* Index — Open Definition */}
+            {schemaContextMenu.type === "index" && (
+              <button
+                onClick={() => {
+                  openDefinition(
+                    schemaContextMenu.name,
+                    schemaContextMenu.type,
+                    schemaContextMenu.schema,
+                    schemaContextMenu.connection,
+                    schemaContextMenu.extra,
+                  );
+                  setSchemaContextMenu(null);
+                }}
+                style={menuItemStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              >
+                📄 Open Definition
+              </button>
+            )}
+
+            {/* Table-specific scripts */}
+            {schemaContextMenu.type === "table" && (() => {
+              const table = schema?.tables.find(
+                t => t.name === schemaContextMenu.name);
+              const engine = schemaContextMenu.connection.engine;
+              if (!table) return null;
+              return (
+                <>
+                  <div style={{
+                    height: 1, background: "#2d2f36",
+                    margin: "4px 0",
+                  }} />
+                  {(["select", "insert", "update", "delete"] as const).map(type => (
+                    <button
+                      key={type}
+                      onClick={() => {
+                        setEditorScript(scriptTable(table, type, engine));
+                        setSchemaContextMenu(null);
+                      }}
+                      style={menuItemStyle}
+                      onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                      onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                    >
+                      ✦ Script {type.toUpperCase()}
+                    </button>
+                  ))}
+                </>
+              );
+            })()}
+
+            {/* View — quick query */}
+            {schemaContextMenu.type === "view" && (
+              <button
+                onClick={() => {
+                  const engine = schemaContextMenu.connection.engine;
+                  const limit  = engine === "sqlserver"
+                    ? `SELECT TOP 100 * FROM ${schemaContextMenu.name}`
+                    : `SELECT * FROM ${schemaContextMenu.name} LIMIT 100`;
+                  setEditorScript(limit);
+                  setSchemaContextMenu(null);
+                }}
+                style={menuItemStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              >
+                ▶ Query View
+              </button>
+            )}
+
+            {/* Procedure — Script EXECUTE */}
+            {schemaContextMenu.type === "procedure" && (() => {
+              const proc = schema?.procedures.find(
+                p => p.name === schemaContextMenu.name);
+              const engine = schemaContextMenu.connection.engine;
+              if (!proc) return null;
+              return (
+                <>
+                  <div style={{ height: 1, background: "#2d2f36", margin: "4px 0" }} />
+                  <button
+                    onClick={() => {
+                      setEditorScript(scriptExecute(proc, engine));
+                      setSchemaContextMenu(null);
+                    }}
+                    style={menuItemStyle}
+                    onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                  >
+                    ▶ Script EXECUTE
+                  </button>
+                </>
+              );
+            })()}
+
+            {/* Drop and Create — tables, procedures, functions, views */}
+            {["table", "procedure", "function", "view"].includes(
+              schemaContextMenu.type) && (
+              <button
+                onClick={async () => {
+                  await scriptDropAndCreate(
+                    schemaContextMenu.name,
+                    schemaContextMenu.type,
+                    schemaContextMenu.schema,
+                    schemaContextMenu.connection,
+                    schemaContextMenu.extra,
+                  );
+                  setSchemaContextMenu(null);
+                }}
+                style={menuItemStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              >
+                ⬇ Script DROP and CREATE
+              </button>
+            )}
+
+            {/* Script CREATE OR ALTER — procedures, functions, views, triggers */}
+            {["procedure", "function", "view", "trigger"].includes(
+              schemaContextMenu.type) && (
+              <button
+                onClick={async () => {
+                  const conn = schemaContextMenu.connection;
+                  const raw  = await invoke<string>("get_object_definition", {
+                    credentialRef: conn.credentialRef,
+                    engine:        conn.engine,
+                    host:          conn.host,
+                    port:          conn.port,
+                    database:      conn.database,
+                    username:      conn.username,
+                    sslMode:       conn.sslMode ?? "prefer",
+                    sqlInstance:   conn.sqlInstance ?? "",
+                    windowsAuth:   conn.windowsAuth ?? false,
+                    objectName:    schemaContextMenu.name,
+                    objectType:    schemaContextMenu.type,
+                    schemaName:    schemaContextMenu.schema || "dbo",
+                  });
+
+                  const parsed: { definition?: string; error?: string } =
+                    JSON.parse(raw);
+                  if (parsed.error) {
+                    updateActiveTab({ error: parsed.error });
+                    setSchemaContextMenu(null);
+                    return;
+                  }
+
+                  // Pre-apply idempotent rewrite
+                  let definition = parsed.definition ?? "";
+                  if (conn.engine === "sqlserver") {
+                    definition = definition.replace(
+                      /CREATE\s+(PROCEDURE|FUNCTION|VIEW|TRIGGER)/gi,
+                      "CREATE OR ALTER $1"
+                    );
+                  } else {
+                    definition = definition.replace(
+                      /CREATE\s+(PROCEDURE|FUNCTION|VIEW)/gi,
+                      "CREATE OR REPLACE $1"
+                    );
+                  }
+
+                  const currentSql = editorRef.current?.getValue() ?? "";
+                  const newTab     = createTab();
+                  newTab.title     = schemaContextMenu.name;
+                  newTab.sql       = definition;
+                  newTab.connection = conn;
+
+                  setTabs(prev => {
+                    const updated = prev.map(t =>
+                      t.id === activeTabId ? { ...t, sql: currentSql } : t
+                    );
+                    return [...updated, newTab];
+                  });
+                  setActiveTabId(newTab.id);
+                  setTimeout(() => editorRef.current?.setValue(definition), 0);
+                  setSchemaContextMenu(null);
+                }}
+                style={menuItemStyle}
+                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              >
+                ✦ Script CREATE OR ALTER
+              </button>
+            )}
+
+            {/* Drop — all types */}
+            <div style={{ height: 1, background: "#2d2f36", margin: "4px 0" }} />
             <button
               onClick={() => {
                 const dropSql = buildDropSql(
@@ -2184,21 +3031,16 @@ console.log("SQLite objects parsed rows:", rows);
                   schemaContextMenu.extra?.tableName ?? "",
                 );
                 setDropConfirm({
-                  name:       schemaContextMenu.name,
-                  type:       schemaContextMenu.type,
-                  schema:     schemaContextMenu.schema,
-                  tableName:  schemaContextMenu.extra?.tableName ?? "",
+                  name:      schemaContextMenu.name,
+                  type:      schemaContextMenu.type,
+                  schema:    schemaContextMenu.schema,
+                  tableName: schemaContextMenu.extra?.tableName ?? "",
                   dropSql,
                   connection: schemaContextMenu.connection,
                 });
                 setSchemaContextMenu(null);
               }}
-              style={{
-                display: "block", width: "100%", padding: "8px 16px",
-                background: "none", border: "none", color: "#ef4444",
-                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
-                textAlign: "left",
-              }}
+              style={{ ...menuItemStyle, color: "#ef4444" }}
               onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
               onMouseLeave={e => (e.currentTarget.style.background = "none")}
             >
@@ -2382,6 +3224,265 @@ console.log("SQLite objects parsed rows:", rows);
         </>
       )}
       {/* END Drop object confirmation */}
+      {/* Settings modal */}
+      {showSettings && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999,
+              background: "rgba(0,0,0,0.6)" }}
+            onClick={() => setShowSettings(false)}
+          />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%,-50%)",
+            zIndex: 1000, background: "#1e2026",
+            border: "1px solid #2d2f36", borderRadius: 12,
+            padding: "0", width: 480, maxHeight: "80vh",
+            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+            display: "flex", flexDirection: "column",
+          }}>
+
+            {/* Header */}
+            <div style={{
+              padding: "16px 24px",
+              borderBottom: "1px solid #2d2f36",
+              display: "flex", alignItems: "center",
+              justifyContent: "space-between", flexShrink: 0,
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec" }}>
+                ⚙ Settings
+              </div>
+              <button
+                onClick={() => setShowSettings(false)}
+                style={{ background: "none", border: "none",
+                  color: "#4b5563", cursor: "pointer", fontSize: 18 }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: "16px 24px", overflowY: "auto", flex: 1 }}>
+
+              {/* Section: Query */}
+              <SettingsSection label="Query">
+                <SettingsRow
+                  label="Query timeout"
+                  description="Maximum time a query can run before being cancelled"
+                >
+                  <select
+                    value={settingsDraft.queryTimeoutSecs}
+                    onChange={e => setSettingsDraft(s => ({
+                      ...s, queryTimeoutSecs: Number(e.target.value)
+                    }))}
+                    style={selectStyle}
+                  >
+                    {[5, 15, 30, 60, 120, 300].map(v => (
+                      <option key={v} value={v}>{v}s</option>
+                    ))}
+                  </select>
+                </SettingsRow>
+
+                <SettingsRow
+                  label="Result row limit"
+                  description="Maximum rows returned per query — use WHERE to filter large sets"
+                >
+                  <select
+                    value={settingsDraft.resultRowLimit}
+                    onChange={e => setSettingsDraft(s => ({
+                      ...s, resultRowLimit: Number(e.target.value)
+                    }))}
+                    style={selectStyle}
+                  >
+                    {[1000, 5000, 10000, 25000].map(v => (
+                      <option key={v} value={v}>
+                        {v.toLocaleString()} rows
+                      </option>
+                    ))}
+                  </select>
+                </SettingsRow>
+
+                <SettingsRow
+                  label="Result auto-clear"
+                  description="Automatically clear results after this period of inactivity"
+                >
+                  <select
+                    value={settingsDraft.resultClearMins}
+                    onChange={e => setSettingsDraft(s => ({
+                      ...s, resultClearMins: Number(e.target.value)
+                    }))}
+                    style={selectStyle}
+                  >
+                    <option value={1}>1 min</option>
+                    <option value={5}>5 min</option>
+                    <option value={15}>15 min</option>
+                    <option value={30}>30 min</option>
+                    <option value={0}>Never</option>
+                  </select>
+                </SettingsRow>
+              </SettingsSection>
+
+              {/* Section: Security */}
+              <SettingsSection label="Security">
+                <SettingsRow
+                  label="Inactivity lock"
+                  description="Lock the app after this period of inactivity"
+                >
+                  <select
+                    value={settingsDraft.lockTimeoutMins}
+                    onChange={e => setSettingsDraft(s => ({
+                      ...s, lockTimeoutMins: Number(e.target.value)
+                    }))}
+                    style={selectStyle}
+                  >
+                    <option value={1}>1 min</option>
+                    <option value={5}>5 min</option>
+                    <option value={15}>15 min</option>
+                    <option value={30}>30 min</option>
+                    <option value={60}>60 min</option>
+                    <option value={120}>2 hours</option>
+                    <option value={0}>Disabled</option>
+                  </select>
+                </SettingsRow>
+
+                <SettingsRow
+                  label="Clipboard auto-clear"
+                  description="Clear clipboard after copying a cell value"
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={settingsDraft.clipboardClearEnabled}
+                      onChange={e => setSettingsDraft(s => ({
+                        ...s, clipboardClearEnabled: e.target.checked
+                      }))}
+                      style={{ width: 14, height: 14, cursor: "pointer" }}
+                    />
+                    {settingsDraft.clipboardClearEnabled && (
+                      <select
+                        value={settingsDraft.clipboardClearSecs}
+                        onChange={e => setSettingsDraft(s => ({
+                          ...s, clipboardClearSecs: Number(e.target.value)
+                        }))}
+                        style={selectStyle}
+                      >
+                        <option value={30}>after 30s</option>
+                        <option value={60}>after 60s</option>
+                        <option value={120}>after 2 min</option>
+                        <option value={300}>after 5 min</option>
+                      </select>
+                    )}
+                  </div>
+                </SettingsRow>
+
+                <SettingsRow
+                  label="Audit log"
+                  description="Append every executed query to ~/.devsql/audit.log"
+                >
+                  <input
+                    type="checkbox"
+                    checked={settingsDraft.auditLogEnabled}
+                    onChange={e => setSettingsDraft(s => ({
+                      ...s, auditLogEnabled: e.target.checked
+                    }))}
+                    style={{ width: 14, height: 14, cursor: "pointer" }}
+                  />
+                </SettingsRow>
+              </SettingsSection>
+
+              {/* Section: History */}
+              <SettingsSection label="History">
+                <SettingsRow
+                  label="Query history retention"
+                  description="How long to keep query history entries"
+                >
+                  <select
+                    value={settingsDraft.historyRetentionDays}
+                    onChange={e => setSettingsDraft(s => ({
+                      ...s, historyRetentionDays: Number(e.target.value)
+                    }))}
+                    style={selectStyle}
+                  >
+                    <option value={7}>7 days</option>
+                    <option value={30}>30 days</option>
+                    <option value={90}>90 days</option>
+                    <option value={365}>1 year</option>
+                    <option value={0}>Forever</option>
+                  </select>
+                </SettingsRow>
+              </SettingsSection>
+
+            </div>
+
+            {/* Footer */}
+            <div style={{
+              padding: "12px 24px",
+              borderTop: "1px solid #2d2f36",
+              display: "flex", gap: 8, flexShrink: 0,
+            }}>
+              <button
+                onClick={async () => {
+                  try {
+                    // Map camelCase back to snake_case for Rust
+                    const toSave = {
+                      query_timeout_secs:      settingsDraft.queryTimeoutSecs,
+                      lock_timeout_mins:       settingsDraft.lockTimeoutMins,
+                      result_row_limit:        settingsDraft.resultRowLimit,
+                      history_retention_days:  settingsDraft.historyRetentionDays,
+                      result_clear_mins:       settingsDraft.resultClearMins,
+                      audit_log_enabled:       settingsDraft.auditLogEnabled,
+                      clipboard_clear_enabled: settingsDraft.clipboardClearEnabled,
+                      clipboard_clear_secs:    settingsDraft.clipboardClearSecs,
+                    };
+                    await invoke("save_settings", {
+                      settingsJson: JSON.stringify(toSave)
+                    });
+                    setSettings(settingsDraft);
+                    setAuditLogEnabled(settingsDraft.auditLogEnabled);
+                    setShowSettings(false);
+                  } catch (e) {
+                    console.error("Failed to save settings:", e);
+                  }
+                }}
+                style={{
+                  flex: 1, padding: "8px 0",
+                  background: "#6c63ff", color: "white",
+                  border: "none", borderRadius: 6,
+                  cursor: "pointer", fontSize: 12,
+                  fontFamily: "monospace",
+                }}
+              >
+                Save
+              </button>
+              <button
+                onClick={() => setShowSettings(false)}
+                style={{
+                  flex: 1, padding: "8px 0",
+                  background: "transparent", color: "#6b7280",
+                  border: "1px solid #2d2f36", borderRadius: 6,
+                  cursor: "pointer", fontSize: 12,
+                  fontFamily: "monospace",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => setSettingsDraft(DEFAULT_SETTINGS)}
+                style={{
+                  padding: "8px 14px",
+                  background: "transparent", color: "#4b5563",
+                  border: "1px solid #2d2f36", borderRadius: 6,
+                  cursor: "pointer", fontSize: 12,
+                  fontFamily: "monospace",
+                }}
+              >
+                Reset defaults
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {/* Settings modal */}
       {/* Sidebar */}
       <div style={{
         width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth,
@@ -2429,10 +3530,63 @@ console.log("SQLite objects parsed rows:", rows);
               <div style={{ padding: "6px 14px 10px", color: "#4b5563", fontSize: 12, textAlign: "center", lineHeight: 1.6 }}>
                 No connections yet.<br />Click + to add one.
               </div>
-            ) : (
-              connections.map((conn) => (
+            ) : (groupedConnections.map(([groupKey, groupConns]) => {
+          const isUngrouped = groupKey === "__ungrouped__";
+          const collapsed   = collapsedGroups.has(groupKey);
+          const groupLabel  = isUngrouped ? null : groupKey;
+
+          return (
+            <div key={groupKey}>
+              {/* Group header — only show if named group */}
+              {groupLabel && (
+                <div
+                  onClick={() => toggleGroup(groupKey)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "5px 14px",
+                    cursor: "pointer",
+                    borderBottom: "1px solid #1e2026",
+                    background: "#0e0f11",
+                    userSelect: "none",
+                  }}
+                  onMouseEnter={e =>
+                    (e.currentTarget.style.background = "#13141a")}
+                  onMouseLeave={e =>
+                    (e.currentTarget.style.background = "#0e0f11")}
+                >
+                  <span style={{
+                    fontSize: 8, color: "#4b5563",
+                    flexShrink: 0, width: 10,
+                  }}>
+                    {collapsed ? "▸" : "▾"}
+                  </span>
+                  <span style={{
+                    fontSize: 10, fontWeight: 600,
+                    color: "#4b5563", flex: 1,
+                    textTransform: "uppercase",
+                    letterSpacing: ".06em",
+                    fontFamily: "monospace",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}>
+                    {groupLabel}
+                  </span>
+                  <span style={{
+                    fontSize: 9, color: "#374151",
+                    fontFamily: "monospace", flexShrink: 0,
+                  }}>
+                    {groupConns.length}
+                  </span>
+                </div>
+              )}
+
+              {/* Connection rows — hidden when group is collapsed */}
+              {!collapsed && groupConns.map((conn) => (
                 <div key={conn.id}>
-                  {/* Connection row */}
+                  {/* Connection row — indent if in a named group */}
                   <div
                     onClick={() => {
                       schemaConnectionId.current = conn.id;
@@ -2441,34 +3595,56 @@ console.log("SQLite objects parsed rows:", rows);
                         file:       null,
                         title:      conn.name,
                         joinTables: [],
-                        results:     [],
+                        results:    [],
                         activeResult: 0,
+                        error:      null,
                       });
                       setSchema(null);
                       setExpandedTables(new Set());
+                      setExpandedSections(new Set());
                       loadSchema(conn);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      setContextMenu({ x: e.clientX, y: e.clientY, connection: conn });
+                      setContextMenu({
+                        x: e.clientX, y: e.clientY,
+                        connection: conn,
+                      });
                     }}
                     style={{
                       padding: "9px 14px",
+                      paddingLeft: groupLabel ? 22 : 14,
                       cursor: "pointer",
                       borderBottom: "1px solid #1e2026",
                       borderLeft: `3px solid ${
-                        activeTab.connection?.id === conn.id ? conn.color : "transparent"
+                        activeTab.connection?.id === conn.id
+                          ? conn.color
+                          : "transparent"
                       }`,
-                      background: activeTab.connection?.id === conn.id ? "#1e2026" : "transparent",
+                      background: activeTab.connection?.id === conn.id
+                        ? "#1e2026"
+                        : "transparent",
                       transition: "background .1s",
                     }}
                   >
-                    <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 3, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <div style={{
+                      fontSize: 12, fontWeight: 500,
+                      marginBottom: 3, color: "#e8e9ec",
+                      overflow: "hidden", textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}>
                       {conn.name}
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                    <div style={{
+                      display: "flex", alignItems: "center",
+                      gap: 6, minWidth: 0,
+                    }}>
                       <EngineBadge engine={conn.engine} />
-                      <span style={{ fontSize: 10, color: "#4b5563", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                      <span style={{
+                        fontSize: 10, color: "#4b5563",
+                        overflow: "hidden", textOverflow: "ellipsis",
+                        whiteSpace: "nowrap", minWidth: 0,
+                      }}>
                         {conn.host}
                       </span>
                     </div>
@@ -2500,7 +3676,7 @@ console.log("SQLite objects parsed rows:", rows);
                         };
                         return (
                         <>
-                          {/* Refresh button — unchanged */}
+                          {/* Refresh button */}
                           <div style={{ padding: "5px 14px 3px", display: "flex", justifyContent: "flex-end" }}>
                             <button
                               onClick={(e) => {
@@ -2815,9 +3991,10 @@ console.log("SQLite objects parsed rows:", rows);
                     </div>
                   )}
                 </div>
-              ))
-            )}
-
+              ))}
+              </div>
+          );
+          }))}
             {/* Files section */}
             <div style={{ borderTop: "1px solid #1e2026", marginTop: 4 }}>
               <div style={{
@@ -2877,6 +4054,34 @@ console.log("SQLite objects parsed rows:", rows);
             </div>
           </div>
         )}
+      </div>
+
+      {/* Sidebar footer — settings gear */}
+      <div style={{
+        borderTop: "1px solid #1e2026",
+        padding: "8px 14px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "flex-end",
+        flexShrink: 0,
+      }}>
+        <button
+          onClick={() => {
+            setSettingsDraft({ ...settings });
+            setShowSettings(true);
+          }}
+          title="Settings"
+          style={{
+            background: "none", border: "none",
+            color: "#4b5563", cursor: "pointer",
+            fontSize: 16, padding: "4px 6px",
+            borderRadius: 6, transition: "color .15s",
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = "#9ca3af")}
+          onMouseLeave={e => (e.currentTarget.style.color = "#4b5563")}
+        >
+          ⚙
+        </button>
       </div>
 
       {/* Sidebar resize handle */}
@@ -3096,7 +4301,20 @@ console.log("SQLite objects parsed rows:", rows);
           >
             {activeTab.loading ? "Running..." : "▶ Run (Cmd+Enter)"}
           </button>
-
+          {wasRewritten && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "4px 10px", borderRadius: 6,
+              background: "rgba(245,158,11,0.1)",
+              border: "1px solid rgba(245,158,11,0.2)",
+              fontSize: 11, fontFamily: "monospace",
+              color: "#f59e0b", flexShrink: 0,
+            }}
+              title="CREATE statements were automatically rewritten to CREATE OR ALTER / CREATE OR REPLACE"
+            >
+              ✦ Smart DDL applied
+            </div>
+          )}
           {/* Show History Button */}
           <button
             onClick={() => {
@@ -3453,17 +4671,25 @@ console.log("SQLite objects parsed rows:", rows);
                 <div style={{
                   padding: "20px 14px",
                   display: "flex",
-                  alignItems: "center",
-                  gap: 10,
+                  flexDirection: "column",
+                  gap: 8,
                 }}>
-                  <span style={{ color: "#10b981", fontSize: 18 }}>✓</span>
-                  <span style={{
-                    color: "#9ca3af",
-                    fontSize: 13,
-                    fontFamily: "monospace",
-                  }}>
-                    {result.rows[0]?.[0] ?? "Command completed successfully."}
-                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ color: "#10b981", fontSize: 18 }}>✓</span>
+                    <span style={{
+                      color: "#9ca3af", fontSize: 13, fontFamily: "monospace",
+                    }}>
+                      {result.rows[0]?.[0] ?? "Command completed successfully."}
+                    </span>
+                  </div>
+                  {result.wasRewritten && (
+                    <div style={{
+                      fontSize: 11, color: "#f59e0b",
+                      fontFamily: "monospace", paddingLeft: 28,
+                    }}>
+                      ✦ Automatically rewritten to CREATE OR ALTER / CREATE OR REPLACE
+                    </div>
+                  )}
                 </div>
               );
             }
@@ -3476,7 +4702,18 @@ console.log("SQLite objects parsed rows:", rows);
               );
             }
 
-            return <ResultsGrid result={result} />;
+            return <ResultsGrid
+                    result={result}
+                    connection={activeTab.connection}
+                    schema={schema}
+                    pendingEdits={activeTab.pendingEdits}
+                    editingCell={activeTab.editingCell}
+                    onCellEdit={handleCellEdit}
+                    onCellCommit={handleCellCommit}
+                    onCellCancel={handleCellCancel}
+                    onCommitAll={handleCommitAll}
+                    onRollbackAll={handleRollbackAll}
+                  />;
           })()}
         </div>
       </div>

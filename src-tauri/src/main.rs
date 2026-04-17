@@ -25,9 +25,9 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "fb94e251058153f1282fffc32c9dda371efbffd07bea7bc099e303386d47b79f";
+const HASH_CONNECTIONMANAGER: &str = "848bc0066bab16cc5b0789e5464c4f97955b53185853bd5e889e2a08baba77ee";
 const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
-const HASH_QUERYEXECUTOR: &str = "cfe2c78295bd80063a076158d04a703e4fc506b2afd09fbb10946e294c6b1520";
+const HASH_QUERYEXECUTOR: &str = "2b8a7514cee7c688fd1f92ed2dd5d56be00f2ca189dafd3ebf07de7119a20327";
 const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
 const HASH_SCHEMAEXPLORER: &str = "69537b99b44620e4d607e177fc3a28718f6471fb454502a9cab6557d93a6b19e";
 const HASH_SSHTUNNEL: &str = "4927f3bae0f0a3d2845e03932ba215c8784b7829f5872c58d71a7877f70ea4af";
@@ -1136,6 +1136,68 @@ fn build_drop_statement(
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct AppSettings {
+    query_timeout_secs:       u32,
+    lock_timeout_mins:        u32, // 0 = disabled
+    result_row_limit:         u32,
+    history_retention_days:   u32, // 0 = forever
+    result_clear_mins:        u32, // 0 = never
+    audit_log_enabled:        bool,
+    clipboard_clear_enabled:  bool,
+    clipboard_clear_secs:     u32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            query_timeout_secs:      30,
+            lock_timeout_mins:       15,
+            result_row_limit:        10_000,
+            history_retention_days:  90,
+            result_clear_mins:       5,
+            audit_log_enabled:       false,
+            clipboard_clear_enabled: true,
+            clipboard_clear_secs:    60,
+        }
+    }
+}
+
+fn settings_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".devsql")
+        .join("settings.toml")
+}
+
+#[tauri::command]
+fn load_settings() -> Result<String, String> {
+    let path = settings_path();
+    if !path.exists() {
+        let defaults = AppSettings::default();
+        return Ok(serde_json::to_string(&defaults).unwrap_or_default());
+    }
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())?;
+    let settings: AppSettings = toml::from_str(&contents)
+        .unwrap_or_default();
+    Ok(serde_json::to_string(&settings).unwrap_or_default())
+}
+
+#[tauri::command]
+fn save_settings(settings_json: String) -> Result<(), String> {
+    let settings: AppSettings = serde_json::from_str(&settings_json)
+        .map_err(|e| e.to_string())?;
+    let toml_str = toml::to_string(&settings)
+        .map_err(|e| e.to_string())?;
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, toml_str).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn main() {
 
      // Verify all native DLL integrity before loading
@@ -1192,7 +1254,9 @@ fn main() {
             append_audit_log,
             get_object_definition, 
             get_sqlite_objects,
-            drop_object])
+            drop_object,
+            load_settings,
+            save_settings])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -125,8 +125,22 @@ public static class ConnectionManagerLib
             if (!IsValidPort(request.Port > 0 ? request.Port : GetDefaultPort(request.Engine)))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid port '{request.Port}'");
 
-            if (!IsValidIdentifier(request.Database))
-                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
+            if (request.Engine?.ToLower() == "sqlite")
+            {
+                // SQLite uses a file path — validate it's not empty and doesn't contain dangerous chars
+                if (string.IsNullOrWhiteSpace(request.Database))
+                    return Marshal.StringToCoTaskMemUTF8(
+                        "ERROR: SQLite database path cannot be empty");
+                if (request.Database.IndexOfAny(new[] { '\'', '"', '\0', '\n', '\r' }) >= 0)
+                    return Marshal.StringToCoTaskMemUTF8(
+                        "ERROR: SQLite database path contains invalid characters");
+            }
+            else
+            {
+                if (!IsValidIdentifier(request.Database))
+                    return Marshal.StringToCoTaskMemUTF8(
+                        $"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
+            }
 
             if (!request.WindowsAuth && !IsValidIdentifier(request.Username))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid username '{request.Username}' — only alphanumeric characters, underscores, hyphens, dots allowed");
