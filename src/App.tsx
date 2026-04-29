@@ -1280,13 +1280,13 @@ function useDebounce<T>(value: T, delay: number): T {
 
 {/*Renders a section in the schema sidebar for tables, views, or routines*/}
 function SchemaSection({
-  label, _icon, count, _sectionKey, expanded, onToggle,
+  label, count, expanded, onToggle,
   children, emptyMessage,
 }: {
   label:         string;
-  _icon:         string;
+  icon:          string;
   count:         number;
-  _sectionKey:   string;
+  sectionKey:    string;
   expanded:      boolean;
   onToggle:      () => void;
   children:      React.ReactNode;
