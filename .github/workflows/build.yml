@@ -27,7 +27,11 @@ jobs:
           restore-keys: windows-cargo-
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0" --locked
+        run: |
+          if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
+            cargo install tauri-cli --version "^2.0" --locked
+          }
+        shell: pwsh
 
       - name: Install .NET 10
         uses: actions/setup-dotnet@v4
@@ -86,7 +90,10 @@ jobs:
           restore-keys: macos-cargo-
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0" --locked
+        run: |
+          if ! command -v cargo-tauri &> /dev/null; then
+            cargo install tauri-cli --version "^2.0" --locked
+          fi
 
       - name: Install .NET 10
         uses: actions/setup-dotnet@v4
