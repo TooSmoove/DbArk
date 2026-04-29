@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import Editor from "@monaco-editor/react";
 import type { OnMount } from "@monaco-editor/react";
+import type * as monacoEditor from "monaco-editor";
 import {
   useReactTable,
   getCoreRowModel,
@@ -360,7 +361,7 @@ function AddConnectionForm({
   onSave: () => void;
   onCancel: () => void;
   connectionsFolder: string;
-  editingConnection: Connection | null;
+  editingConnection: ConnectionConfig | null;
 }) {
   const [form, setForm] = useState({
     name:         editingConnection?.name        ?? "",
@@ -1279,13 +1280,13 @@ function useDebounce<T>(value: T, delay: number): T {
 
 {/*Renders a section in the schema sidebar for tables, views, or routines*/}
 function SchemaSection({
-  label, icon, count, sectionKey, expanded, onToggle,
+  label, _icon, count, _sectionKey, expanded, onToggle,
   children, emptyMessage,
 }: {
   label:         string;
-  icon:          string;
+  _icon:         string;
   count:         number;
-  sectionKey:    string;
+  _sectionKey:   string;
   expanded:      boolean;
   onToggle:      () => void;
   children:      React.ReactNode;
@@ -2249,7 +2250,7 @@ function App() {
     const parsed = JSON.parse(raw);
 
     // File queries return single result shape — normalise to multi-result
-    const normalised: { results: QueryResult[]; error?: string } = 
+    const normalised: { results: QueryResult[]; rowCount?: number; error?: string } = 
       parsed.results 
         ? parsed  // already multi-result shape (DB query)
         : parsed.error
@@ -2338,7 +2339,7 @@ function App() {
       autocompleteRegistered.current = true;
       monaco.languages.registerCompletionItemProvider("sql", {
         triggerCharacters: [" ", ".", "\n"],
-        provideCompletionItems: (model, position) => {
+        provideCompletionItems: (model: monacoEditor.editor.ITextModel, position: monacoEditor.Position) => {
           const word = model.getWordUntilPosition(position);
           const range = {
             startLineNumber: position.lineNumber,
@@ -2347,7 +2348,7 @@ function App() {
             endColumn: word.endColumn,
           };
 
-          const suggestions: monaco.languages.CompletionItem[] = [];
+          const suggestions: monacoEditor.languages.CompletionItem[] = [];
 
           // SQL keywords
           const keywords = [
@@ -2457,7 +2458,7 @@ function App() {
 
     if (schemaCache.current.size >= 5) {
       const firstKey = schemaCache.current.keys().next().value;
-      schemaCache.current.delete(firstKey);
+      schemaCache.current.delete(firstKey!);
     }
 
     setExpandedSchemas(new Set(["public"]));
@@ -2561,7 +2562,7 @@ function App() {
       // Use setTimeout to ensure this runs after execute_query fully completes
       await new Promise(resolve => setTimeout(resolve, 0));
       
-      const result = await invoke<boolean>("add_history_entry", {
+      await invoke<boolean>("add_history_entry", {
         connectionId:   conn.id,
         connectionName: conn.name,
         sql:            sql.trim(),
@@ -2630,7 +2631,7 @@ function App() {
     type: string,
     schema: string,
     conn: ConnectionConfig,
-    extra: any
+    _extra: any
   ) {
     try {
       const raw = await invoke<string>("get_object_definition", {

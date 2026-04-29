@@ -42,14 +42,23 @@ jobs:
       - name: Install frontend deps
         run: npm install
 
-      - name: Build C# NativeAOT library
+      - name: Build C# NativeAOT projects
         run: |
-          cd src-csharp/QueryExecutor
-          dotnet publish -c Release
+          cd src-csharp/QueryExecutor    && dotnet publish -c Release -r win-x64 && cd ../..
+          cd src-csharp/ConnectionManager && dotnet publish -c Release -r win-x64 && cd ../..
+          cd src-csharp/FileQueryEngine   && dotnet publish -c Release -r win-x64 && cd ../..
+          cd src-csharp/QueryHistory      && dotnet publish -c Release -r win-x64 && cd ../..
+          cd src-csharp/SshTunnel         && dotnet publish -c Release -r win-x64 && cd ../..
+          cd src-csharp/SchemaExplorer    && dotnet publish -c Release -r win-x64 && cd ../..
 
-      - name: Copy native DLL
+      - name: Copy native DLLs
         run: |
-          copy src-csharp\QueryExecutor\bin\Release\net10.0\win-x64\publish\QueryExecutor.dll src-tauri\natives\QueryExecutor.dll
+          copy src-csharp\QueryExecutor\bin\Release\net10.0\win-x64\publish\*.dll     src-tauri\natives\
+          copy src-csharp\ConnectionManager\bin\Release\net10.0\win-x64\publish\*.dll src-tauri\natives\
+          copy src-csharp\FileQueryEngine\bin\Release\net10.0\win-x64\publish\*.dll   src-tauri\natives\
+          copy src-csharp\QueryHistory\bin\Release\net10.0\win-x64\publish\*.dll      src-tauri\natives\
+          copy src-csharp\SshTunnel\bin\Release\net10.0\win-x64\publish\*.dll         src-tauri\natives\
+          copy src-csharp\SchemaExplorer\bin\Release\net10.0\win-x64\publish\*.dll    src-tauri\natives\
 
       - name: Build Tauri app
         run: cargo tauri build
@@ -92,14 +101,23 @@ jobs:
       - name: Install frontend deps
         run: npm install
 
-      - name: Build C# NativeAOT library
+      - name: Build C# NativeAOT projects
         run: |
-          cd src-csharp/QueryExecutor
-          dotnet publish -c Release -r osx-arm64
+          cd src-csharp/QueryExecutor    && dotnet publish -c Release -r osx-arm64 && cd ../..
+          cd src-csharp/ConnectionManager && dotnet publish -c Release -r osx-arm64 && cd ../..
+          cd src-csharp/FileQueryEngine   && dotnet publish -c Release -r osx-arm64 && cd ../..
+          cd src-csharp/QueryHistory      && dotnet publish -c Release -r osx-arm64 && cd ../..
+          cd src-csharp/SshTunnel         && dotnet publish -c Release -r osx-arm64 && cd ../..
+          cd src-csharp/SchemaExplorer    && dotnet publish -c Release -r osx-arm64 && cd ../..
 
-      - name: Copy native dylib
+      - name: Copy native dylibs
         run: |
-          cp src-csharp/QueryExecutor/bin/Release/net10.0/osx-arm64/publish/libQueryExecutor.dylib src-tauri/natives/
+          cp src-csharp/QueryExecutor/bin/Release/net10.0/osx-arm64/publish/*.dylib     src-tauri/natives/
+          cp src-csharp/ConnectionManager/bin/Release/net10.0/osx-arm64/publish/*.dylib src-tauri/natives/
+          cp src-csharp/FileQueryEngine/bin/Release/net10.0/osx-arm64/publish/*.dylib   src-tauri/natives/
+          cp src-csharp/QueryHistory/bin/Release/net10.0/osx-arm64/publish/*.dylib      src-tauri/natives/
+          cp src-csharp/SshTunnel/bin/Release/net10.0/osx-arm64/publish/*.dylib         src-tauri/natives/
+          cp src-csharp/SchemaExplorer/bin/Release/net10.0/osx-arm64/publish/*.dylib    src-tauri/natives/
 
       - name: Build Tauri app
         run: cargo tauri build
