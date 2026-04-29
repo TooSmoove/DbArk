@@ -248,63 +248,70 @@ public static class SchemaExplorerLib
         using var conn = new NpgsqlConnection(connectionString);
         conn.Open();
 
-        // Get tables
+        // Get tables — all user schemas, not just 'public'
         using (var cmd = conn.CreateCommand())
         {
             cmd.CommandText = @"
-                SELECT table_name, table_schema
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_type = 'BASE TABLE'
-                ORDER BY table_name";
+            SELECT table_name, table_schema
+            FROM information_schema.tables
+            WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+              AND table_type = 'BASE TABLE'
+            ORDER BY table_schema, table_name";
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
+                var schema = reader.GetString(1);
                 var name = reader.GetString(0);
-                tables[name] = new TableInfo
+                // Key by schema.table to avoid collisions across schemas
+                var key = $"{schema}.{name}";
+                tables[key] = new TableInfo
                 {
                     Name = name,
-                    Schema = reader.GetString(1)
+                    Schema = schema
                 };
             }
         }
 
-        // Get columns
+        // Get columns — same scope
         using (var cmd = conn.CreateCommand())
         {
             cmd.CommandText = @"
-                SELECT
-                    c.table_name,
-                    c.column_name,
-                    c.data_type,
-                    c.is_nullable,
-                    CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END AS is_pk
-                FROM information_schema.columns c
-                LEFT JOIN (
-                    SELECT ku.table_name, ku.column_name
-                    FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage ku
-                        ON tc.constraint_name = ku.constraint_name
-                    WHERE tc.constraint_type = 'PRIMARY KEY'
-                      AND tc.table_schema = 'public'
-                ) pk ON pk.table_name = c.table_name
-                    AND pk.column_name = c.column_name
-                WHERE c.table_schema = 'public'
-                ORDER BY c.table_name, c.ordinal_position";
+            SELECT
+                c.table_schema,
+                c.table_name,
+                c.column_name,
+                c.data_type,
+                c.is_nullable,
+                CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END AS is_pk
+            FROM information_schema.columns c
+            LEFT JOIN (
+                SELECT ku.table_schema, ku.table_name, ku.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage ku
+                    ON tc.constraint_name = ku.constraint_name
+                    AND tc.table_schema = ku.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+            ) pk ON pk.table_schema = c.table_schema
+                AND pk.table_name = c.table_name
+                AND pk.column_name = c.column_name
+            WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+            ORDER BY c.table_schema, c.table_name, c.ordinal_position";
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                var tableName = reader.GetString(0);
-                if (!tables.ContainsKey(tableName)) continue;
+                var schema = reader.GetString(0);
+                var tableName = reader.GetString(1);
+                var key = $"{schema}.{tableName}";
+                if (!tables.ContainsKey(key)) continue;
 
-                tables[tableName].Columns.Add(new ColumnInfo
+                tables[key].Columns.Add(new ColumnInfo
                 {
-                    Name = reader.GetString(1),
-                    DataType = reader.GetString(2),
-                    IsNullable = reader.GetString(3) == "YES",
-                    IsPrimaryKey = reader.GetBoolean(4)
+                    Name = reader.GetString(2),
+                    DataType = reader.GetString(3),
+                    IsNullable = reader.GetString(4) == "YES",
+                    IsPrimaryKey = reader.GetBoolean(5)
                 });
             }
         }

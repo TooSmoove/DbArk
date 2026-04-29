@@ -29,8 +29,8 @@ const HASH_CONNECTIONMANAGER: &str = "848bc0066bab16cc5b0789e5464c4f97955b531858
 const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
 const HASH_QUERYEXECUTOR: &str = "2b8a7514cee7c688fd1f92ed2dd5d56be00f2ca189dafd3ebf07de7119a20327";
 const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
-const HASH_SCHEMAEXPLORER: &str = "69537b99b44620e4d607e177fc3a28718f6471fb454502a9cab6557d93a6b19e";
-const HASH_SSHTUNNEL: &str = "4927f3bae0f0a3d2845e03932ba215c8784b7829f5872c58d71a7877f70ea4af";
+const HASH_SCHEMAEXPLORER: &str = "031d2efaa1852027ebb837e27f3a31ed3a647056ae659f17065133594627618a";
+const HASH_SSHTUNNEL: &str = "fde39b1a8439f07de3c3edb7c9e6e4b136f363fb3bc5184b123de9e82f420aa5";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 
 static SSH_TUNNEL: OnceLock<libloading::Library> = OnceLock::new();
@@ -189,9 +189,9 @@ fn build_connection_string(
         "mysql" => {
             let ssl_param = match ssl.as_str() {
                 "none"        => "SslMode=None;",
-                "require"     => "SslMode=Required;",
+                "require"     => "SslMode=Required;",       
                 "verify-full" => "SslMode=VerifyFull;",
-                _             => "SslMode=Preferred;",
+                _             => if tunnel_port.is_some() { "SslMode=None;" } else { "SslMode=Preferred;" },
             };
             format!("Server={};Port={};Database={};Uid={};Pwd={};{}",
                 effective_host, effective_port, database, username, password, ssl_param)
@@ -567,6 +567,63 @@ fn open_tunnel(
     db_host: String,
     db_port: i32,
 ) -> Result<i32, String> {
+
+    // ── SSH key path validation ──────────────────────────────────────────────
+    // Only validate if a key path was actually provided (password-only auth
+    // is valid too)
+    if !ssh_key_path.is_empty() {
+        let key_path = std::path::Path::new(&ssh_key_path);
+
+        // 1. Must exist
+        if !key_path.exists() {
+            return Err(format!(
+                "SSH key file not found: {}",
+                ssh_key_path
+            ));
+        }
+
+        // 2. Must be a file, not a directory
+        if !key_path.is_file() {
+            return Err("SSH key path must point to a file, not a directory".to_string());
+        }
+
+        // 3. Extension must be .pem, .key, or .ppk
+        let valid_extensions = ["pem", "key", "ppk"];
+        let ext = key_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if !valid_extensions.contains(&ext.as_str()) {
+            return Err(format!(
+                "Invalid SSH key file type '.{}' — must be .pem, .key, or .ppk",
+                ext
+            ));
+        }
+
+        // 4. Must be within the user's home directory or a standard SSH location
+        // This prevents a crafted TOML from pointing the key path at an
+        // arbitrary sensitive file (e.g. /etc/passwd) that SSH.NET would
+        // read and potentially expose in error messages
+        let home = dirs::home_dir().unwrap_or_default();
+        let canonical_key = key_path.canonicalize()
+            .map_err(|e| format!("Cannot resolve SSH key path: {}", e))?;
+        let canonical_home = home.canonicalize().unwrap_or(home.clone());
+
+        let in_home    = canonical_key.starts_with(&canonical_home);
+        let in_ssh_dir = canonical_key.starts_with("/etc/ssh")   // Linux system keys
+                      || canonical_key.starts_with("C:\\ProgramData\\ssh"); // Windows
+
+        if !in_home && !in_ssh_dir {
+            return Err(format!(
+                "SSH key must be within your home directory or a standard SSH location. Got: {}",
+                ssh_key_path
+            ));
+        }
+    }
+    // ── End validation ───────────────────────────────────────────────────────
+
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, i32,
@@ -594,7 +651,6 @@ fn open_tunnel(
         if ptr.is_null() { return Err("null response".to_string()); }
         let json = CStr::from_ptr(ptr).to_string_lossy().into_owned();
 
-        // Parse the local port from the response
         let val: serde_json::Value = serde_json::from_str(&json)
             .map_err(|e| e.to_string())?;
 
@@ -1198,6 +1254,270 @@ fn save_settings(settings_json: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Saved Query Library ─────────────────────────────────────────────────────
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct SavedQueryMeta {
+    name:        String,
+    description: Option<String>,
+    tags:        Option<Vec<String>>,
+    engine_hint: Option<String>, // e.g. "postgres" — just a hint, not enforced
+    created_at:  String,         // ISO 8601
+    updated_at:  String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct SavedQuery {
+    id:          String,   // stem of the filename, e.g. "my-query"
+    sql:         String,
+    meta:        SavedQueryMeta,
+}
+
+fn queries_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".devsql")
+        .join("queries")
+}
+
+#[tauri::command]
+fn save_query(id: String, sql: String, meta_json: String) -> Result<(), String> {
+    let dir = queries_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    // Sanitise id — alphanumeric, hyphens, underscores only
+    let safe_id: String = id.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    if safe_id.is_empty() {
+        return Err("Query name cannot be empty".to_string());
+    }
+
+    let mut meta: SavedQueryMeta = serde_json::from_str(&meta_json)
+        .map_err(|e| e.to_string())?;
+    meta.updated_at = chrono::Utc::now().to_rfc3339();
+
+    // Write .sql file
+    let sql_path = dir.join(format!("{}.sql", safe_id));
+    std::fs::write(&sql_path, &sql).map_err(|e| e.to_string())?;
+
+    // Write .meta.toml sidecar
+    let meta_path = dir.join(format!("{}.meta.toml", safe_id));
+    let toml_str = toml::to_string(&meta).map_err(|e| e.to_string())?;
+    std::fs::write(&meta_path, toml_str).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn list_queries() -> Result<String, String> {
+    let dir = queries_dir();
+    if !dir.exists() {
+        return Ok("[]".to_string());
+    }
+
+    let mut queries: Vec<SavedQuery> = Vec::new();
+
+    let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only process .sql files; skip .meta.toml files
+        if path.extension().and_then(|e| e.to_str()) != Some("sql") {
+            continue;
+        }
+
+        let id = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let sql = std::fs::read_to_string(&path).unwrap_or_default();
+
+        let meta_path = dir.join(format!("{}.meta.toml", id));
+        let meta: SavedQueryMeta = if meta_path.exists() {
+            let raw = std::fs::read_to_string(&meta_path).unwrap_or_default();
+            toml::from_str(&raw).unwrap_or_else(|_| SavedQueryMeta {
+                name:        id.clone(),
+                description: None,
+                tags:        None,
+                engine_hint: None,
+                created_at:  String::new(),
+                updated_at:  String::new(),
+            })
+        } else {
+            SavedQueryMeta {
+                name:        id.clone(),
+                description: None,
+                tags:        None,
+                engine_hint: None,
+                created_at:  String::new(),
+                updated_at:  String::new(),
+            }
+        };
+
+        queries.push(SavedQuery { id, sql, meta });
+    }
+
+    // Sort by updated_at descending (most recently saved first)
+    queries.sort_by(|a, b| b.meta.updated_at.cmp(&a.meta.updated_at));
+
+    serde_json::to_string(&queries).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_query(id: String) -> Result<(), String> {
+    let dir = queries_dir();
+    let sql_path  = dir.join(format!("{}.sql", id));
+    let meta_path = dir.join(format!("{}.meta.toml", id));
+
+    if sql_path.exists() {
+        std::fs::remove_file(&sql_path).map_err(|e| e.to_string())?;
+    }
+    if meta_path.exists() {
+        std::fs::remove_file(&meta_path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn load_query(id: String) -> Result<String, String> {
+    let path = queries_dir().join(format!("{}.sql", id));
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+// ── DBeaver Import ───────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct DbeaverImportResult {
+    imported: Vec<DbeaverImportedConnection>,
+    skipped:  Vec<String>, // names we couldn't map
+    error:    Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DbeaverImportedConnection {
+    name:     String,
+    engine:   String,
+    host:     String,
+    port:     u16,
+    database: String,
+    username: String,
+    password: String, // returned to frontend to store in keychain
+}
+
+#[tauri::command]
+fn import_dbeaver_connections() -> String {
+    let path = match dirs::home_dir() {
+        Some(h) => h.join(".dbeaver").join("data-sources.json"),
+        None => return serde_json::to_string(&DbeaverImportResult {
+            imported: vec![],
+            skipped:  vec![],
+            error:    Some("Could not determine home directory".to_string()),
+        }).unwrap(),
+    };
+
+    if !path.exists() {
+        return serde_json::to_string(&DbeaverImportResult {
+            imported: vec![],
+            skipped:  vec![],
+            error:    Some(format!(
+                "DBeaver config not found at {}. Is DBeaver installed?",
+                path.display()
+            )),
+        }).unwrap();
+    }
+
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => return serde_json::to_string(&DbeaverImportResult {
+            imported: vec![],
+            skipped:  vec![],
+            error:    Some(format!("Failed to read DBeaver config: {}", e)),
+        }).unwrap(),
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => return serde_json::to_string(&DbeaverImportResult {
+            imported: vec![],
+            skipped:  vec![],
+            error:    Some(format!("Failed to parse DBeaver config: {}", e)),
+        }).unwrap(),
+    };
+
+    let mut imported = Vec::new();
+    let mut skipped  = Vec::new();
+
+    let connections = match json.get("connections").and_then(|c| c.as_object()) {
+        Some(c) => c,
+        None    => return serde_json::to_string(&DbeaverImportResult {
+            imported: vec![],
+            skipped:  vec![],
+            error:    Some("No connections found in DBeaver config".to_string()),
+        }).unwrap(),
+    };
+
+    for (_id, conn) in connections {
+        let name = conn.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unnamed")
+            .to_string();
+
+        let provider = conn.get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        // Map DBeaver provider to DbArk engine
+        let engine = match provider.as_str() {
+            p if p.contains("postgresql") => "postgres",
+            p if p.contains("mysql")      => "mysql",
+            p if p.contains("sqlite")     => "sqlite",
+            p if p.contains("sqlserver") || p.contains("mssql") => "sqlserver",
+            _ => {
+                skipped.push(format!("{} (unsupported provider: {})", name, provider));
+                continue;
+            }
+        };
+
+        let config = match conn.get("configuration") {
+            Some(c) => c,
+            None    => { skipped.push(format!("{} (no configuration)", name)); continue; }
+        };
+
+        let host     = config.get("host").and_then(|v| v.as_str()).unwrap_or("localhost").to_string();
+        let database = config.get("database").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        let default_port: u16 = match engine {
+            "postgres"  => 5432,
+            "mysql"     => 3306,
+            "sqlserver" => 1433,
+            _           => 0,
+        };
+        let port: u16 = config.get("port")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .or_else(|| config.get("port").and_then(|v| v.as_u64()).map(|n| n as u16))
+            .unwrap_or(default_port);
+
+        // Credentials — DBeaver stores them under configuration.credentials
+        let creds    = config.get("credentials");
+        let username = creds.and_then(|c| c.get("user"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("").to_string();
+        let password = creds.and_then(|c| c.get("password"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("").to_string();
+
+        imported.push(DbeaverImportedConnection {
+            name, engine: engine.to_string(),
+            host, port, database, username, password,
+        });
+    }
+
+    serde_json::to_string(&DbeaverImportResult { imported, skipped, error: None }).unwrap()
+}
+
 fn main() {
 
      // Verify all native DLL integrity before loading
@@ -1256,7 +1576,12 @@ fn main() {
             get_sqlite_objects,
             drop_object,
             load_settings,
-            save_settings])
+            save_settings,
+            save_query,
+            list_queries,
+            delete_query,
+            load_query,
+            import_dbeaver_connections])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -542,7 +542,7 @@ function AddConnectionForm({
           </div>
           {editingConnection && (
             <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, lineHeight: 1.5 }}>
-              Updates the password DbArk uses to connect. Change the password on the server first, then update it here.
+              Updates the password DevSql uses to connect. Change the password on the server first, then update it here.
             </div>
           )}
         </label>
@@ -592,10 +592,28 @@ function AddConnectionForm({
 
       <label style={labelStyle}>
         SSL Mode
+        {form.sshEnabled && (
+          <span style={{
+            marginLeft: 8, fontSize: 10, color: "#f59e0b",
+            fontFamily: "monospace",
+          }}>
+            ⚠ Disabled — SSH tunnel provides encryption
+          </span>
+        )}
         <select
-          style={fieldStyle}
-          value={form.sslMode}
-          onChange={e => setForm(f => ({ ...f, sslMode: e.target.value }))}
+          style={{
+            ...fieldStyle,
+            opacity: form.sshEnabled ? 0.4 : 1,
+            cursor: form.sshEnabled ? "not-allowed" : "auto",
+          }}
+          value={form.sshEnabled ? "none" : form.sslMode}
+          onChange={e => {
+            if (!form.sshEnabled) setForm(f => ({ ...f, sslMode: e.target.value }));
+          }}
+          disabled={form.sshEnabled}
+          title={form.sshEnabled
+            ? "SSL is automatically disabled when using an SSH tunnel — the tunnel provides its own encryption"
+            : undefined}
         >
           <option value="prefer">Prefer (default)</option>
           <option value="none">None — no encryption</option>
@@ -1404,15 +1422,21 @@ function App() {
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
+  const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(["public"]));
   const schemaRef = useRef<SchemaResult | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [locked, setLocked] = useState(false);
+  const [saveQueryOpen, setSaveQueryOpen] = useState(false);
+  const [saveQueryName, setSaveQueryName] = useState("");
+  const [saveQueryTags, setSaveQueryTags] = useState("");
+  const [saveQueryDesc, setSaveQueryDesc] = useState("");
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTabRef = useRef<Tab>(activeTab);
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
   const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schemaCache = useRef<Map<string, SchemaResult>>(new Map());
+  
   const handleJoinSelectionChange = useCallback((tables: string[]) => {
     updateActiveTab({ joinTables: tables });
   }, [activeTabId])
@@ -1455,10 +1479,28 @@ function App() {
     extra?: any;
   } | null>(null);
 
+  const tablesBySchema = useMemo(() => {
+  if (!schema?.tables) return new Map<string, TableInfo[]>();
+  const map = new Map<string, TableInfo[]>();
+  for (const table of schema.tables) {
+    const s    = table.schema || "public";
+    const list = map.get(s) ?? [];
+    list.push(table);
+    map.set(s, list);
+  }
+  // Sort schemas — public first, rest alphabetically
+  return new Map([...map.entries()].sort(([a], [b]) => {
+    if (a === "public") return -1;
+    if (b === "public") return 1;
+    return a.localeCompare(b);
+  }));
+}, [schema?.tables]);
+
   const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
   const [deletingConnection, setDeletingConnection] = useState<ConnectionConfig | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [tunnelPorts, setTunnelPorts] = useState<Record<string, number>>({});
+  const tunnelPortsRef = useRef<Record<string, number>>({});
   const [tunnelLoading, setTunnelLoading] = useState<Record<string, boolean>>({});
   const [auditLogEnabled, setAuditLogEnabled] = useState(false);
   const wasRewritten = activeTab.results.some(r => r.wasRewritten);
@@ -1479,7 +1521,7 @@ function App() {
             clipboardClearEnabled: loaded.clipboard_clear_enabled ?? true,
             clipboardClearSecs:    loaded.clipboard_clear_secs    ?? 60,
           };
-          const stored = localStorage.getItem("dbark_collapsed_groups");
+          const stored = localStorage.getItem("devsql_collapsed_groups");
 
           if (stored) {
             try {
@@ -1495,7 +1537,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const stored = localStorage.getItem("dbark_audit_log");
+    const stored = localStorage.getItem("devsql_audit_log");
     if (stored === "true") setAuditLogEnabled(true);
   }, []);
 
@@ -1545,16 +1587,82 @@ function App() {
       next.has(group) ? next.delete(group) : next.add(group);
       // Persist to localStorage
       localStorage.setItem(
-        "dbark_collapsed_groups",
+        "devsql_collapsed_groups",
         JSON.stringify([...next])
       );
       return next;
     });
   }
 
+  //DBeaver import state
+  const [showDbeaverImport, setShowDbeaverImport] = useState(false);
+  const [dbeaverImporting, setDbeaverImporting]   = useState(false);
+  const [dbeaverResult, setDbeaverResult]         = useState<{
+    imported: { name: string; engine: string; host: string; port: number;
+                database: string; username: string; password: string; }[];
+    skipped:  string[];
+    error?:   string;
+  } | null>(null);
+
+  async function handleDbeaverImport() {
+    setDbeaverImporting(true);
+    try {
+      const raw = await invoke<string>("import_dbeaver_connections");
+      const result = JSON.parse(raw);
+      setDbeaverResult(result);
+
+      if (!result.error && result.imported.length > 0) {
+        // Save each connection and store its password in the keychain
+        for (const conn of result.imported) {
+          const request = {
+            name:        conn.name,
+            engine:      conn.engine,
+            host:        conn.host,
+            port:        conn.port,
+            database:    conn.database,
+            username:    conn.username,
+            color:       "#6c63ff",
+            group:       "Imported from DBeaver",
+            folderPath:  connectionsFolder,
+            sslMode:     "prefer",
+            readOnly:    false,
+            sqlInstance: "",
+            windowsAuth: false,
+            existingFilePath: "",
+            sshEnabled:  false,
+            sshHost:     "",
+            sshPort:     22,
+            sshUser:     "",
+            sshKeyPath:  "",
+          };
+
+          const saveResult = await invoke<string>("save_connection", {
+            requestJson: JSON.stringify(request),
+          });
+
+          if (!saveResult.startsWith("ERROR") && conn.password) {
+            const credRef = `dbark:${conn.name.toLowerCase().replace(/\s+/g, "-")}:${conn.username}`;
+            await invoke("store_credential", {
+              target:   credRef,
+              username: conn.username,
+              password: conn.password,
+            });
+          }
+        }
+        loadConnections(connectionsFolder);
+      }
+    } catch (e) {
+      setDbeaverResult({ imported: [], skipped: [], error: String(e) });
+    } finally {
+      setDbeaverImporting(false);
+    }
+  }
+  //END DBeaver import
+
+  //BEGIN SSH Tunnel helper
   async function openTunnel(conn: ConnectionConfig): Promise<number | null> {
     if (!conn.sshEnabled) return null;
-    if (tunnelPorts[conn.id]) return tunnelPorts[conn.id];
+    if (tunnelPortsRef.current[conn.id]) return tunnelPortsRef.current[conn.id];
 
     setTunnelLoading(prev => ({ ...prev, [conn.id]: true }));
     try {
@@ -1578,9 +1686,12 @@ function App() {
         dbPort:      conn.port,
       });
 
-      setTunnelPorts(prev => ({ ...prev, [conn.id]: localPort }));
+      console.log("open_tunnel invoke result:", localPort);
+      tunnelPortsRef.current = { ...tunnelPortsRef.current, [conn.id]: localPort };
+      setTunnelPorts({ ...tunnelPortsRef.current });
       return localPort;
     } catch (e) {
+      console.error("open_tunnel invoke error:", e);
       updateActiveTab({ error: `SSH tunnel failed: ${String(e)}` });
       return null;
     } finally {
@@ -1698,7 +1809,8 @@ function App() {
           const fresh = parsed.connections.find(c => c.id === tab.connection!.id);
           if (fresh) {
             schemaCache.current.delete(fresh.id);
-           return { ...tab, connection: fresh, error: null, results: [], activeResult: 0 };
+            setExpandedSchemas(new Set(["public"]));
+            return { ...tab, connection: fresh, error: null, results: [], activeResult: 0 };
           }
           return tab;
         }));
@@ -1796,6 +1908,20 @@ function App() {
     };
   }, [locked]);
   //END Inactivity lock
+
+ useEffect(() => {
+  function handleKeyDown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      e.preventDefault();
+      const sql = editorRef.current?.getValue()?.trim() ?? "";
+      console.log("Ctrl+S caught, sql:", sql, "editorRef:", editorRef.current);
+      console.log("setting saveQueryOpen to true");
+      setSaveQueryOpen(true);
+    }
+  }
+  window.addEventListener("keydown", handleKeyDown);
+  return () => window.removeEventListener("keydown", handleKeyDown);
+}, []);
 
   //Open File Function
   async function openFile() {
@@ -2073,13 +2199,28 @@ function App() {
           const conn = tab.connection;
           historyConn = conn;
 
+          console.log("SSH key path being sent:", conn.sshKeyPath);
+          console.log("SSH user being sent:", conn.sshUser);
+          console.log("SSH host being sent:", conn.sshHost);
+
           // Open SSH tunnel if enabled
           let tunnelPort: number | undefined;
           if (conn.sshEnabled) {
+            console.log("Opening tunnel for:", conn.sshHost, "db port:", conn.port);
             const port = await openTunnel(conn);
-            if (!port) return; // tunnel failed — error already set
+            console.log("Tunnel result:", port);
+            if (!port) return;
             tunnelPort = port;
           }
+
+          console.log("effectiveSslMode:", tunnelPort !== undefined ? "none" : conn.sslMode);
+          console.log("tunnelPort:", tunnelPort);
+          console.log("connecting to:", tunnelPort ? `127.0.0.1:${tunnelPort}` : `${conn.host}:${conn.port}`);
+
+          // When an SSH tunnel is active, disable SSL on the DB connection —
+          // the tunnel is already encrypted end-to-end. Mixing SSL with an
+          // SSH tunnel causes handshake failures on MySQL and Postgres.
+          const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
 
           const connectionString = await invoke<string>("build_connection_string", {
             credentialRef: conn.credentialRef,
@@ -2088,7 +2229,7 @@ function App() {
             port:          conn.port,
             database:      conn.database,
             username:      conn.username,
-            sslMode:       conn.sslMode ?? "prefer",
+            sslMode:       effectiveSslMode,
             sqlInstance:   conn.sqlInstance ?? "",
             windowsAuth:   conn.windowsAuth ?? false,
             tunnelPort:    tunnelPort,  // ← pass tunnel port
@@ -2319,18 +2460,35 @@ function App() {
       schemaCache.current.delete(firstKey);
     }
 
+    setExpandedSchemas(new Set(["public"]));
     setSchema(null);
     setSchemaLoading(true);
 
     try {
+      // Open SSH tunnel first if needed
+      let tunnelPort: number | undefined;
+      if (conn.sshEnabled) {
+        const port = await openTunnel(conn);
+        if (!port) {
+          setSchema({ tables: [], procedures: [], functions: [], views: [], triggers: [], indexes: [], error: "SSH tunnel not open — run a query first to establish the tunnel" });
+          setSchemaLoading(false);
+          return;
+        }
+        tunnelPort = port;
+      }
+
+      const effectiveHost = tunnelPort !== undefined ? "127.0.0.1" : conn.host;
+      const effectivePort = tunnelPort ?? conn.port;
+      const effectiveSsl  = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
+
       const raw = await invoke<string>("get_schema", {
         credentialRef: conn.credentialRef,
         engine:        conn.engine,
-        host:          conn.host,
-        port:          conn.port,
+        host:          effectiveHost,
+        port:          effectivePort,
         database:      conn.database,
         username:      conn.username,
-        sslMode:       conn.sslMode ?? "prefer",
+        sslMode:       effectiveSsl,
         sqlInstance:   conn.sqlInstance ?? "",
         windowsAuth:   conn.windowsAuth ?? false,
       });
@@ -2666,6 +2824,38 @@ function handleCellCommit(
   function handleRollbackAll() {
     updateActiveTab({ pendingEdits: [], editingCell: null });
   }
+
+  async function handleSaveQuery() {
+    const sql = editorRef.current?.getValue() ?? "";
+    const id  = saveQueryName.trim().toLowerCase().replace(/\s+/g, "-") || `query-${Date.now()}`;
+    const now = new Date().toISOString();
+    const meta = {
+      name:        saveQueryName.trim() || id,
+      description: saveQueryDesc.trim() || null,
+      tags:        saveQueryTags.split(",").map(t => t.trim()).filter(Boolean),
+      engine_hint: activeTab?.connection?.engine ?? null,
+      created_at:  now,
+      updated_at:  now,
+    };
+    await invoke("save_query", { id, sql, metaJson: JSON.stringify(meta) });
+    setSaveQueryOpen(false);
+    setSaveQueryName("");
+    setSaveQueryTags("");
+    setSaveQueryDesc("");
+    loadSavedQueries(); // refresh the library panel
+  }
+
+  const [savedQueries, setSavedQueries]     = useState<any[]>([]);
+  const [querySearch, setQuerySearch]       = useState("");
+  const [showQueryLibrary, setShowQueryLibrary] = useState(false);
+
+  async function loadSavedQueries() {
+    const raw = await invoke<string>("list_queries");
+    setSavedQueries(JSON.parse(raw));
+  }
+
+  // Load on mount
+  useEffect(() => { loadSavedQueries(); }, []);
 
   return (
     <div style={{
@@ -3411,9 +3601,7 @@ function handleCellCommit(
                   </select>
                 </SettingsRow>
               </SettingsSection>
-
             </div>
-
             {/* Footer */}
             <div style={{
               padding: "12px 24px",
@@ -3482,7 +3670,182 @@ function handleCellCommit(
           </div>
         </>
       )}
-      {/* Settings modal */}
+      {/* END Settings Modal */}
+      {/* Begin Save Query Modal */}
+        {saveQueryOpen && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+        }}>
+          <div style={{
+            background: "#1a1d23", border: "1px solid #2a2d35",
+            borderRadius: 8, padding: 24, width: 380,
+          }}>
+            <div style={{ color: "#e8e9ec", fontWeight: 600, marginBottom: 16 }}>
+              Save Query
+            </div>
+            <input
+              autoFocus
+              placeholder="Query name"
+              value={saveQueryName}
+              onChange={e => setSaveQueryName(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") handleSaveQuery(); if (e.key === "Escape") setSaveQueryOpen(false); }}
+              style={{
+                width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
+                borderRadius: 4, padding: "6px 10px", color: "#e8e9ec",
+                marginBottom: 10, boxSizing: "border-box", fontSize: 13,
+              }}
+            />
+            <input
+              placeholder="Tags (comma-separated, optional)"
+              value={saveQueryTags}
+              onChange={e => setSaveQueryTags(e.target.value)}
+              style={{
+                width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
+                borderRadius: 4, padding: "6px 10px", color: "#e8e9ec",
+                marginBottom: 10, boxSizing: "border-box", fontSize: 13,
+              }}
+            />
+            <input
+              placeholder="Description (optional)"
+              value={saveQueryDesc}
+              onChange={e => setSaveQueryDesc(e.target.value)}
+              style={{
+                width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
+                borderRadius: 4, padding: "6px 10px", color: "#e8e9ec",
+                marginBottom: 16, boxSizing: "border-box", fontSize: 13,
+              }}
+            />
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button onClick={() => setSaveQueryOpen(false)}
+                style={{ padding: "6px 14px", background: "transparent", border: "1px solid #2a2d35", borderRadius: 4, color: "#9ca3af", cursor: "pointer" }}>
+                Cancel
+              </button>
+              <button onClick={handleSaveQuery}
+                style={{ padding: "6px 14px", background: "#7c3aed", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer" }}>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* END Save Query Modal */}
+      {/*Begin DBeaver Import Modal */}
+        {showDbeaverImport && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(0,0,0,0.6)" }}
+            onClick={() => { setShowDbeaverImport(false); setDbeaverResult(null); }}
+          />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%,-50%)",
+            zIndex: 1000, background: "#1e2026",
+            border: "1px solid #2d2f36", borderRadius: 12,
+            padding: "24px 28px", width: 440,
+            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec", marginBottom: 8 }}>
+              Import from DBeaver
+            </div>
+
+            {!dbeaverResult && (
+              <>
+                <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 20, lineHeight: 1.6 }}>
+                  Reads <code style={{ color: "#9ca3af" }}>~/.dbeaver/data-sources.json</code> and
+                  imports all PostgreSQL, MySQL, SQLite, and SQL Server connections into DbArk.
+                  Passwords are moved to the OS keychain.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    onClick={handleDbeaverImport}
+                    disabled={dbeaverImporting}
+                    style={{
+                      flex: 1, padding: "8px 0",
+                      background: "#6c63ff", color: "white",
+                      border: "none", borderRadius: 6,
+                      cursor: dbeaverImporting ? "not-allowed" : "pointer",
+                      fontSize: 12, fontFamily: "monospace",
+                    }}
+                  >
+                    {dbeaverImporting ? "Importing…" : "Import connections"}
+                  </button>
+                  <button
+                    onClick={() => setShowDbeaverImport(false)}
+                    style={{
+                      flex: 1, padding: "8px 0",
+                      background: "transparent", color: "#6b7280",
+                      border: "1px solid #2d2f36", borderRadius: 6,
+                      cursor: "pointer", fontSize: 12, fontFamily: "monospace",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+
+            {dbeaverResult && (
+              <>
+                {dbeaverResult.error && (
+                  <div style={{
+                    padding: "10px 14px", borderRadius: 6, marginBottom: 16,
+                    background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)",
+                    color: "#ef4444", fontSize: 12, fontFamily: "monospace",
+                  }}>
+                    ❌ {dbeaverResult.error}
+                  </div>
+                )}
+
+                {dbeaverResult.imported.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, color: "#10b981", marginBottom: 8, fontFamily: "monospace" }}>
+                      ✓ {dbeaverResult.imported.length} connection{dbeaverResult.imported.length > 1 ? "s" : ""} imported
+                    </div>
+                    {dbeaverResult.imported.map(c => (
+                      <div key={c.name} style={{
+                        fontSize: 11, color: "#6b7280", fontFamily: "monospace",
+                        padding: "2px 0",
+                      }}>
+                        · {c.name} ({c.engine} · {c.host})
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {dbeaverResult.skipped.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, color: "#f59e0b", marginBottom: 8, fontFamily: "monospace" }}>
+                      ⚠ {dbeaverResult.skipped.length} skipped
+                    </div>
+                    {dbeaverResult.skipped.map(s => (
+                      <div key={s} style={{
+                        fontSize: 11, color: "#4b5563", fontFamily: "monospace",
+                        padding: "2px 0",
+                      }}>
+                        · {s}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <button
+                  onClick={() => { setShowDbeaverImport(false); setDbeaverResult(null); }}
+                  style={{
+                    width: "100%", padding: "8px 0",
+                    background: "transparent", color: "#6b7280",
+                    border: "1px solid #2d2f36", borderRadius: 6,
+                    cursor: "pointer", fontSize: 12, fontFamily: "monospace",
+                  }}
+                >
+                  Close
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+      {/* END DBeaver Import Modal */}
       {/* Sidebar */}
       <div style={{
         width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth,
@@ -3515,6 +3878,71 @@ function handleCellCommit(
           </div>
         ) : (
           <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+            {showQueryLibrary && (
+            <div style={{ borderBottom: "1px solid #1e2028", paddingBottom: 8, marginBottom: 8 }}>
+              <input
+                placeholder="Search queries..."
+                value={querySearch}
+                onChange={e => setQuerySearch(e.target.value)}
+                style={{
+                  width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
+                  borderRadius: 4, padding: "4px 8px", color: "#e8e9ec",
+                  fontSize: 12, boxSizing: "border-box", marginBottom: 6,
+                }}
+              />
+              {savedQueries
+                .filter(q => {
+                  const s = querySearch.toLowerCase();
+                  return !s
+                    || q.meta.name.toLowerCase().includes(s)
+                    || (q.meta.tags ?? []).some((t: string) => t.toLowerCase().includes(s));
+                })
+                .map(q => (
+                  <div key={q.id}
+                    style={{
+                      padding: "5px 8px", borderRadius: 4, cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = "#1e2028")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                    onClick={() => {
+                      editorRef.current?.setValue(q.sql);
+                      editorRef.current?.focus();
+                    }}
+                  >
+                    <div>
+                      <div style={{ color: "#e8e9ec", fontSize: 12 }}>{q.meta.name}</div>
+                      {q.meta.tags?.length > 0 && (
+                        <div style={{ display: "flex", gap: 4, marginTop: 2, flexWrap: "wrap" }}>
+                          {q.meta.tags.map((t: string) => (
+                            <span key={t} style={{
+                              fontSize: 10, background: "rgba(124,58,237,0.2)",
+                              color: "#a78bfa", borderRadius: 3, padding: "1px 5px",
+                            }}>{t}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        invoke("delete_query", { id: q.id }).then(loadSavedQueries);
+                      }}
+                      style={{
+                        background: "transparent", border: "none",
+                        color: "#4b5563", cursor: "pointer", fontSize: 14, padding: 2,
+                      }}
+                      title="Delete query"
+                    >✕</button>
+                  </div>
+                ))}
+              {savedQueries.length === 0 && (
+                <div style={{ color: "#4b5563", fontSize: 11, padding: "4px 8px" }}>
+                  No saved queries. Press Cmd+S to save.
+                </div>
+              )}
+            </div>
+          )}
             {/* Connections section label */}
             <div style={{ padding: "8px 14px 4px", borderBottom: "1px solid #1e2026", fontSize: 10, fontWeight: 600, color: "#4b5563", textTransform: "uppercase", letterSpacing: ".06em" }}>
               Connections &nbsp;&nbsp;
@@ -3523,6 +3951,29 @@ function handleCellCommit(
                   color: "#9ca3af", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 7px", flexShrink: 0,
                 }}>
                   {showAddForm ? "×" : "+"}
+              </button>
+              <button
+                onClick={() => setShowQueryLibrary(v => !v)}
+                title="Saved queries"
+                style={{
+                  background: showQueryLibrary ? "rgba(124,58,237,0.2)" : "transparent",
+                  border: "none", color: "#9ca3af", cursor: "pointer",
+                  padding: "2px 6px", borderRadius: 4, fontSize: 14,
+                }}
+              >
+                📋
+              </button>
+              <button
+                onClick={() => setShowDbeaverImport(true)}
+                title="Import from DBeaver"
+                style={{
+                  background: "none", border: "1px solid #2d2f36", borderRadius: 4,
+                  color: "#9ca3af", cursor: "pointer", fontSize: 11,
+                  lineHeight: 1, padding: "2px 7px", flexShrink: 0,
+                  fontFamily: "monospace",
+                }}
+              >
+                ↓ DBeaver
               </button>
             </div>
 
@@ -3659,9 +4110,14 @@ function handleCellCommit(
                         </div>
                       )}
 
-                      {schema?.error && (
+                      {schema?.error && !(conn.sshEnabled && !tunnelPorts[conn.id]) && (
                         <div style={{ padding: "8px 14px", fontSize: 11, color: "#ef4444", fontFamily: "monospace" }}>
                           {schema.error}
+                        </div>
+                      )}
+                      {schema?.error && conn.sshEnabled && !tunnelPorts[conn.id] && (
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "#f59e0b", fontFamily: "monospace" }}>
+                          ⚠ Run a query to open the SSH tunnel, then schema will load
                         </div>
                       )}
 
@@ -3701,68 +4157,237 @@ function handleCellCommit(
                             expanded={expandedSections.has(`${conn.id}-tables`)}
                             onToggle={() => toggleSection(`${conn.id}-tables`)}
                           >
-                            {safeSchema.tables.map(table => (
-                              <div key={table.name}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  setSchemaContextMenu({
-                                    x: e.clientX, y: e.clientY,
-                                    name: table.name, type: "table",
-                                    schema: table.schema || "dbo", connection: conn,
-                                  });
-                                }}>
-                                <div
-                                  style={{
-                                    display: "flex", alignItems: "center", gap: 6,
-                                    padding: "5px 14px", cursor: "pointer",
-                                    borderTop: "1px solid #1a1b21",
-                                  }}
-                                  onClick={() => {
-                                    const next = new Set(expandedTables);
-                                    next.has(table.name) ? next.delete(table.name) : next.add(table.name);
-                                    setExpandedTables(next);
-                                  }}
-                                  onDoubleClick={() => {
-                                    const limit = conn.engine === "sqlserver"
-                                      ? `SELECT TOP 100 * FROM ${table.name}`
-                                      : `SELECT * FROM ${table.name} LIMIT 100`;
-                                    editorRef.current?.setValue(limit);
-                                    editorRef.current?.focus();
-                                  }}
-                                  title="Click to expand · Double-click to query"
-                                >
-                                  <span style={{ fontSize: 9, color: "#4b5563", flexShrink: 0, width: 10 }}>
-                                    {expandedTables.has(table.name) ? "▾" : "▸"}
-                                  </span>
-                                  <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
-                                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                    fontFamily: "monospace" }}>
-                                    {table.name}
-                                  </span>
-                                  <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
-                                    {table.columns?.length ?? 0}
-                                  </span>
-                                </div>
-                                {expandedTables.has(table.name) && (table.columns ?? []).map(col => (
-                                  <div key={col.name} style={{
-                                    display: "flex", alignItems: "center", gap: 6,
-                                    padding: "3px 14px 3px 26px", borderTop: "1px solid #111318",
-                                  }}>
-                                    {col.isPrimaryKey && (
-                                      <span style={{ fontSize: 8, color: "#f59e0b", flexShrink: 0 }}>🔑</span>
-                                    )}
-                                    <span style={{ fontSize: 11, color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
-                                      fontFamily: "monospace", flex: 1, overflow: "hidden",
-                                      textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                      {col.name}
-                                    </span>
-                                    <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
-                                      {col.dataType}
-                                    </span>
+                            {conn.engine === "postgres" && tablesBySchema.size > 1
+                              ? // Postgres with multiple schemas — show schema grouping
+                                [...tablesBySchema.entries()].map(([schemaName, tables]) => (
+                                  <div key={schemaName}>
+                                    {/* Schema header */}
+                                    <div
+                                      onClick={() => {
+                                        setExpandedSchemas(prev => {
+                                          const next = new Set(prev);
+                                          next.has(schemaName)
+                                            ? next.delete(schemaName)
+                                            : next.add(schemaName);
+                                          return next;
+                                        });
+                                      }}
+                                      style={{
+                                        display: "flex", alignItems: "center", gap: 6,
+                                        padding: "5px 14px",
+                                        cursor: "pointer",
+                                        borderTop: "1px solid #1a1b21",
+                                        background: "#0a0b0d",
+                                      }}
+                                      onMouseEnter={e =>
+                                        (e.currentTarget.style.background = "#111318")}
+                                      onMouseLeave={e =>
+                                        (e.currentTarget.style.background = "#0a0b0d")}
+                                    >
+                                      <span style={{
+                                        fontSize: 9, color: "#6c63ff",
+                                        flexShrink: 0, width: 10,
+                                      }}>
+                                        {expandedSchemas.has(schemaName) ? "▾" : "▸"}
+                                      </span>
+                                      <span style={{
+                                        fontSize: 10, color: "#6c63ff",
+                                        fontFamily: "monospace", flex: 1,
+                                        fontWeight: 600, letterSpacing: ".03em",
+                                      }}>
+                                        {schemaName}
+                                      </span>
+                                      <span style={{
+                                        fontSize: 9, color: "#374151",
+                                        fontFamily: "monospace", flexShrink: 0,
+                                      }}>
+                                        {tables.length}
+                                      </span>
+                                    </div>
+
+                                    {/* Tables under this schema */}
+                                    {expandedSchemas.has(schemaName) && tables.map(table => (
+                                      <div key={table.name}>
+                                        <div
+                                          onClick={() => {
+                                            const next = new Set(expandedTables);
+                                            next.has(`${schemaName}.${table.name}`)
+                                              ? next.delete(`${schemaName}.${table.name}`)
+                                              : next.add(`${schemaName}.${table.name}`);
+                                            setExpandedTables(next);
+                                          }}
+                                          onDoubleClick={() => {
+                                            const q = `SELECT * FROM ${schemaName}.${table.name} LIMIT 100`;
+                                            editorRef.current?.setValue(q);
+                                            editorRef.current?.focus();
+                                          }}
+                                          onContextMenu={(e) => {
+                                            e.preventDefault();
+                                            setSchemaContextMenu({
+                                              x: e.clientX, y: e.clientY,
+                                              name: table.name,
+                                              type: "table",
+                                              schema: schemaName,
+                                              connection: conn,
+                                            });
+                                          }}
+                                          title="Click to expand · Double-click to query"
+                                          style={{
+                                            display: "flex", alignItems: "center", gap: 6,
+                                            padding: "5px 14px 5px 24px",
+                                            cursor: "pointer",
+                                            borderTop: "1px solid #1a1b21",
+                                          }}
+                                        >
+                                          <span style={{
+                                            fontSize: 9, color: "#4b5563",
+                                            flexShrink: 0, width: 10,
+                                          }}>
+                                            {expandedTables.has(`${schemaName}.${table.name}`)
+                                              ? "▾" : "▸"}
+                                          </span>
+                                          <span style={{
+                                            fontSize: 11, color: "#9ca3af", flex: 1,
+                                            overflow: "hidden", textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap", fontFamily: "monospace",
+                                          }}>
+                                            {table.name}
+                                          </span>
+                                          <span style={{
+                                            fontSize: 9, color: "#374151",
+                                            fontFamily: "monospace", flexShrink: 0,
+                                          }}>
+                                            {table.columns?.length ?? 0}
+                                          </span>
+                                        </div>
+
+                                        {/* Columns */}
+                                        {expandedTables.has(`${schemaName}.${table.name}`) &&
+                                          (table.columns ?? []).map(col => (
+                                            <div
+                                              key={col.name}
+                                              style={{
+                                                display: "flex", alignItems: "center", gap: 6,
+                                                padding: "3px 14px 3px 36px",
+                                                borderTop: "1px solid #111318",
+                                              }}
+                                            >
+                                              {col.isPrimaryKey && (
+                                                <span style={{
+                                                  fontSize: 8, color: "#f59e0b", flexShrink: 0,
+                                                }}>🔑</span>
+                                              )}
+                                              <span style={{
+                                                fontSize: 11,
+                                                color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
+                                                fontFamily: "monospace", flex: 1,
+                                                overflow: "hidden", textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                              }}>
+                                                {col.name}
+                                              </span>
+                                              <span style={{
+                                                fontSize: 9, color: "#374151",
+                                                fontFamily: "monospace", flexShrink: 0,
+                                              }}>
+                                                {col.dataType}
+                                              </span>
+                                            </div>
+                                          ))}
+                                      </div>
+                                    ))}
                                   </div>
-                                ))}
-                              </div>
-                            ))}
+                                ))
+                              : // All other engines (or single-schema Postgres)
+                                safeSchema.tables.map(table => (
+                                  <div key={table.name}>
+                                    <div
+                                      onClick={() => {
+                                        const next = new Set(expandedTables);
+                                        next.has(table.name)
+                                          ? next.delete(table.name)
+                                          : next.add(table.name);
+                                        setExpandedTables(next);
+                                      }}
+                                      onDoubleClick={() => {
+                                        const q = conn.engine === "sqlserver"
+                                          ? `SELECT TOP 100 * FROM ${table.name}`
+                                          : `SELECT * FROM ${table.name} LIMIT 100`;
+                                        editorRef.current?.setValue(q);
+                                        editorRef.current?.focus();
+                                      }}
+                                      onContextMenu={(e) => {
+                                        e.preventDefault();
+                                        setSchemaContextMenu({
+                                          x: e.clientX, y: e.clientY,
+                                          name: table.name, type: "table",
+                                          schema: table.schema || "dbo",
+                                          connection: conn,
+                                        });
+                                      }}
+                                      title="Click to expand · Double-click to query"
+                                      style={{
+                                        display: "flex", alignItems: "center", gap: 6,
+                                        padding: "5px 14px", cursor: "pointer",
+                                        borderTop: "1px solid #1a1b21",
+                                      }}
+                                    >
+                                      <span style={{
+                                        fontSize: 9, color: "#4b5563",
+                                        flexShrink: 0, width: 10,
+                                      }}>
+                                        {expandedTables.has(table.name) ? "▾" : "▸"}
+                                      </span>
+                                      <span style={{
+                                        fontSize: 11, color: "#9ca3af", flex: 1,
+                                        overflow: "hidden", textOverflow: "ellipsis",
+                                        whiteSpace: "nowrap", fontFamily: "monospace",
+                                      }}>
+                                        {table.name}
+                                      </span>
+                                      <span style={{
+                                        fontSize: 9, color: "#374151",
+                                        fontFamily: "monospace", flexShrink: 0,
+                                      }}>
+                                        {table.columns?.length ?? 0}
+                                      </span>
+                                    </div>
+
+                                    {expandedTables.has(table.name) &&
+                                      (table.columns ?? []).map(col => (
+                                        <div
+                                          key={col.name}
+                                          style={{
+                                            display: "flex", alignItems: "center", gap: 6,
+                                            padding: "3px 14px 3px 26px",
+                                            borderTop: "1px solid #111318",
+                                          }}
+                                        >
+                                          {col.isPrimaryKey && (
+                                            <span style={{
+                                              fontSize: 8, color: "#f59e0b", flexShrink: 0,
+                                            }}>🔑</span>
+                                          )}
+                                          <span style={{
+                                            fontSize: 11,
+                                            color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
+                                            fontFamily: "monospace", flex: 1,
+                                            overflow: "hidden", textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap",
+                                          }}>
+                                            {col.name}
+                                          </span>
+                                          <span style={{
+                                            fontSize: 9, color: "#374151",
+                                            fontFamily: "monospace", flexShrink: 0,
+                                          }}>
+                                            {col.dataType}
+                                          </span>
+                                        </div>
+                                      ))}
+                                  </div>
+                                ))
+                            }
                           </SchemaSection>
 
                           {/* Stored Procedures */}
@@ -4341,7 +4966,7 @@ function handleCellCommit(
             onClick={() => {
               const next = !auditLogEnabled;
               setAuditLogEnabled(next);
-              localStorage.setItem("dbark_audit_log", String(next));
+              localStorage.setItem("devsql_audit_log", String(next));
             }}
             title={auditLogEnabled ? "Audit log ON — click to disable" : "Audit log OFF — click to enable"}
             style={{

@@ -36,13 +36,11 @@ public static class SshTunnelLib
 
             // Build authentication
             AuthenticationMethod auth;
-            if (!string.IsNullOrEmpty(sshKeyPath) && System.IO.File.Exists(sshKeyPath))
+
+            if (!string.IsNullOrEmpty(sshKeyPath))
             {
-                auth = string.IsNullOrEmpty(sshPassword)
-                    ? new PrivateKeyAuthenticationMethod(sshUser,
-                        new PrivateKeyFile(sshKeyPath))
-                    : new PrivateKeyAuthenticationMethod(sshUser,
-                        new PrivateKeyFile(sshKeyPath, sshPassword));
+                auth = new PrivateKeyAuthenticationMethod(sshUser,
+                    new PrivateKeyFile(sshKeyPath));
             }
             else if (!string.IsNullOrEmpty(sshPassword))
             {
@@ -74,6 +72,15 @@ public static class SshTunnelLib
 
             client.AddForwardedPort(forwardedPort);
             forwardedPort.Start();
+
+            // Wait until the port is actually listening (up to 3 seconds)
+            var deadline = DateTime.UtcNow.AddSeconds(3);
+            while (!forwardedPort.IsStarted && DateTime.UtcNow < deadline)
+                System.Threading.Thread.Sleep(50);
+
+            if (!forwardedPort.IsStarted)
+                return Marshal.StringToCoTaskMemUTF8(
+                    "{\"error\":\"Tunnel port failed to start listening\"}");
 
             ActiveClients[tunnelId] = client;
             ActiveTunnels[tunnelId] = forwardedPort;
