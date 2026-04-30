@@ -1,6 +1,6 @@
 # DevSql Privacy Policy
 
-**Last updated: [date]**
+**Last updated: 4/30/2026**
 
 ## What DevSql collects
 
