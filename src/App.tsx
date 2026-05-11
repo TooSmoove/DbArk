@@ -2714,7 +2714,7 @@ function App() {
       // Use setTimeout to ensure this runs after execute_query fully completes
       await new Promise(resolve => setTimeout(resolve, 0));
 
-      const result = await invoke<boolean>("add_history_entry", {
+      await invoke<boolean>("add_history_entry", {
         connectionId:   conn.id,
         connectionName: conn.name,
         sql:            sql.trim(),
