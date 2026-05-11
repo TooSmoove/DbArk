@@ -40,12 +40,6 @@ exception stack trace and your OS version is sent. No query content,
 no connection details, no file paths, no personally identifiable information.
 Crash reporting is off by default and requires explicit opt-in.
 
-## License validation
-
-License key validation requires a one-time connection to our licensing
-server at activation. Only the license key is transmitted — no usage
-data, no machine fingerprint, no personally identifiable information.
-
 ## Verification
 
 DevSql is a local-first desktop application. Every claim in this document

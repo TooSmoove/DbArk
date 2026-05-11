@@ -81,7 +81,9 @@ public static class QueryHistoryLib
 
             string dbPath = GetDbPath();
             IntPtr db = IntPtr.Zero;
+            MigrateIfUnencrypted(dbPath);
             SqliteOpen(dbPath, ref db);
+            ApplyKey(db);
 
             try
             {
@@ -123,7 +125,10 @@ public static class QueryHistoryLib
             }
             finally { SqliteClose(db); }
         }
-        catch { return 0; }
+        catch (Exception ex)
+        {
+            return 0;
+        }
     }
 
     [UnmanagedCallersOnly(EntryPoint = "get_history")]
@@ -133,15 +138,12 @@ public static class QueryHistoryLib
         {
             var connectionId = Marshal.PtrToStringUTF8(connectionIdPtr) ?? "";
 
-            File.AppendAllText(
-          Path.Combine(Environment.GetFolderPath(
-              Environment.SpecialFolder.UserProfile), ".devsql", "debug.log"),
-          $"GetHistory called: connectionId='{connectionId}', limit={limit}\n");
-
             string dbPath = GetDbPath();
 
             IntPtr db = IntPtr.Zero;
+            MigrateIfUnencrypted(dbPath);
             SqliteOpen(dbPath, ref db);
+            ApplyKey(db);
 
             try
             {
@@ -198,7 +200,9 @@ public static class QueryHistoryLib
             string dbPath = GetDbPath();
 
             IntPtr db = IntPtr.Zero;
+            MigrateIfUnencrypted(dbPath);
             SqliteOpen(dbPath, ref db);
+            ApplyKey(db);
 
             try
             {
@@ -222,6 +226,56 @@ public static class QueryHistoryLib
         }
         catch { return 0; }
     }
+    [UnmanagedCallersOnly(EntryPoint = "init_history_key")]
+    public static void InitHistoryKey(IntPtr keyPtr)
+    {
+        var key = Marshal.PtrToStringUTF8(keyPtr) ?? "";
+        SetKey(key);
+    }
+    private static void MigrateIfUnencrypted(string dbPath)
+    {
+        if (!File.Exists(dbPath) || string.IsNullOrEmpty(_dbKey)) return;
+
+        // Try opening with the key — if it fails to read the schema,
+        // the DB is unencrypted and needs migrating
+        IntPtr db = IntPtr.Zero;
+        SqliteOpen(dbPath, ref db);
+        ApplyKey(db);
+
+        IntPtr stmt = IntPtr.Zero;
+        int rc = SqlitePrepareV2(db, "SELECT count(*) FROM sqlite_master", -1, ref stmt, IntPtr.Zero);
+        SqliteFinalize(stmt);
+        SqliteClose(db);
+
+        if (rc == 0) return; // Already encrypted or empty — nothing to do
+
+        // DB is unencrypted — encrypt it in place using sqlcipher_export
+        string tmpPath = dbPath + ".tmp";
+        IntPtr plainDb = IntPtr.Zero;
+        SqliteOpen(dbPath, ref plainDb); // open without key
+
+        IntPtr attachStmt = IntPtr.Zero;
+        SqlitePrepareV2(plainDb,
+            $"ATTACH DATABASE '{tmpPath}' AS encrypted KEY '{_dbKey}'",
+            -1, ref attachStmt, IntPtr.Zero);
+        SqliteStep(attachStmt);
+        SqliteFinalize(attachStmt);
+
+        IntPtr exportStmt = IntPtr.Zero;
+        SqlitePrepareV2(plainDb, "SELECT sqlcipher_export('encrypted')",
+            -1, ref exportStmt, IntPtr.Zero);
+        SqliteStep(exportStmt);
+        SqliteFinalize(exportStmt);
+
+        IntPtr detachStmt = IntPtr.Zero;
+        SqlitePrepareV2(plainDb, "DETACH DATABASE encrypted",
+            -1, ref detachStmt, IntPtr.Zero);
+        SqliteStep(detachStmt);
+        SqliteFinalize(detachStmt);
+        SqliteClose(plainDb);
+
+        File.Replace(tmpPath, dbPath, null);
+    }
     private static void PurgeOldHistory(IntPtr db)
     {
         // Delete entries older than 90 days
@@ -243,7 +297,17 @@ public static class QueryHistoryLib
     }
 
     // ---- winsqlite3 P/Invoke ----------------------------------
-    private const string SqliteDll = "winsqlite3.dll";
+    private const string SqliteDll = "sqlcipher.dll";
+
+    private static string? _dbKey;
+
+    public static void SetKey(string key) => _dbKey = key;
+
+    private static void ApplyKey(IntPtr db)
+    {
+        if (string.IsNullOrEmpty(_dbKey)) return;
+        SqliteKey(db, _dbKey, _dbKey.Length);
+    }
 
     [DllImport(SqliteDll, EntryPoint = "sqlite3_open")]
     private static extern int SqliteOpen(
@@ -284,4 +348,7 @@ public static class QueryHistoryLib
 
     [DllImport(SqliteDll, EntryPoint = "sqlite3_column_text")]
     private static extern IntPtr SqliteColumnText(IntPtr stmt, int col);
+    [DllImport(SqliteDll, EntryPoint = "sqlite3_key")]
+    private static extern int SqliteKey(IntPtr db,
+    [MarshalAs(UnmanagedType.LPUTF8Str)] string key, int keyLen);
 }

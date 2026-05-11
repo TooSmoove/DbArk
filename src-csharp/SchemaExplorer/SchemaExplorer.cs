@@ -101,7 +101,9 @@ public static class SchemaExplorerLib
             var result = engine.ToLower() switch
             {
                 "mysql" => GetMySqlFullSchema(connectionString),
+                "mariadb" => GetMySqlFullSchema(connectionString),      // MariaDB is wire-compatible with MySQL
                 "postgres" => GetPostgresFullSchema(connectionString),
+                "cockroachdb" => GetPostgresFullSchema(connectionString),   // CockroachDB speaks the Postgres wire protocol
                 "sqlite" => GetSqliteFullSchema(connectionString),
                 "sqlserver" => GetSqlServerFullSchema(connectionString),
                 _ => throw new Exception($"Unsupported engine: {engine}")
@@ -254,7 +256,7 @@ public static class SchemaExplorerLib
             cmd.CommandText = @"
             SELECT table_name, table_schema
             FROM information_schema.tables
-            WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+            WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal')
               AND table_type = 'BASE TABLE'
             ORDER BY table_schema, table_name";
 
@@ -295,7 +297,7 @@ public static class SchemaExplorerLib
             ) pk ON pk.table_schema = c.table_schema
                 AND pk.table_name = c.table_name
                 AND pk.column_name = c.column_name
-            WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+            WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal')
             ORDER BY c.table_schema, c.table_name, c.ordinal_position";
 
             using var reader = cmd.ExecuteReader();
@@ -710,7 +712,7 @@ public static class SchemaExplorerLib
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE p.prokind = 'p'
-            AND n.nspname NOT IN ('pg_catalog','information_schema')
+            AND n.nspname NOT IN ('pg_catalog','information_schema','crdb_internal')
         ORDER BY n.nspname, p.proname";
         using var reader = cmd.ExecuteReader();
         var list = new List<ProcedureInfo>();
@@ -740,7 +742,7 @@ public static class SchemaExplorerLib
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE p.prokind IN ('f', 'w')
-            AND n.nspname NOT IN ('pg_catalog','information_schema')
+            AND n.nspname NOT IN ('pg_catalog','information_schema','crdb_internal')
         ORDER BY n.nspname, p.proname";
         using var reader = cmd.ExecuteReader();
         var list = new List<FunctionInfo>();
@@ -763,7 +765,7 @@ public static class SchemaExplorerLib
         cmd.CommandText = @"
         SELECT table_name, table_schema
         FROM information_schema.views
-        WHERE table_schema NOT IN ('pg_catalog','information_schema')
+        WHERE table_schema NOT IN ('pg_catalog','information_schema','crdb_internal')
         ORDER BY table_schema, table_name";
         using var reader = cmd.ExecuteReader();
         var list = new List<ViewInfo>();
@@ -785,7 +787,7 @@ public static class SchemaExplorerLib
         SELECT trigger_name, event_object_table,
                event_manipulation, action_timing
         FROM information_schema.triggers
-        WHERE trigger_schema NOT IN ('pg_catalog','information_schema')
+        WHERE trigger_schema NOT IN ('pg_catalog','information_schema','crdb_internal')
         ORDER BY event_object_table, trigger_name";
         using var reader = cmd.ExecuteReader();
         var list = new List<TriggerInfo>();
@@ -813,7 +815,7 @@ public static class SchemaExplorerLib
         JOIN pg_class i ON i.oid = ix.indexrelid
         JOIN pg_class t ON t.oid = ix.indrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace
-        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema','crdb_internal')
         ORDER BY t.relname, i.relname";
         using var reader = cmd.ExecuteReader();
         var list = new List<IndexInfo>();
@@ -904,7 +906,9 @@ public static class SchemaExplorerLib
             {
                 "sqlserver" => GetSqlServerDefinition(connectionString, objectName, objectType, schemaName),
                 "mysql" => GetMySqlDefinition(connectionString, objectName, objectType),
+                "mariadb" => GetMySqlDefinition(connectionString, objectName, objectType),      // MariaDB wire-compatible
                 "postgres" => GetPostgresDefinition(connectionString, objectName, objectType, schemaName),
+                "cockroachdb" => GetPostgresDefinition(connectionString, objectName, objectType, schemaName), // CockroachDB wire-compatible
                 // SQLite handled in Rust — never reaches here
                 _ => throw new Exception($"Unsupported engine: {engine}")
             };
@@ -1141,26 +1145,26 @@ public static class SchemaExplorerLib
                     WHERE t.tgname = '{objectName}'
                         AND NOT t.tgisinternal";
 
-                        string triggerName, tableName, schemaN, functionName, timing, evt, orientation;
+            string triggerName, tableName, schemaN, functionName, timing, evt, orientation;
 
-                        using (var reader = cmd.ExecuteReader())
-                        {
-                            if (!reader.Read())
-                                throw new Exception(
-                                    $"No definition found for trigger '{objectName}'.");
+            using (var reader = cmd.ExecuteReader())
+            {
+                if (!reader.Read())
+                    throw new Exception(
+                        $"No definition found for trigger '{objectName}'.");
 
-                            triggerName = reader.GetString(0);
-                            tableName = reader.GetString(1);
-                            schemaN = reader.GetString(2);
-                            functionName = reader.GetString(3);
-                            timing = reader.GetString(4);
-                            evt = reader.GetString(5);
-                            orientation = reader.GetString(6);
-                        } // ← reader fully disposed here before opening second command
+                triggerName = reader.GetString(0);
+                tableName = reader.GetString(1);
+                schemaN = reader.GetString(2);
+                functionName = reader.GetString(3);
+                timing = reader.GetString(4);
+                evt = reader.GetString(5);
+                orientation = reader.GetString(6);
+            } // ← reader fully disposed here before opening second command
 
-                        // Use a separate command for the function definition
-                        using var cmd2 = conn.CreateCommand();
-                        cmd2.CommandText = $@"
+            // Use a separate command for the function definition
+            using var cmd2 = conn.CreateCommand();
+            cmd2.CommandText = $@"
                     SELECT pg_get_functiondef(p.oid)
                     FROM pg_proc p
                     JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -1168,9 +1172,9 @@ public static class SchemaExplorerLib
                         AND n.nspname = '{schemaN}'
                     LIMIT 1";
 
-                        var funcDef = cmd2.ExecuteScalar()?.ToString() ?? "";
+            var funcDef = cmd2.ExecuteScalar()?.ToString() ?? "";
 
-                        return $@"{funcDef}
+            return $@"{funcDef}
 
             -- Trigger definition
             CREATE OR REPLACE TRIGGER {triggerName}

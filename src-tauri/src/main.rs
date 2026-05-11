@@ -25,13 +25,14 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "848bc0066bab16cc5b0789e5464c4f97955b53185853bd5e889e2a08baba77ee";
-const HASH_FILEQUERYENGINE: &str = "f312d982afd8581eaa681132d999ebe4ae000bafebfc12de63cae46456a364aa";
-const HASH_QUERYEXECUTOR: &str = "2b8a7514cee7c688fd1f92ed2dd5d56be00f2ca189dafd3ebf07de7119a20327";
-const HASH_QUERYHISTORY: &str = "de46e055d88caf5dbd9f082809035662de69346052b65138cdc7b3a9886c42a0";
-const HASH_SCHEMAEXPLORER: &str = "031d2efaa1852027ebb837e27f3a31ed3a647056ae659f17065133594627618a";
+const HASH_CONNECTIONMANAGER: &str = "618b21ff617d4d1f75b3c6b8c2946c3e0f22f4107423a239a68caa278123ded3";
+const HASH_FILEQUERYENGINE: &str = "e2afb7771c1c397ad298f997a697eb327f8db441e294d664835251bcbdeec4bb";
+const HASH_QUERYEXECUTOR: &str = "99f3b8e6d808f3998b5cf4b739d9a728afa4cb1c0018e1c8ee3b94821824dd45";
+const HASH_QUERYHISTORY: &str = "5bcf7fbce40ce737eb97c4a455161c947d04b841177091f670dfdf5f7bbda0ff";
+const HASH_SCHEMAEXPLORER: &str = "e13357811d16176b4faabbe987fab599650adfac5cc8f7db5ce2a65b0571909b";
 const HASH_SSHTUNNEL: &str = "fde39b1a8439f07de3c3edb7c9e6e4b136f363fb3bc5184b123de9e82f420aa5";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
+const HASH_SQLCIPHER: &str = "895c0f5203352446f159d7780021b69b280dec6347c434c7a643ad6b7d0d883b";
 
 static SSH_TUNNEL: OnceLock<libloading::Library> = OnceLock::new();
 static QUERY_EXECUTOR:     OnceLock<libloading::Library> = OnceLock::new();
@@ -82,6 +83,16 @@ fn get_ssh_tunnel() -> &'static libloading::Library {
     })
 }
 
+static SQLCIPHER: OnceLock<libloading::Library> = OnceLock::new();
+
+// Add this function:
+fn get_sqlcipher() -> &'static libloading::Library {
+    SQLCIPHER.get_or_init(|| unsafe {
+        libloading::Library::new("natives/sqlcipher.dll")
+            .expect("Failed to load sqlcipher.dll")
+    })
+}
+
 #[tauri::command]
 fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>) -> String {
     let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
@@ -118,6 +129,34 @@ fn list_connections(folder_path: String) -> String {
 
 #[tauri::command]
 fn save_connection(request_json: String) -> String {
+    // ── Validate group and color before passing to C# ────────────────────────
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&request_json) {
+        // group: alphanumeric, spaces, hyphens only, max 50 chars
+        if let Some(group) = val.get("group").and_then(|v| v.as_str()) {
+            if !group.is_empty() {
+                if group.len() > 50 {
+                    return "ERROR: Group name must be 50 characters or fewer".to_string();
+                }
+                if !group.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '-') {
+                    return "ERROR: Group name may only contain letters, numbers, spaces, and hyphens".to_string();
+                }
+            }
+        }
+
+        // color: must be exactly #RRGGBB
+        if let Some(color) = val.get("color").and_then(|v| v.as_str()) {
+            if !color.is_empty() {
+                let valid = color.len() == 7
+                    && color.starts_with('#')
+                    && color[1..].chars().all(|c| c.is_ascii_hexdigit());
+                if !valid {
+                    return "ERROR: Color must be a valid hex color in #RRGGBB format".to_string();
+                }
+            }
+        }
+    }
+    // ── End validation ───────────────────────────────────────────────────────
+
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
             get_connection_manager().get(b"save_connection").expect("save_connection");
@@ -180,13 +219,26 @@ fn build_connection_string(
     let password = if !win_auth {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().unwrap_or_default()
+        // For CockroachDB insecure clusters (ssl_mode = "none") the dbark user
+        // has no password — allow an empty or missing credential instead of
+        // erroring, which would cause the error string to be used as the
+        // connection string and produce a 30-second timeout.
+        let pw = match entry.get_password() {
+            Ok(p)  => p,
+            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
+            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+        };
+        if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
+            return Err(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref));
+        }
+        pw
     } else {
         String::new()
     };
 
     let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" => {
+        // MariaDB is wire-protocol compatible with MySQL — uses the same MySqlConnector driver
+        "mysql" | "mariadb" => {
             let ssl_param = match ssl.as_str() {
                 "none"        => "SslMode=None;",
                 "require"     => "SslMode=Required;",       
@@ -202,6 +254,25 @@ fn build_connection_string(
                 "require"     => "SSL Mode=Require;",
                 "verify-full" => "SSL Mode=VerifyFull;",
                 _             => "SSL Mode=Prefer;",
+            };
+            format!("Host={};Port={};Database={};Username={};Password={};{}",
+                effective_host, effective_port, database, username, password, ssl_param)
+        },
+        // CockroachDB speaks the Postgres wire protocol — uses Npgsql.
+        // ssl_mode="none" means insecure single-node dev cluster: omit the SSL
+        // parameter entirely. Passing SSL Mode=Disable causes Npgsql to send a
+        // different handshake that CockroachDB's insecure listener rejects.
+        // For secure clusters use ssl_mode="require" or "verify-full".
+        "cockroachdb" => {
+            // ssl_mode="none" (insecure): use SSL Mode=Allow so Npgsql connects
+            // plain without sending an SSLRequest. Omitting SSL Mode entirely
+            // defaults Npgsql to Prefer which DOES send an SSLRequest —
+            // CockroachDB insecure may not respond, causing a 30-second timeout.
+            let ssl_param = match ssl.as_str() {
+                "none"        => "SSL Mode=Allow;",
+                "require"     => "SSL Mode=Require;Trust Server Certificate=true;",
+                "verify-full" => "SSL Mode=VerifyFull;",
+                _             => "SSL Mode=Prefer;Trust Server Certificate=true;",
             };
             format!("Host={};Port={};Database={};Username={};Password={};{}",
                 effective_host, effective_port, database, username, password, ssl_param)
@@ -265,12 +336,12 @@ fn list_db_tables(
 ) -> Result<String, String> {
     let entry = keyring::Entry::new(&credential_ref, &username)
         .map_err(|e| e.to_string())?;
-    let password = entry.get_password().unwrap_or_default();
+    let password = entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?;
     let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
-        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
-        "sqlite"   => format!("Data Source={}", database),
-        _          => return Err(format!("Unsupported engine: {}", engine)),
+        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
+        "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
+        "sqlite"                   => format!("Data Source={}", database),
+        _                          => return Err(format!("Unsupported engine: {}", engine)),
     };
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -297,12 +368,12 @@ fn query_file_with_db(
 ) -> Result<String, String> {
     let entry = keyring::Entry::new(&credential_ref, &username)
         .map_err(|e| e.to_string())?;
-    let password = entry.get_password().unwrap_or_default();
+    let password = entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?;
     let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
-        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
-        "sqlite"   => format!("Data Source={}", database),
-        _          => return Err(format!("Unsupported engine: {}", engine)),
+        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
+        "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
+        "sqlite"                   => format!("Data Source={}", database),
+        _                          => return Err(format!("Unsupported engine: {}", engine)),
     };
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -339,25 +410,42 @@ fn get_schema(
     port: u16,
     database: String,
     username: String,
-    _ssl_mode: Option<String>,
+    ssl_mode: Option<String>,
     sql_instance: Option<String>,
     windows_auth: Option<bool>,
 ) -> Result<String, String> {
+    let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
 
     let password = if !win_auth {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().unwrap_or_default()
+        // For CockroachDB insecure clusters (ssl_mode = "none") the dbark user
+        // has no password — allow an empty or missing credential instead of
+        // erroring, which would cause the error string to be used as the
+        // connection string and produce a 30-second timeout.
+        let pw = match entry.get_password() {
+            Ok(p)  => p,
+            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
+            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+        };
+        if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
+            return Err(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref));
+        }
+        pw
     } else {
         String::new()
     };
 
     let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql"    => format!("Server={};Port={};Database={};Uid={};Pwd={};",
+        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};",
             host, port, database, username, password),
-        "postgres" => format!("Host={};Port={};Database={};Username={};Password={};",
+        "postgres"    => format!("Host={};Port={};Database={};Username={};Password={};",
+            host, port, database, username, password),
+        // CockroachDB insecure: add SSL Mode=Allow so Npgsql connects plain
+        // without sending an SSLRequest (avoids 30-second connection timeout).
+        "cockroachdb"  => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Allow;",
             host, port, database, username, password),
         "sqlite"   => format!("Data Source={}", database),
         "sqlserver" => {
@@ -453,26 +541,38 @@ fn test_connection(
     sql_instance: Option<String>,
     windows_auth: Option<bool>,
 ) -> Result<String, String> {
-    // Build the connection string the same way as build_connection_string
-    let _ = ssl_mode; 
+    let ssl  = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
 
     let password = if !win_auth {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().unwrap_or_default()
+        match entry.get_password() {
+            Ok(p)  => p,
+            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
+            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+        }
     } else {
         String::new()
     };
 
     let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" => format!(
+        "mysql" | "mariadb" => format!(
             "Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;ConnectionTimeout=5;",
             host, port, database, username, password),
         "postgres" => format!(
             "Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;Timeout=5;",
             host, port, database, username, password),
+        "cockroachdb" => {
+            let ssl_param = if ssl == "none" {
+                "SSL Mode=Allow;"
+            } else {
+                "SSL Mode=Prefer;Trust Server Certificate=true;"
+            };
+            format!("Host={};Port={};Database={};Username={};Password={};{}Timeout=5;",
+                host, port, database, username, password, ssl_param)
+        },
         "sqlite" => format!("Data Source={}", database),
         "sqlserver" => {
             let server = if !instance.is_empty() {
@@ -931,16 +1031,16 @@ fn get_object_definition(
     let password = if !win_auth {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().unwrap_or_default()
+        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
     } else {
         String::new()
     };
 
     let mut conn_str = match engine.to_lowercase().as_str() {
-        "mysql"    => format!(
+        "mysql" | "mariadb"       => format!(
             "Server={};Port={};Database={};Uid={};Pwd={};",
             host, port, database, username, password),
-        "postgres" => format!(
+        "postgres" | "cockroachdb" => format!(
             "Host={};Port={};Database={};Username={};Password={};",
             host, port, database, username, password),
         "sqlserver" => {
@@ -1089,7 +1189,7 @@ fn drop_object(
     let password = if !win_auth {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().unwrap_or_default()
+        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
     } else {
         String::new()
     };
@@ -1164,7 +1264,7 @@ fn build_drop_statement(
             "table"     => format!("DROP TABLE [{schema}].[{name}]"),
             _           => format!("DROP {object_type} [{name}]"),
         },
-        "mysql" => match object_type {
+        "mysql" | "mariadb" => match object_type {
             "procedure" => format!("DROP PROCEDURE `{name}`"),
             "function"  => format!("DROP FUNCTION `{name}`"),
             "view"      => format!("DROP VIEW `{name}`"),
@@ -1173,7 +1273,7 @@ fn build_drop_statement(
             "table"     => format!("DROP TABLE `{name}`"),
             _           => format!("DROP {object_type} `{name}`"),
         },
-        "postgres" => match object_type {
+        "postgres" | "cockroachdb" => match object_type {
             "procedure" => format!("DROP PROCEDURE {schema}.{name}"),
             "function"  => format!("DROP FUNCTION {schema}.{name}"),
             "view"      => format!("DROP VIEW {schema}.{name}"),
@@ -1390,19 +1490,51 @@ fn load_query(id: String) -> Result<String, String> {
 #[derive(serde::Serialize)]
 struct DbeaverImportResult {
     imported: Vec<DbeaverImportedConnection>,
-    skipped:  Vec<String>, // names we couldn't map
+    skipped:  Vec<String>,
     error:    Option<String>,
 }
 
 #[derive(serde::Serialize)]
 struct DbeaverImportedConnection {
-    name:     String,
-    engine:   String,
-    host:     String,
-    port:     u16,
-    database: String,
-    username: String,
-    password: String, // returned to frontend to store in keychain
+    name:        String,
+    engine:      String,
+    host:        String,
+    port:        u16,
+    database:    String,
+    username:    String,
+    password:    String,   // returned to frontend to store in keychain; blank if not stored
+    ssl_mode:    String,   // "none" | "prefer" | "require" | "verify-full"
+    read_only:   bool,
+    ssh_enabled: bool,
+    ssh_host:    String,
+    ssh_port:    u16,
+    ssh_user:    String,
+    ssh_key_path: String,
+}
+
+/// DBeaver stores passwords wrapped in ##, e.g. "##mypassword##".
+/// Strip the markers and return the inner value. If the value is just "##"
+/// or has no closing marker treat it as no password stored.
+fn strip_dbeaver_password(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("##") && trimmed.ends_with("##") && trimmed.len() > 4 {
+        trimmed[2..trimmed.len() - 2].to_string()
+    } else if trimmed == "##" || trimmed.is_empty() {
+        String::new()
+    } else {
+        // No markers — plain text password (older DBeaver versions)
+        trimmed.to_string()
+    }
+}
+
+/// Map DBeaver sslmode string (from properties block) to DbArk ssl_mode value.
+fn map_ssl_mode(dbeaver_ssl: &str) -> &'static str {
+    match dbeaver_ssl.to_lowercase().as_str() {
+        "disable" | "disabled" | "false" | "none" => "none",
+        "require" | "required"                     => "require",
+        "verify-full" | "verify_full"              => "verify-full",
+        _                                          => "prefer",
+    }
 }
 
 #[tauri::command]
@@ -1463,20 +1595,44 @@ fn import_dbeaver_connections() -> String {
             .unwrap_or("Unnamed")
             .to_string();
 
+        // DBeaver uses `provider` + `driver` together to identify the engine.
+        // `provider` alone is not enough — both MySQL and MariaDB share
+        // provider=mysql, and both Postgres and CockroachDB share
+        // provider=postgresql. Always check `driver` first.
         let provider = conn.get("provider")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_lowercase();
+        let driver = conn.get("driver")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
 
-        // Map DBeaver provider to DbArk engine
-        let engine = match provider.as_str() {
-            p if p.contains("postgresql") => "postgres",
-            p if p.contains("mysql")      => "mysql",
-            p if p.contains("sqlite")     => "sqlite",
-            p if p.contains("sqlserver") || p.contains("mssql") => "sqlserver",
-            _ => {
-                skipped.push(format!("{} (unsupported provider: {})", name, provider));
-                continue;
+        let engine = if driver.contains("cockroach") {
+            "cockroachdb"
+        } else if driver.contains("mariadb") {
+            "mariadb"
+        } else if driver.contains("mysql") {
+            "mysql"
+        } else if driver.contains("postgresql") || driver.contains("postgres") {
+            "postgres"
+        } else if driver.contains("sqlite") {
+            "sqlite"
+        } else if driver.contains("sqlserver") || driver.contains("mssql") {
+            "sqlserver"
+        } else {
+            // Fall back to provider when driver gives no useful signal
+            match provider.as_str() {
+                p if p.contains("mysql")                            => "mysql",
+                p if p.contains("postgresql")                       => "postgres",
+                p if p.contains("sqlite")                           => "sqlite",
+                p if p.contains("sqlserver") || p.contains("mssql") => "sqlserver",
+                _ => {
+                    skipped.push(format!(
+                        "{} (unsupported provider: {}, driver: {})", name, provider, driver
+                    ));
+                    continue;
+                }
             }
         };
 
@@ -1485,33 +1641,100 @@ fn import_dbeaver_connections() -> String {
             None    => { skipped.push(format!("{} (no configuration)", name)); continue; }
         };
 
-        let host     = config.get("host").and_then(|v| v.as_str()).unwrap_or("localhost").to_string();
-        let database = config.get("database").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let host = config.get("host")
+            .and_then(|v| v.as_str())
+            .unwrap_or("localhost")
+            .to_string();
+
+        // Treat empty database as absent rather than passing "" to the driver
+        let database = config.get("database")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let default_port: u16 = match engine {
-            "postgres"  => 5432,
-            "mysql"     => 3306,
-            "sqlserver" => 1433,
-            _           => 0,
+            "postgres"    => 5432,
+            "cockroachdb" => 26257,
+            "mysql"       => 3306,
+            "mariadb"     => 3306,
+            "sqlserver"   => 1433,
+            _             => 0,
         };
         let port: u16 = config.get("port")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
+            .and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
             .or_else(|| config.get("port").and_then(|v| v.as_u64()).map(|n| n as u16))
             .unwrap_or(default_port);
 
-        // Credentials — DBeaver stores them under configuration.credentials
-        let creds    = config.get("credentials");
-        let username = creds.and_then(|c| c.get("user"))
+        // Credentials: DBeaver stores user/password directly under `configuration`,
+        // not under a nested `credentials` block.
+        let username = config.get("user")
             .and_then(|v| v.as_str())
-            .unwrap_or("").to_string();
-        let password = creds.and_then(|c| c.get("password"))
+            .unwrap_or("")
+            .to_string();
+        let raw_password = config.get("password")
             .and_then(|v| v.as_str())
-            .unwrap_or("").to_string();
+            .unwrap_or("");
+        let password = strip_dbeaver_password(raw_password);
+
+        // SSL mode — read from configuration.properties.sslmode (Postgres/CockroachDB)
+        // or configuration.properties.useSSL (MySQL/MariaDB dialect).
+        let props = config.get("properties");
+        let ssl_mode = props
+            .and_then(|p| p.get("sslmode")).and_then(|v| v.as_str())
+            .or_else(|| props.and_then(|p| p.get("useSSL")).and_then(|v| v.as_str()))
+            .map(map_ssl_mode)
+            .unwrap_or("prefer")
+            .to_string();
+
+        // read-only flag
+        let read_only = config.get("read-only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // SSH tunnel
+        let (ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_key_path) =
+            if let Some(tunnel) = config.get("tunnel-configuration") {
+                let t_type = tunnel.get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if t_type == "SSH_TUNNEL" {
+                    let t_host = tunnel.get("host")
+                        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let t_port = tunnel.get("port")
+                        .and_then(|v| v.as_str()).and_then(|s| s.parse().ok())
+                        .or_else(|| tunnel.get("port").and_then(|v| v.as_u64()).map(|n| n as u16))
+                        .unwrap_or(22);
+                    let t_user = tunnel.get("user")
+                        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let t_key = tunnel
+                        .get("impl-properties")
+                        .and_then(|p| p.get("privKeyPath"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    (!t_host.is_empty(), t_host, t_port, t_user, t_key)
+                } else {
+                    (false, String::new(), 22, String::new(), String::new())
+                }
+            } else {
+                (false, String::new(), 22, String::new(), String::new())
+            };
 
         imported.push(DbeaverImportedConnection {
-            name, engine: engine.to_string(),
-            host, port, database, username, password,
+            name,
+            engine: engine.to_string(),
+            host,
+            port,
+            database,
+            username,
+            password,
+            ssl_mode,
+            read_only,
+            ssh_enabled,
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            ssh_key_path,
         });
     }
 
@@ -1529,7 +1752,38 @@ fn main() {
         ("natives/SchemaExplorer.dll",    HASH_SCHEMAEXPLORER),
         ("natives/duckdb.dll",            HASH_DUCKDB),
         ("natives/SshTunnel.dll", HASH_SSHTUNNEL),
+        ("natives/sqlcipher.dll",         HASH_SQLCIPHER),
     ];
+
+    // Generate or retrieve the state.db encryption key from keychain
+    let history_key = {
+        let target = "dbark:statedb:encryption";
+        let username = "dbark";
+        match keyring::Entry::new(target, username) {
+            Ok(entry) => match entry.get_password() {
+                Ok(k) => k,
+                Err(_) => {
+                    // First run — generate a new key and store it
+                    let new_key: String = (0..32)
+                        .map(|_| format!("{:02x}", rand::random::<u8>()))
+                        .collect();
+                    let _ = entry.set_password(&new_key);
+                    new_key
+                }
+            },
+            Err(_) => String::new(),
+        }
+    };
+
+    // Pass key to QueryHistory DLL
+    unsafe {
+        if let Ok(func) = get_query_history()
+            .get::<unsafe extern "C" fn(*const c_char)>(b"init_history_key")
+        {
+            let c_key = CString::new(history_key).unwrap_or_default();
+            func(c_key.as_ptr());
+        }
+    }
 
     for (path, expected) in &dlls {
         if !verify_dll(path, expected) {
@@ -1538,6 +1792,7 @@ fn main() {
         }
     }
 
+    get_sqlcipher();
     get_query_executor();
     get_connection_manager();
     get_file_query_engine();

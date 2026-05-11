@@ -214,8 +214,8 @@ public static class FileQueryEngineLib
 
             var sql = engine.ToLower() switch
             {
-                "mysql" => "SHOW TABLES",
-                "postgres" => "SELECT tablename AS table_name FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+                "mysql" or "mariadb" => "SHOW TABLES",
+                "postgres" or "cockroachdb" => "SELECT tablename AS table_name FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
                 "sqlite" => "SELECT name AS table_name FROM sqlite_master WHERE type='table' ORDER BY name",
                 _ => throw new Exception($"Unsupported engine: {engine}")
             };
@@ -223,7 +223,7 @@ public static class FileQueryEngineLib
             var jsonResult = ExecuteDbQuery(connectionString, engine, sql);
             var doc = JsonDocument.Parse(jsonResult);
             if (doc.RootElement.TryGetProperty("error", out var err))
-                return Marshal.StringToCoTaskMemUTF8($"{{\"error\":{JsonSerializer.Serialize(err.GetString())}}}");
+                return Marshal.StringToCoTaskMemUTF8($"{{\"error\":{JsonEscapeString(err.GetString() ?? "")}}}");
 
             var tables = new List<string>();
             foreach (var row in doc.RootElement.GetProperty("rows").EnumerateArray())
@@ -240,7 +240,7 @@ public static class FileQueryEngineLib
         }
         catch (Exception ex)
         {
-            return Marshal.StringToCoTaskMemUTF8($"{{\"error\":{JsonSerializer.Serialize(ex.Message)}}}");
+            return Marshal.StringToCoTaskMemUTF8($"{{\"error\":{JsonEscapeString(ex.Message)}}}");
         }
     }
 
@@ -310,7 +310,7 @@ public static class FileQueryEngineLib
         }
         catch (Exception ex)
         {
-            return Marshal.StringToCoTaskMemUTF8($"{{\"error\":{JsonSerializer.Serialize(ex.Message)}}}");
+            return Marshal.StringToCoTaskMemUTF8($"{{\"error\":{JsonEscapeString(ex.Message)}}}");
         }
     }
 
@@ -320,8 +320,8 @@ public static class FileQueryEngineLib
     {
         return engine.ToLower() switch
         {
-            "mysql" => ExecuteMySql(connectionString, sql),
-            "postgres" => ExecutePostgres(connectionString, sql),
+            "mysql" or "mariadb" => ExecuteMySql(connectionString, sql),
+            "postgres" or "cockroachdb" => ExecutePostgres(connectionString, sql),
             "sqlite" => ExecuteSqliteDb(connectionString, sql),
             _ => throw new Exception($"Unsupported engine: {engine}")
         };
@@ -525,6 +525,21 @@ public static class FileQueryEngineLib
         return Marshal.StringToCoTaskMemUTF8(
             JsonSerializer.Serialize(err, FileQueryJsonContext.Default.FileQueryError));
     }
+
+    // ---- JSON string helper (avoids reflection-based JsonSerializer for plain strings) --
+
+    /// <summary>
+    /// Returns a JSON-encoded quoted string without using reflection-based JsonSerializer.
+    /// Safe to call from NativeAOT — no type metadata required.
+    /// </summary>
+    private static string JsonEscapeString(string s) =>
+        "\"" + s
+            .Replace("\\", "\\\\")
+            .Replace("\"", "\\\"")
+            .Replace("\n", "\\n")
+            .Replace("\r", "\\r")
+            .Replace("\t", "\\t")
+        + "\"";
 
     // ---- winsqlite3.dll P/Invoke (ships with Windows 10/11) --
     private const string SqliteDll = "winsqlite3.dll";

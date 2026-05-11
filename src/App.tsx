@@ -194,10 +194,12 @@ interface PendingEdit {
 // ---- Engine badge -----------------------------------------
 function EngineBadge({ engine }: { engine: string }) {
   const colors: Record<string, string> = {
-    mysql:     "#f59e0b",
-    sqlserver: "#3b82f6",
-    postgres:  "#6c63ff",
-    sqlite:    "#10b981",
+    mysql:       "#f59e0b",
+    mariadb:     "#c0392b",
+    sqlserver:   "#3b82f6",
+    postgres:    "#6c63ff",
+    cockroachdb: "#6933ff",
+    sqlite:      "#10b981",
   };
   const color = colors[engine.toLowerCase()] ?? "#6b7280";
   return (
@@ -394,7 +396,7 @@ function AddConnectionForm({
 
 
   const defaultPort: Record<string, number> = {
-    mysql: 3306, sqlserver: 1433, postgres: 5432, sqlite: 0,
+    mysql: 3306, mariadb: 3306, sqlserver: 1433, postgres: 5432, cockroachdb: 26257, sqlite: 0,
   };
 
   const fieldStyle: React.CSSProperties = {
@@ -435,6 +437,7 @@ function AddConnectionForm({
         sshUser:     form.sshUser,
         sshKeyPath:  form.sshKeyPath,
       };
+
       const result = await invoke<string>("save_connection", {
         requestJson: JSON.stringify(request),
       });
@@ -554,8 +557,10 @@ function AddConnectionForm({
         <select style={fieldStyle} value={form.engine}
           onChange={e => setForm(f => ({ ...f, engine: e.target.value }))}>
           <option value="mysql">MySQL</option>
+          <option value="mariadb">MariaDB</option>
           <option value="sqlserver">SQL Server</option>
           <option value="postgres">PostgreSQL</option>
+          <option value="cockroachdb">CockroachDB</option>
           <option value="sqlite">SQLite</option>
         </select>
       </label>
@@ -862,7 +867,7 @@ function ResultsGrid({
   // Detect table name from result.sql (best effort)
   const tableName = useMemo(() => {
     const sql = result.sql ?? "";
-    const match = sql.match(/FROM\s+[\[\`"]?(\w+)[\]\`"]?/i);
+    const match = sql.match(/FROM\s+(?:\w+\.)*[\[\`"]?(\w+)[\]\`"]?/i);
     return match?.[1] ?? "";
   }, [result.sql]);
 
@@ -1442,6 +1447,7 @@ function App() {
     updateActiveTab({ joinTables: tables });
   }, [activeTabId])
   const autocompleteRegistered = useRef(false);
+  const tokensProviderRegistered = useRef(false);
 
   const groupedConnections = useMemo(() => {
     const groups = new Map<string, ConnectionConfig[]>();
@@ -2136,8 +2142,14 @@ function App() {
             : ""
         }`;
       case "mysql":
+      case "mariadb":
         return `CALL \`${proc.name}\`(${paramList.join(", ")})`;
       case "postgres":
+        return `CALL ${proc.schema}.${proc.name}(${paramList.join(", ")})`;
+      case "cockroachdb":
+        // CockroachDB v23.1+ supports CREATE PROCEDURE with CALL syntax.
+        // SQL-language procedures (SELECT-only) work on the free tier.
+        // DML procedures require LANGUAGE plpgsql (enterprise-only).
         return `CALL ${proc.schema}.${proc.name}(${paramList.join(", ")})`;
       default:
         return `-- ${engine} does not support stored procedures`;
@@ -2332,11 +2344,149 @@ function App() {
   useEffect(() => { runQueryRef.current = runQuery; }, [runQuery]);
   //End Run Query Function
 
+  const handleBeforeMount = useCallback((monaco: typeof monacoEditor) => {
+      // Pre-register the 'sql' language ID so Monaco's built-in SQL loader
+      // never fires. Without this, Monaco loads its default SQL grammar after
+      // handleEditorMount, overwriting setMonarchTokensProvider silently.
+      if (!tokensProviderRegistered.current) {
+        tokensProviderRegistered.current = true;
+        monaco.languages.register({ id: "sql" });
+         monaco.languages.setMonarchTokensProvider("sql", {
+        defaultToken: "",
+        tokenPostfix: ".sql",
+        ignoreCase: true,
+
+        brackets: [
+          { open: "[", close: "]", token: "delimiter.square" },
+          { open: "(", close: ")", token: "delimiter.parenthesis" },
+        ],
+
+        keywords: [
+          // Standard SQL
+          "ADD", "ALL", "ALTER", "AND", "ANY", "AS", "ASC", "AUTHORIZATION",
+          "BACKUP", "BEGIN", "BETWEEN", "BREAK", "BY",
+          "CASCADE", "CASE", "CHECK", "CLOSE", "CLUSTERED", "COALESCE",
+          "COLLATE", "COLUMN", "COMMIT", "CONSTRAINT", "CONTINUE", "CONVERT",
+          "CREATE", "CROSS", "CURRENT", "CURRENT_DATE", "CURRENT_TIME", "CURSOR",
+          "DATABASE", "DECLARE", "DEFAULT", "DELETE", "DESC", "DISTINCT",
+          "DOUBLE", "DROP",
+          "ELSE", "END", "ESCAPE", "EXCEPT", "EXISTS", "EXIT", "EXTERNAL",
+          "FETCH", "FOR", "FOREIGN", "FROM", "FULL", "FUNCTION",
+          "GOTO", "GRANT", "GROUP",
+          "HAVING",
+          "IF", "IN", "INDEX", "INNER", "INSERT", "INTERSECT", "INTO", "IS",
+          "JOIN", "KEY", "KILL",
+          "LEFT", "LIKE", "LOAD",
+          "MERGE",
+          "NATIONAL", "NOCHECK", "NOT", "NULL", "NULLIF",
+          "OF", "OFF", "ON", "OPEN", "OPTION", "OR", "ORDER", "OUTER", "OVER",
+          "PERCENT", "PIVOT", "PLAN", "PRECISION", "PRIMARY", "PRINT", "PROC",
+          "PROCEDURE", "PUBLIC",
+          "READ", "RECONFIGURE", "REFERENCES", "REPLACE", "REPLICATION",
+          "RESTORE", "RESTRICT", "RETURN", "REVERT", "REVOKE", "RIGHT",
+          "ROLLBACK", "RULE",
+          "SAVE", "SCHEMA", "SELECT", "SESSION_USER", "SET", "SHUTDOWN",
+          "SOME", "STATISTICS", "SYSTEM_USER",
+          "TABLE", "THEN", "TO", "TOP", "TRAN", "TRANSACTION", "TRIGGER",
+          "TRUNCATE", "UNION", "UNIQUE", "UNPIVOT", "UPDATE", "USE", "USER",
+          "VALUES", "VIEW",
+          "WAITFOR", "WHEN", "WHERE", "WHILE", "WITH", "WITHIN",
+          // Stored procedure / routine keywords
+          // CALL is the standard for MySQL, MariaDB, CockroachDB, and Postgres.
+          // EXEC / EXECUTE are the SQL Server equivalents.
+          "CALL", "EXEC", "EXECUTE",
+          // Additional dialect keywords
+          "DESCRIBE", "EXPLAIN", "SHOW", "LIMIT", "OFFSET",
+          "DO", "HANDLER", "RETURNS", "LANGUAGE", "DECLARE",
+        ],
+
+        builtinFunctions: [
+          "ABS", "AVG", "CAST", "CEILING", "COALESCE", "CONCAT", "CONVERT",
+          "COUNT", "DAY", "DATEDIFF", "FLOOR", "GETDATE", "ISNULL", "LEN",
+          "LOWER", "MAX", "MIN", "MONTH", "NOW", "NULLIF", "ROUND",
+          "ROW_NUMBER", "SUBSTRING", "SUM", "TRIM", "UPPER", "YEAR",
+          "TRY_CAST", "TRY_CONVERT", "COALESCE", "NULLIF",
+        ],
+
+        tokenizer: {
+          root: [
+            { include: "@comments" },
+            { include: "@whitespace" },
+            [/[;,.]/, "delimiter"],
+            [/[()[\]]/, "@brackets"],
+            [/[<>=!%&+\-*/|~^]/, "operator"],
+            [/\d*\.\d+([eE][-+]?\d+)?/, "number.float"],
+            [/\d+/, "number"],
+            [/'/, { token: "string", next: "@stringSingle" }],
+            [/"/, { token: "string.double", next: "@stringDouble" }],
+            [/`/, { token: "string.backtick", next: "@stringBacktick" }],
+            [/\[/, { token: "string.bracket", next: "@stringBracket" }],
+            [
+              /[a-zA-Z_]\w*/,
+              {
+                cases: {
+                  "@keywords": "keyword",
+                  "@builtinFunctions": "predefined",
+                  "@default": "identifier",
+                },
+              },
+            ],
+          ],
+
+          comments: [
+            [/--.*$/, "comment"],
+            [/\/\*/, { token: "comment.quote", next: "@blockComment" }],
+          ],
+
+          blockComment: [
+            [/[^*/]+/, "comment"],
+            [/\*\//, { token: "comment.quote", next: "@pop" }],
+            [/./, "comment"],
+          ],
+
+          whitespace: [[/\s+/, "white"]],
+
+          stringSingle: [
+            [/[^']+/, "string"],
+            [/''/, "string"],
+            [/'/, { token: "string", next: "@pop" }],
+          ],
+
+          stringDouble: [
+            [/[^"]+/, "string.double"],
+            [/""/, "string.double"],
+            [/"/, { token: "string.double", next: "@pop" }],
+          ],
+
+          stringBacktick: [
+            [/[^`]+/, "string.backtick"],
+            [/``/, "string.backtick"],
+            [/`/, { token: "string.backtick", next: "@pop" }],
+          ],
+
+          stringBracket: [
+            [/[^\]]+/, "string.bracket"],
+            [/\]/, { token: "string.bracket", next: "@pop" }],
+          ],
+        },
+      });
+      }
+    }, []);
+
   const handleEditorMount: OnMount = (editor, monaco) => {
       editorRef.current = editor;
 
+    // Register extended SQL tokenizer once — adds CALL, EXEC, EXECUTE,
+    // PROCEDURE and other keywords missing from Monaco's built-in SQL grammar.
+    // Must use setMonarchTokensProvider which replaces the tokenizer entirely,
+    // so a complete tokenizer is required rather than a partial patch.
+    if (!tokensProviderRegistered.current) {
+      tokensProviderRegistered.current = true;
+    }
+
     if (!autocompleteRegistered.current) {
       autocompleteRegistered.current = true;
+
       monaco.languages.registerCompletionItemProvider("sql", {
         triggerCharacters: [" ", ".", "\n"],
         provideCompletionItems: (model: monacoEditor.editor.ITextModel, position: monacoEditor.Position) => {
@@ -2350,7 +2500,7 @@ function App() {
 
           const suggestions: monacoEditor.languages.CompletionItem[] = [];
 
-          // SQL keywords
+          // SQL keywords — kept in sync with the tokenizer keywords above
           const keywords = [
             "SELECT", "FROM", "WHERE", "JOIN", "LEFT JOIN", "RIGHT JOIN",
             "INNER JOIN", "ON", "GROUP BY", "ORDER BY", "HAVING", "LIMIT",
@@ -2358,6 +2508,8 @@ function App() {
             "DROP TABLE", "ALTER TABLE", "AND", "OR", "NOT", "IN", "IS NULL",
             "IS NOT NULL", "LIKE", "BETWEEN", "DISTINCT", "COUNT", "SUM",
             "AVG", "MIN", "MAX", "AS", "CASE", "WHEN", "THEN", "ELSE", "END",
+            // Procedure / function call keywords
+            "CALL", "EXEC", "EXECUTE",
           ];
 
           keywords.forEach(kw => {
@@ -2561,8 +2713,8 @@ function App() {
     try {
       // Use setTimeout to ensure this runs after execute_query fully completes
       await new Promise(resolve => setTimeout(resolve, 0));
-      
-      await invoke<boolean>("add_history_entry", {
+
+      const result = await invoke<boolean>("add_history_entry", {
         connectionId:   conn.id,
         connectionName: conn.name,
         sql:            sql.trim(),
@@ -2726,7 +2878,7 @@ function handleCellCommit(
 
     // Find table info
     const sqlText  = result.sql ?? "";
-    const match    = sqlText.match(/FROM\s+[\[\`"]?(\w+)[\]\`"]?/i);
+    const match    = sqlText.match(/FROM\s+(?:\w+\.)*[\[\`"]?(\w+)[\]\`"]?/i);
     const tableName = match?.[1] ?? "";
     const tableInfo = schema?.tables.find(
       t => t.name.toLowerCase() === tableName.toLowerCase());
@@ -3990,50 +4142,52 @@ function handleCellCommit(
           return (
             <div key={groupKey}>
               {/* Group header — only show if named group */}
-              {groupLabel && (
-                <div
-                  onClick={() => toggleGroup(groupKey)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "5px 14px",
-                    cursor: "pointer",
-                    borderBottom: "1px solid #1e2026",
-                    background: "#0e0f11",
-                    userSelect: "none",
-                  }}
-                  onMouseEnter={e =>
-                    (e.currentTarget.style.background = "#13141a")}
-                  onMouseLeave={e =>
-                    (e.currentTarget.style.background = "#0e0f11")}
-                >
-                  <span style={{
-                    fontSize: 8, color: "#4b5563",
-                    flexShrink: 0, width: 10,
-                  }}>
-                    {collapsed ? "▸" : "▾"}
-                  </span>
-                  <span style={{
-                    fontSize: 10, fontWeight: 600,
-                    color: "#4b5563", flex: 1,
-                    textTransform: "uppercase",
-                    letterSpacing: ".06em",
-                    fontFamily: "monospace",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}>
-                    {groupLabel}
-                  </span>
-                  <span style={{
-                    fontSize: 9, color: "#374151",
-                    fontFamily: "monospace", flexShrink: 0,
-                  }}>
-                    {groupConns.length}
-                  </span>
-                </div>
-              )}
+             {groupLabel && (
+              <div
+                onClick={() => toggleGroup(groupKey)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "5px 14px",
+                  cursor: "pointer",
+                  borderBottom: "1px solid #1e2026",
+                  borderTop: "2px solid #13141a",        // ← adds top separation
+                  background: "#16181c",                  // ← slightly lighter, distinct from #0e0f11
+                  userSelect: "none",
+                }}
+                onMouseEnter={e =>
+                  (e.currentTarget.style.background = "#1a1c22")}
+                onMouseLeave={e =>
+                  (e.currentTarget.style.background = "#16181c")}
+              >
+                <span style={{
+                  fontSize: 8, color: "#4b5563",
+                  flexShrink: 0, width: 10,
+                }}>
+                  {collapsed ? "▸" : "▾"}
+                </span>
+                <span style={{
+                  fontSize: 10, fontWeight: 600,
+                  color: "#6c63ff",                       // ← accent color instead of #4b5563
+                  flex: 1,
+                  textTransform: "uppercase",
+                  letterSpacing: ".06em",
+                  fontFamily: "monospace",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}>
+                  {groupLabel}
+                </span>
+                <span style={{
+                  fontSize: 9, color: "#374151",
+                  fontFamily: "monospace", flexShrink: 0,
+                }}>
+                  {groupConns.length}
+                </span>
+              </div>
+            )}
 
               {/* Connection rows — hidden when group is collapsed */}
               {!collapsed && groupConns.map((conn) => (
@@ -4158,8 +4312,8 @@ function handleCellCommit(
                             expanded={expandedSections.has(`${conn.id}-tables`)}
                             onToggle={() => toggleSection(`${conn.id}-tables`)}
                           >
-                            {conn.engine === "postgres" && tablesBySchema.size > 1
-                              ? // Postgres with multiple schemas — show schema grouping
+                            {(conn.engine === "postgres" || conn.engine === "cockroachdb") && tablesBySchema.size > 1
+                              ? // Postgres/CockroachDB with multiple schemas — show schema grouping
                                 [...tablesBySchema.entries()].map(([schemaName, tables]) => (
                                   <div key={schemaName}>
                                     {/* Schema header */}
@@ -4208,7 +4362,7 @@ function handleCellCommit(
 
                                     {/* Tables under this schema */}
                                     {expandedSchemas.has(schemaName) && tables.map(table => (
-                                      <div key={table.name}>
+                                      <div key={`${schemaName}.${table.name}`}>
                                         <div
                                           onClick={() => {
                                             const next = new Set(expandedTables);
@@ -4301,7 +4455,7 @@ function handleCellCommit(
                                 ))
                               : // All other engines (or single-schema Postgres)
                                 safeSchema.tables.map(table => (
-                                  <div key={table.name}>
+                                  <div key={`${table.schema ?? "public"}.${table.name}`}>
                                     <div
                                       onClick={() => {
                                         const next = new Set(expandedTables);
@@ -5170,6 +5324,7 @@ function handleCellCommit(
         {/* Editor */}
         <div style={{ height: editorHeight, minHeight: editorHeight, maxHeight: editorHeight, borderBottom: "1px solid #1e2026", flexShrink: 0, overflow: "hidden" }}>
           <Editor
+            beforeMount={handleBeforeMount}
             height="100%"
             defaultLanguage="sql"
             theme="vs-dark"

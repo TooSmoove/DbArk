@@ -5,6 +5,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 public class ConnectionConfig
 {
@@ -137,7 +138,7 @@ public static class ConnectionManagerLib
             }
             else
             {
-                if (!IsValidIdentifier(request.Database))
+                if (!string.IsNullOrEmpty(request.Database) && !Regex.IsMatch(request.Database, @"^[a-zA-Z0-9_\-\.]+$"))
                     return Marshal.StringToCoTaskMemUTF8(
                         $"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
             }
@@ -160,9 +161,9 @@ public static class ConnectionManagerLib
                 if (request.Database.Contains(';') || request.Database.Contains('='))
                     return Marshal.StringToCoTaskMemUTF8("ERROR: Invalid characters in SQLite path");
             }
-            else if (!IsValidIdentifier(request.Database))
+            else if (!string.IsNullOrEmpty(request.Database) && !IsValidIdentifier(request.Database))
             {
-                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid database name '{request.Database}'");
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
             }
 
             if (!Directory.Exists(folderPath))
@@ -279,7 +280,9 @@ public static class ConnectionManagerLib
     {
         "sqlserver" => 1433,
         "mysql" => 3306,
+        "mariadb" => 3306,
         "postgres" => 5432,
+        "cockroachdb" => 26257,
         "sqlite" => 0,
         _ => 3306
     };
@@ -322,7 +325,7 @@ public static class ConnectionManagerLib
         if (!IsValidPort(config.Port))
             throw new Exception($"Invalid port value in {Path.GetFileName(filePath)}: '{config.Port}'");
 
-        if (config.Engine != "sqlite" && !IsValidIdentifier(config.Database))
+        if (config.Engine != "sqlite" && !string.IsNullOrEmpty(config.Database) && !IsValidIdentifier(config.Database))
             throw new Exception($"Invalid database value in {Path.GetFileName(filePath)}: '{config.Database}'");
 
         if (!config.WindowsAuth && !IsValidIdentifier(config.Username))
@@ -357,7 +360,7 @@ public static class ConnectionManagerLib
     }
 
     private static bool IsValidEngine(string engine) =>
-        engine is "mysql" or "postgres" or "sqlite" or "sqlserver";
+        engine is "mysql" or "mariadb" or "postgres" or "cockroachdb" or "sqlite" or "sqlserver";
 
     private static bool IsValidSslMode(string sslMode) =>
     sslMode is "none" or "prefer" or "require" or "verify-full";

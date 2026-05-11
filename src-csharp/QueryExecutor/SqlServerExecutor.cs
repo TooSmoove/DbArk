@@ -206,7 +206,7 @@ public static class SqlServerExecutor
     // ---- Helpers ------------------------------------------
     private static IntPtr Error(string message)
     {
-        var err = new ErrorResult { error = message };
+        var err = new ErrorResult { Error = message };
         return Marshal.StringToCoTaskMemUTF8(
             JsonSerializer.Serialize(err, AppJsonContext.Default.ErrorResult));
     }
