@@ -3,6 +3,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import Editor from "@monaco-editor/react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
+import { format as formatSql } from "sql-formatter";
 import {
   useReactTable,
   getCoreRowModel,
@@ -12,6 +13,8 @@ import {
 } from "@tanstack/react-table";
 
 import { useVirtualizer } from "@tanstack/react-virtual";
+import "./theme.css";   // colors — must come first
+import "./index.css";   // typography & layout
 
 // ---- Types ------------------------------------------------
 interface ConnectionConfig {
@@ -191,6 +194,37 @@ interface PendingEdit {
   newValue:   string;
 }
 
+// ---- Theme ------------------------------------------------
+// Theme preference is stored separately from AppSettings because:
+//   1. It's a per-device UI preference, not a project/connection setting
+//   2. localStorage is the universal convention for theme persistence
+//   3. Avoids a round-trip to Rust for a setting that only the WebView uses
+// "system" follows prefers-color-scheme; "light"/"dark" force a value.
+type ThemePreference = "system" | "light" | "dark";
+type ResolvedTheme   = "light" | "dark";
+
+const THEME_STORAGE_KEY = "dbark_theme";
+
+function readStoredTheme(): ThemePreference {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark" || stored === "system") {
+      return stored;
+    }
+  } catch { /* localStorage unavailable — fall through to default */ }
+  return "system";
+}
+
+function systemPrefersDark(): boolean {
+  return typeof window !== "undefined"
+    && window.matchMedia?.("(prefers-color-scheme: dark)").matches === true;
+}
+
+function resolveTheme(pref: ThemePreference): ResolvedTheme {
+  if (pref === "system") return systemPrefersDark() ? "dark" : "light";
+  return pref;
+}
+
 // ---- Engine badge -----------------------------------------
 function EngineBadge({ engine }: { engine: string }) {
   const colors: Record<string, string> = {
@@ -268,7 +302,7 @@ function JoinTablesPanel({
   if (!activeConnection) return null;
 
   return (
-    <div style={{ borderBottom: "1px solid #1e2026", background: "#13141a" }}>
+    <div style={{ borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
       <button
         onClick={() => setOpen(o => !o)}
         style={{
@@ -279,7 +313,7 @@ function JoinTablesPanel({
           padding: "8px 12px",
           background: "none",
           border: "none",
-          color: "#9ca3af",
+          color: "var(--text-secondary)",
           fontSize: 12,
           cursor: "pointer",
           textAlign: "left",
@@ -290,7 +324,7 @@ function JoinTablesPanel({
         <span>Join DB Tables</span>
         {checked.size > 0 && (
           <span style={{
-            background: "#6c63ff",
+            background: "var(--accent)",
             color: "white",
             borderRadius: 10,
             padding: "1px 7px",
@@ -303,16 +337,16 @@ function JoinTablesPanel({
       </button>
 
       {open && (
-        <div style={{ padding: "8px 12px 12px", borderTop: "1px solid #1e2026" }}>
-          <p style={{ fontSize: 11, color: "#6b7280", margin: "0 0 8px" }}>
-            From <strong style={{ color: "#9ca3af" }}>{activeConnection.name}</strong> —
-            checked tables available as <code style={{ color: "#6c63ff" }}>db_tablename</code>
+        <div style={{ padding: "8px 12px 12px", borderTop: "1px solid var(--border)" }}>
+          <p style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "0 0 8px" }}>
+            From <strong style={{ color: "var(--text-secondary)" }}>{activeConnection.name}</strong> —
+            checked tables available as <code style={{ color: "var(--accent)" }}>db_tablename</code>
           </p>
 
-          {loading && <p style={{ fontSize: 12, color: "#6b7280" }}>Loading tables…</p>}
-          {error   && <p style={{ fontSize: 12, color: "#ef4444" }}>{error}</p>}
+          {loading && <p style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Loading tables…</p>}
+          {error   && <p style={{ fontSize: 12, color: "var(--error)" }}>{error}</p>}
           {!loading && !error && tables.length === 0 && (
-            <p style={{ fontSize: 12, color: "#6b7280" }}>No tables found</p>
+            <p style={{ fontSize: 12, color: "var(--text-tertiary)" }}>No tables found</p>
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
@@ -325,7 +359,7 @@ function JoinTablesPanel({
                 borderRadius: 4,
                 cursor: "pointer",
                 fontSize: 12,
-                color: "#e8e9ec",
+                color: "var(--text)",
               }}>
                 <input
                   type="checkbox"
@@ -336,8 +370,8 @@ function JoinTablesPanel({
                 {checked.has(t) && (
                   <code style={{
                     fontSize: 10,
-                    color: "#6c63ff",
-                    background: "rgba(108,99,255,0.15)",
+                    color: "var(--accent)",
+                    background: "var(--accent-bg)",
                     padding: "1px 5px",
                     borderRadius: 3,
                   }}>
@@ -400,13 +434,13 @@ function AddConnectionForm({
   };
 
   const fieldStyle: React.CSSProperties = {
-    width: "100%", padding: "6px 10px", background: "#0e0f11",
-    border: "1px solid #2d2f36", borderRadius: 6, color: "#e8e9ec",
+    width: "100%", padding: "6px 10px", background: "var(--bg)",
+    border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)",
     fontSize: 12, fontFamily: "monospace", marginTop: 3,
     outline: "none", boxSizing: "border-box",
   };
   const labelStyle: React.CSSProperties = {
-    fontSize: 11, color: "#6b7280", display: "block", marginBottom: 8, width: "100%",
+    fontSize: 11, color: "var(--text-tertiary)", display: "block", marginBottom: 8, width: "100%",
   };
 
   // Save connection handler
@@ -486,7 +520,7 @@ function AddConnectionForm({
 
   return (
     <div style={{ padding: "12px 14px", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column" }}>
-      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 12, color: "#e8e9ec" }}>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 12, color: "var(--text)" }}>
         {editingConnection ? "Edit connection" : "Add connection"}
       </div>
 
@@ -537,7 +571,7 @@ function AddConnectionForm({
                 position: "absolute", right: 8, top: "50%",
                 transform: "translateY(-50%)",
                 background: "none", border: "none",
-                color: "#6b7280", cursor: "pointer",
+                color: "var(--text-tertiary)", cursor: "pointer",
                 fontSize: 12, padding: "2px 4px",
               }}
             >
@@ -545,7 +579,7 @@ function AddConnectionForm({
             </button>
           </div>
           {editingConnection && (
-            <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 4, lineHeight: 1.5 }}>
               Updates the password DevSql uses to connect. Change the password on the server first, then update it here.
             </div>
           )}
@@ -569,7 +603,7 @@ function AddConnectionForm({
       {form.engine === "sqlserver" && (
         <>
           <label style={labelStyle}>
-            Instance Name <span style={{ color: "#4b5563" }}>(optional)</span>
+            Instance Name <span style={{ color: "var(--text-disabled)" }}>(optional)</span>
             <input
               style={fieldStyle}
               type="text"
@@ -587,8 +621,8 @@ function AddConnectionForm({
               style={{ width: 14, height: 14, cursor: "pointer" }}
             />
             <div>
-              <div style={{ fontSize: 12, color: "#e8e9ec", marginBottom: 2 }}>Windows Authentication</div>
-              <div style={{ fontSize: 10, color: "#4b5563" }}>
+              <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 2 }}>Windows Authentication</div>
+              <div style={{ fontSize: 10, color: "var(--text-disabled)" }}>
                 Use current Windows user — no password required
               </div>
             </div>
@@ -600,7 +634,7 @@ function AddConnectionForm({
         SSL Mode
         {form.sshEnabled && (
           <span style={{
-            marginLeft: 8, fontSize: 10, color: "#f59e0b",
+            marginLeft: 8, fontSize: 10, color: "var(--warning)",
             fontFamily: "monospace",
           }}>
             ⚠ Disabled — SSH tunnel provides encryption
@@ -630,7 +664,7 @@ function AddConnectionForm({
 
       {/* SSH Tunnel */}
       <div style={{
-        borderTop: "1px solid #2d2f36",
+        borderTop: "1px solid var(--border)",
         marginTop: 8, paddingTop: 8,
       }}>
         <label style={{ ...labelStyle, display: "flex", alignItems: "center",
@@ -642,10 +676,10 @@ function AddConnectionForm({
             style={{ width: 14, height: 14, cursor: "pointer" }}
           />
           <div>
-            <div style={{ fontSize: 12, color: "#e8e9ec", marginBottom: 2 }}>
+            <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 2 }}>
               SSH Tunnel
             </div>
-            <div style={{ fontSize: 10, color: "#4b5563" }}>
+            <div style={{ fontSize: 10, color: "var(--text-disabled)" }}>
               Connect via SSH port forwarding
             </div>
           </div>
@@ -702,9 +736,9 @@ function AddConnectionForm({
                       setForm(f => ({ ...f, sshKeyPath: selected }));
                   }}
                   style={{
-                    padding: "6px 10px", background: "#1e2026",
-                    border: "1px solid #2d2f36", borderRadius: 6,
-                    color: "#9ca3af", cursor: "pointer", fontSize: 11,
+                    padding: "6px 10px", background: "var(--surface-2)",
+                    border: "1px solid var(--border)", borderRadius: 6,
+                    color: "var(--text-secondary)", cursor: "pointer", fontSize: 11,
                     fontFamily: "monospace", flexShrink: 0,
                   }}
                 >
@@ -713,7 +747,7 @@ function AddConnectionForm({
               </div>
             </label>
             <label style={labelStyle}>
-              SSH Password <span style={{ color: "#4b5563" }}>(if key requires passphrase)</span>
+              SSH Password <span style={{ color: "var(--text-disabled)" }}>(if key requires passphrase)</span>
               <input
                 style={fieldStyle} type="password"
                 value={form.sshPassword ?? ""}
@@ -737,8 +771,8 @@ function AddConnectionForm({
           style={{ width: 14, height: 14, cursor: "pointer" }}
         />
         <div>
-          <div style={{ fontSize: 12, color: "#e8e9ec", marginBottom: 2 }}>Read-only connection</div>
-          <div style={{ fontSize: 10, color: "#4b5563" }}>
+          <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 2 }}>Read-only connection</div>
+          <div style={{ fontSize: 10, color: "var(--text-disabled)" }}>
             Blocks INSERT, UPDATE, DELETE, and DROP at the driver level
           </div>
         </div>
@@ -751,11 +785,11 @@ function AddConnectionForm({
             onChange={e => setForm(f => ({ ...f, color: e.target.value }))}
             style={{ width: 32, height: 28, border: "none", background: "none", cursor: "pointer", flexShrink: 0 }}
           />
-          <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>{form.color}</span>
+          <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace" }}>{form.color}</span>
         </div>
       </label>
 
-      {error && <div style={{ fontSize: 11, color: "#ef4444", marginBottom: 8, wordBreak: "break-word" }}>{error}</div>}
+      {error && <div style={{ fontSize: 11, color: "var(--error)", marginBottom: 8, wordBreak: "break-word" }}>{error}</div>}
 
       {/* Test connection */}
       <div style={{ marginBottom: 8 }}>
@@ -795,8 +829,8 @@ function AddConnectionForm({
           style={{
             width: "100%", padding: "7px 0",
             background: "transparent",
-            color: testing ? "#4b5563" : "#9ca3af",
-            border: "1px solid #2d2f36",
+            color: testing ? "var(--text-disabled)" : "var(--text-secondary)",
+            border: "1px solid var(--border)",
             borderRadius: 6, cursor: testing ? "not-allowed" : "pointer",
             fontSize: 12, fontFamily: "monospace",
           }}
@@ -809,10 +843,10 @@ function AddConnectionForm({
             marginTop: 6, padding: "6px 10px", borderRadius: 6, fontSize: 11,
             fontFamily: "monospace",
             background: testResult === "success"
-              ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
-            color: testResult === "success" ? "#10b981" : "#ef4444",
+              ? "var(--success-bg)" : "var(--error-bg)",
+            color: testResult === "success" ? "var(--success)" : "var(--error)",
             border: `1px solid ${testResult === "success"
-              ? "rgba(16,185,129,0.2)" : "rgba(239,68,68,0.2)"}`,
+              ? "var(--success)" : "var(--error)"}`,
           }}>
             {testResult === "success" ? "✓ " : "✗ "}{testMessage}
           </div>
@@ -821,15 +855,15 @@ function AddConnectionForm({
 
       <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
         <button onClick={handleSave} disabled={saving} style={{
-          flex: 1, padding: "7px 0", background: "#6c63ff", color: "white",
+          flex: 1, padding: "7px 0", background: "var(--accent)", color: "white",
           border: "none", borderRadius: 6, cursor: saving ? "not-allowed" : "pointer",
           fontSize: 12, fontFamily: "monospace",
         }}>
           {saving ? "Saving..." : "Save"}
         </button>
         <button onClick={onCancel} style={{
-          flex: 1, padding: "7px 0", background: "transparent", color: "#6b7280",
-          border: "1px solid #2d2f36", borderRadius: 6, cursor: "pointer",
+          flex: 1, padding: "7px 0", background: "transparent", color: "var(--text-tertiary)",
+          border: "1px solid var(--border)", borderRadius: 6, cursor: "pointer",
           fontSize: 12, fontFamily: "monospace",
         }}>
           Cancel
@@ -895,7 +929,7 @@ function ResultsGrid({
       cell: (info) => {
         const val = info.getValue();
         if (val === null)
-          return <span style={{ color: "#6b7280", fontStyle: "italic" }}>NULL</span>;
+          return <span style={{ color: "var(--text-tertiary)", fontStyle: "italic" }}>NULL</span>;
         return val;
       },
     })
@@ -945,8 +979,8 @@ function ResultsGrid({
       {/* Filter bar */}
       <div style={{
         padding: "6px 14px",
-        borderBottom: "1px solid #1e2026",
-        background: "#13141a",
+        borderBottom: "1px solid var(--border)",
+        background: "var(--surface)",
         display: "flex",
         alignItems: "center",
         gap: 8,
@@ -960,10 +994,10 @@ function ResultsGrid({
           value={filterText}
           onChange={e => setFilterText(e.target.value)}
           style={{
-            background: "#0e0f11",
-            border: "1px solid #2d2f36",
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
             borderRadius: 6,
-            color: "#e8e9ec",
+            color: "var(--text)",
             fontSize: 12,
             fontFamily: "monospace",
             padding: "4px 10px",
@@ -973,13 +1007,13 @@ function ResultsGrid({
         />
         {debouncedFilter && (
           <>
-            <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+            <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace" }}>
               {rows.length} of {result.rowCount} rows
             </span>
             <button
               onClick={() => setFilterText("")}
               style={{
-                background: "none", border: "none", color: "#6b7280",
+                background: "none", border: "none", color: "var(--text-tertiary)",
                 cursor: "pointer", fontSize: 12, padding: "2px 6px",
               }}
             >
@@ -991,7 +1025,7 @@ function ResultsGrid({
           <button
             onClick={() => setSorting([])}
             style={{
-              background: "none", border: "none", color: "#6b7280",
+              background: "none", border: "none", color: "var(--text-tertiary)",
               cursor: "pointer", fontSize: 11, padding: "2px 6px",
               fontFamily: "monospace", marginLeft: "auto",
             }}
@@ -1005,15 +1039,15 @@ function ResultsGrid({
       {pendingEdits.length > 0 && (
         <div style={{
           padding: "6px 14px",
-          borderBottom: "1px solid #1e2026",
-          background: "rgba(245,158,11,0.08)",
+          borderBottom: "1px solid var(--border)",
+          background: "var(--warning-bg)",
           display: "flex",
           alignItems: "center",
           gap: 10,
           flexShrink: 0,
         }}>
           <span style={{
-            fontSize: 11, color: "#f59e0b",
+            fontSize: 11, color: "var(--warning)",
             fontFamily: "monospace", flex: 1,
           }}>
             ⚠ {pendingEdits.length} unsaved change{pendingEdits.length > 1 ? "s" : ""}
@@ -1022,7 +1056,7 @@ function ResultsGrid({
             onClick={onCommitAll}
             style={{
               padding: "4px 12px",
-              background: "#10b981", color: "white",
+              background: "var(--success)", color: "white",
               border: "none", borderRadius: 6,
               cursor: "pointer", fontSize: 11,
               fontFamily: "monospace",
@@ -1034,8 +1068,8 @@ function ResultsGrid({
             onClick={onRollbackAll}
             style={{
               padding: "4px 12px",
-              background: "transparent", color: "#6b7280",
-              border: "1px solid #2d2f36", borderRadius: 6,
+              background: "transparent", color: "var(--text-tertiary)",
+              border: "1px solid var(--border)", borderRadius: 6,
               cursor: "pointer", fontSize: 11,
               fontFamily: "monospace",
             }}
@@ -1060,18 +1094,18 @@ function ResultsGrid({
                     onClick={header.column.getToggleSortingHandler()}
                     style={{
                       padding: "7px 14px", textAlign: "left",
-                      background: "#1e2026", borderBottom: "1px solid #2d2f36",
-                      color: header.column.getIsSorted() ? "#e8e9ec" : "#9ca3af",
+                      background: "var(--surface-2)", borderBottom: "1px solid var(--border)",
+                      color: header.column.getIsSorted() ? "var(--text)" : "var(--text-secondary)",
                       fontWeight: 500, whiteSpace: "nowrap",
                       cursor: "pointer", userSelect: "none",
                     }}
                   >
                     <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       {flexRender(header.column.columnDef.header, header.getContext())}
-                      {header.column.getIsSorted() === "asc"  && <span style={{ color: "#6c63ff" }}>↑</span>}
-                      {header.column.getIsSorted() === "desc" && <span style={{ color: "#6c63ff" }}>↓</span>}
+                      {header.column.getIsSorted() === "asc"  && <span style={{ color: "var(--accent)" }}>↑</span>}
+                      {header.column.getIsSorted() === "desc" && <span style={{ color: "var(--accent)" }}>↓</span>}
                       {!header.column.getIsSorted() && (
-                        <span style={{ color: "#2d2f36", fontSize: 10 }}>⇅</span>
+                        <span style={{ color: "var(--border)", fontSize: 10 }}>⇅</span>
                       )}
                     </span>
                   </th>
@@ -1114,20 +1148,20 @@ function ResultsGrid({
                       }
                       style={{
                         padding: isEditing ? "0" : "5px 14px",
-                        borderBottom: "1px solid #1e2026",
-                        color: isModified ? "#f59e0b" : "#e8e9ec",
+                        borderBottom: "1px solid var(--border)",
+                        color: isModified ? "var(--warning)" : "var(--text)",
                         whiteSpace: "nowrap",
                         maxWidth: 320,
                         overflow: "hidden",
                         textOverflow: isEditing ? "clip" : "ellipsis",
                         cursor: canEdit ? "pointer" : "default",
                         background: isEditing
-                          ? "rgba(108,99,255,0.15)"
+                          ? "var(--accent-bg)"
                           : isModified
-                          ? "rgba(245,158,11,0.08)"
+                          ? "var(--warning-bg)"
                           : copiedCell === cell.id
-                          ? "rgba(108,99,255,0.15)"
-                          : virtualRow.index % 2 === 0 ? "#0e0f11" : "#13141a",
+                          ? "var(--accent-bg)"
+                          : virtualRow.index % 2 === 0 ? "var(--bg)" : "var(--surface)",
                         transition: "background .15s",
                       }}
                       onClick={() => {
@@ -1157,10 +1191,10 @@ function ResultsGrid({
                             height: "100%",
                             minHeight: 30,
                             padding: "5px 14px",
-                            background: "rgba(108,99,255,0.15)",
+                            background: "var(--accent-bg)",
                             border: "none",
-                            borderBottom: "2px solid #6c63ff",
-                            color: "#e8e9ec",
+                            borderBottom: "2px solid var(--accent)",
+                            color: "var(--text)",
                             fontSize: 13,
                             fontFamily: "monospace",
                             outline: "none",
@@ -1189,9 +1223,9 @@ function ResultsGrid({
                         />
                       ) : (
                         cellValue === null
-                          ? <span style={{ color: "#6b7280", fontStyle: "italic" }}>NULL</span>
+                          ? <span style={{ color: "var(--text-tertiary)", fontStyle: "italic" }}>NULL</span>
                           : isModified
-                          ? <span style={{ color: "#f59e0b" }}>{cellValue}</span>
+                          ? <span style={{ color: "var(--warning)" }}>{cellValue}</span>
                           : cellValue
                       )}
                     </td>
@@ -1207,7 +1241,7 @@ function ResultsGrid({
         </table>
 
         {rows.length === 0 && filterText && (
-          <div style={{ padding: "24px 14px", color: "#4b5563", fontSize: 13, textAlign: "center" }}>
+          <div style={{ padding: "24px 14px", color: "var(--text-disabled)", fontSize: 13, textAlign: "center" }}>
             No rows match "{filterText}"
           </div>
         )}
@@ -1217,9 +1251,9 @@ function ResultsGrid({
       {!canEdit && connection && (
       <div style={{
         padding: "4px 14px",
-        background: "#13141a",
-        borderTop: "1px solid #1e2026",
-        fontSize: 10, color: "#374151",
+        background: "var(--surface)",
+        borderTop: "1px solid var(--border)",
+        fontSize: 10, color: "var(--text-disabled)",
         fontFamily: "monospace", flexShrink: 0,
       }}>
         {isReadOnly
@@ -1298,40 +1332,40 @@ function SchemaSection({
   emptyMessage?: string;
 }) {
   return (
-    <div style={{ borderTop: "1px solid #1e2026" }}>
+    <div style={{ borderTop: "1px solid var(--border)" }}>
       <div
         onClick={onToggle}
         style={{
           display: "flex", alignItems: "center", gap: 6,
           padding: "6px 14px", cursor: "pointer",
-          background: expanded ? "#0e0f11" : "transparent",
+          background: expanded ? "var(--bg)" : "transparent",
           transition: "background .1s",
         }}
-        onMouseEnter={e => (e.currentTarget.style.background = "#0e0f11")}
-        onMouseLeave={e => (e.currentTarget.style.background = expanded ? "#0e0f11" : "transparent")}
+        onMouseEnter={e => (e.currentTarget.style.background = "var(--bg)")}
+        onMouseLeave={e => (e.currentTarget.style.background = expanded ? "var(--bg)" : "transparent")}
       >
-        <span style={{ fontSize: 9, color: "#4b5563", width: 10, flexShrink: 0 }}>
+        <span style={{ fontSize: 9, color: "var(--text-disabled)", width: 10, flexShrink: 0 }}>
           {expanded ? "▾" : "▸"}
         </span>
-        <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace",
+        <span style={{ fontSize: 10, color: "var(--text-tertiary)", fontFamily: "monospace",
           fontWeight: 600, flex: 1, textTransform: "uppercase", letterSpacing: ".05em" }}>
           {label}
         </span>
-        <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace" }}>
+        <span style={{ fontSize: 9, color: "var(--border-strong)", fontFamily: "monospace" }}>
           {count}
         </span>
       </div>
 
       {expanded && (
-        <div style={{ background: "#080909" }}>
+        <div style={{ background: "var(--bg)" }}>
           {emptyMessage ? (
             <div style={{ padding: "8px 14px 8px 20px", fontSize: 10,
-              color: "#374151", fontFamily: "monospace", fontStyle: "italic" }}>
+              color: "var(--border-strong)", fontFamily: "monospace", fontStyle: "italic" }}>
               {emptyMessage}
             </div>
           ) : count === 0 ? (
             <div style={{ padding: "8px 14px 8px 20px", fontSize: 10,
-              color: "#374151", fontFamily: "monospace" }}>
+              color: "var(--border-strong)", fontFamily: "monospace" }}>
               None found
             </div>
           ) : children}
@@ -1347,10 +1381,10 @@ function SettingsSection({
   return (
     <div style={{ marginBottom: 24 }}>
       <div style={{
-        fontSize: 10, fontWeight: 600, color: "#4b5563",
+        fontSize: 10, fontWeight: 600, color: "var(--text-disabled)",
         fontFamily: "monospace", textTransform: "uppercase",
         letterSpacing: ".08em", marginBottom: 12,
-        paddingBottom: 6, borderBottom: "1px solid #2d2f36",
+        paddingBottom: 6, borderBottom: "1px solid var(--border)",
       }}>
         {label}
       </div>
@@ -1375,13 +1409,13 @@ function SettingsRow({
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
-          fontSize: 12, color: "#e8e9ec",
+          fontSize: 12, color: "var(--text)",
           marginBottom: 2, fontFamily: "monospace",
         }}>
           {label}
         </div>
         <div style={{
-          fontSize: 10, color: "#4b5563",
+          fontSize: 10, color: "var(--text-tertiary)",
           fontFamily: "monospace", lineHeight: 1.5,
         }}>
           {description}
@@ -1395,10 +1429,10 @@ function SettingsRow({
 }
 
 const selectStyle: React.CSSProperties = {
-  background: "#0e0f11",
-  border: "1px solid #2d2f36",
+  background: "var(--bg)",
+  border: "1px solid var(--border)",
   borderRadius: 6,
-  color: "#e8e9ec",
+  color: "var(--text)",
   fontSize: 12,
   fontFamily: "monospace",
   padding: "5px 10px",
@@ -1424,6 +1458,13 @@ function App() {
   const [settings, setSettings]           = useState<AppSettings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings]   = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(DEFAULT_SETTINGS);
+
+  // Theme — preference is what the user chose (system/light/dark);
+  // resolved is the actual rendered theme (light/dark) after resolving "system".
+  const [themePreference, setThemePreference] = useState<ThemePreference>(readStoredTheme);
+  const [resolvedTheme, setResolvedTheme]     = useState<ResolvedTheme>(
+    () => resolveTheme(readStoredTheme())
+  );
   const [connectionsFolder, setConnectionsFolder] = useState("");
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
@@ -1440,6 +1481,7 @@ function App() {
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTabRef = useRef<Tab>(activeTab);
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
+  const formatSqlRef = useRef<() => void>(() => {});
   const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schemaCache = useRef<Map<string, SchemaResult>>(new Map());
   
@@ -1511,6 +1553,40 @@ function App() {
   const [tunnelLoading, setTunnelLoading] = useState<Record<string, boolean>>({});
   const [auditLogEnabled, setAuditLogEnabled] = useState(false);
   const wasRewritten = activeTab.results.some(r => r.wasRewritten);
+
+  // Apply theme to <html data-theme>, persist to localStorage, and
+  // listen for system theme changes when the user has chosen "system".
+  // The CSS in theme.css keys off the data-theme attribute.
+  useEffect(() => {
+    const apply = (pref: ThemePreference) => {
+      const resolved = resolveTheme(pref);
+      document.documentElement.setAttribute("data-theme", resolved);
+      setResolvedTheme(resolved);
+    };
+    apply(themePreference);
+
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, themePreference);
+    } catch { /* quota / private mode — non-fatal */ }
+
+    // Only listen to OS changes when preference is "system".
+    // If the user has forced light or dark, system changes are ignored.
+    if (themePreference !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => apply("system");
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [themePreference]);
+
+  // Enable CSS transitions only after first paint.
+  // Without this, the initial render's data-theme application would
+  // animate from default-to-correct, producing a one-time color flash.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      document.documentElement.classList.add("theme-transitions-enabled");
+    });
+    return () => cancelAnimationFrame(id);
+  }, []);
 
   useEffect(() => {
     invoke<string>("load_settings")
@@ -2163,7 +2239,7 @@ function App() {
 
   const menuItemStyle: React.CSSProperties = {
     display: "block", width: "100%", padding: "8px 16px",
-    background: "none", border: "none", color: "#e8e9ec",
+    background: "none", border: "none", color: "var(--text)",
     fontSize: 12, fontFamily: "monospace", cursor: "pointer",
     textAlign: "left",
   };
@@ -2342,6 +2418,62 @@ function App() {
   }, [locked, showHistory, activeTabId, auditLogEnabled]);
 
   useEffect(() => { runQueryRef.current = runQuery; }, [runQuery]);
+
+  // Dialect-aware SQL formatter — Ctrl+Shift+F / Cmd+Shift+F
+  // Formats the selection if non-empty, otherwise the entire buffer.
+  // Applied via executeEdits so it's a single undoable step.
+  const formatActiveSql = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    // Engine → sql-formatter dialect mapping.
+    // CockroachDB is wire-compatible with Postgres so it shares the dialect.
+    // No active connection falls back to the generic "sql" dialect.
+    const engine = activeTabRef.current?.connection?.engine;
+    const dialectMap: Record<string, string> = {
+      sqlserver:   "tsql",
+      postgres:    "postgresql",
+      cockroachdb: "postgresql",
+      mysql:       "mysql",
+      mariadb:     "mariadb",
+      sqlite:      "sqlite",
+    };
+    const language = (engine && dialectMap[engine]) ?? "sql";
+
+    const selection = editor.getSelection();
+    const hasSelection = selection && !selection.isEmpty();
+    const targetRange = hasSelection ? selection : model.getFullModelRange();
+    const sourceText = model.getValueInRange(targetRange);
+    if (!sourceText.trim()) return;
+
+    let formatted: string;
+    try {
+      formatted = formatSql(sourceText, {
+        // Cast: sql-formatter's SqlLanguage union isn't worth importing
+        // just to retype the same string we already validated above.
+        language: language as any,
+        keywordCase: "upper",
+        indentStyle: "standard",
+        linesBetweenQueries: 2,
+        tabWidth: 4,
+      });
+    } catch (e) {
+      // Un-parseable input (user mid-edit, exotic dialect feature, etc).
+      // Silent no-op is the right call — surfacing a banner on every
+      // mistyped query would be more annoying than helpful.
+      console.warn("SQL formatter could not parse input:", e);
+      return;
+    }
+
+    editor.executeEdits("format-sql", [{
+      range: targetRange,
+      text: formatted,
+      forceMoveMarkers: true,
+    }]);
+  }, []);
+  useEffect(() => { formatSqlRef.current = formatActiveSql; }, [formatActiveSql]);
   //End Run Query Function
 
   const handleBeforeMount = useCallback((monaco: typeof monacoEditor) => {
@@ -2589,6 +2721,14 @@ function App() {
           return newTabs;
         });
       });
+
+      // Ctrl+Shift+F / Cmd+Shift+F — dialect-aware SQL formatter
+      // Uses the ref so it always picks up the latest formatActiveSql,
+      // matching the runQueryRef pattern.
+      editor.addCommand(
+        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF,
+        () => { formatSqlRef.current(); }
+      );
 
     // Save SQL to tab on every change
     editor.onDidChangeModelContent(() => {
@@ -3013,7 +3153,7 @@ function handleCellCommit(
   return (
     <div style={{
       display: "flex", height: "100vh", width: "100vw",
-      background: "#0e0f11", color: "#e8e9ec", fontFamily: "monospace",
+      background: "var(--bg)", color: "var(--text)", fontFamily: "monospace",
       overflow: "hidden", boxSizing: "border-box",
     }}>
 
@@ -3028,7 +3168,7 @@ function handleCellCommit(
             position: "fixed",
             inset: 0,
             zIndex: 9999,
-            background: "rgba(14,15,17,0.92)",
+            background: "var(--lock-overlay)",
             backdropFilter: "blur(12px)",
             display: "flex",
             flexDirection: "column",
@@ -3047,7 +3187,7 @@ function handleCellCommit(
           <div style={{
             fontSize: 20,
             fontWeight: 700,
-            color: "#e8e9ec",
+            color: "var(--text)",
             marginBottom: 8,
             fontFamily: "monospace",
           }}>
@@ -3055,7 +3195,7 @@ function handleCellCommit(
           </div>
           <div style={{
             fontSize: 13,
-            color: "#6b7280",
+            color: "var(--text-tertiary)",
             fontFamily: "monospace",
           }}>
             Click anywhere to unlock
@@ -3063,7 +3203,7 @@ function handleCellCommit(
           <div style={{
             marginTop: 32,
             fontSize: 11,
-            color: "#374151",
+            color: "var(--text-disabled)",
             fontFamily: "monospace",
           }}>
             Locked after 15 minutes of inactivity
@@ -3084,12 +3224,12 @@ function handleCellCommit(
             left: contextMenu.x,
             top: contextMenu.y,
             zIndex: 1000,
-            background: "#1e2026",
-            border: "1px solid #2d2f36",
+            background: "var(--surface-2)",
+            border: "1px solid var(--border)",
             borderRadius: 8,
             padding: "4px 0",
             minWidth: 160,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+            boxShadow: "var(--shadow)",
           }}>
             <button
               onClick={() => {
@@ -3099,11 +3239,11 @@ function handleCellCommit(
               }}
               style={{
                 display: "block", width: "100%", padding: "8px 16px",
-                background: "none", border: "none", color: "#e8e9ec",
+                background: "none", border: "none", color: "var(--text)",
                 fontSize: 12, fontFamily: "monospace", cursor: "pointer",
                 textAlign: "left",
               }}
-              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
               onMouseLeave={e => (e.currentTarget.style.background = "none")}
             >
               ✏️ Edit connection
@@ -3115,11 +3255,11 @@ function handleCellCommit(
               }}
               style={{
                 display: "block", width: "100%", padding: "8px 16px",
-                background: "none", border: "none", color: "#ef4444",
+                background: "none", border: "none", color: "var(--error)",
                 fontSize: 12, fontFamily: "monospace", cursor: "pointer",
                 textAlign: "left",
               }}
-              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
               onMouseLeave={e => (e.currentTarget.style.background = "none")}
             >
               🗑️ Delete connection
@@ -3140,19 +3280,19 @@ function handleCellCommit(
             left: schemaContextMenu.x,
             top: schemaContextMenu.y,
             zIndex: 1000,
-            background: "#1e2026",
-            border: "1px solid #2d2f36",
+            background: "var(--surface-2)",
+            border: "1px solid var(--border)",
             borderRadius: 8,
             padding: "4px 0",
             minWidth: 200,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+            boxShadow: "var(--shadow)",
           }}>
             {/* Header */}
             <div style={{
               padding: "6px 16px",
-              fontSize: 10, color: "#4b5563",
+              fontSize: 10, color: "var(--text-disabled)",
               fontFamily: "monospace",
-              borderBottom: "1px solid #2d2f36",
+              borderBottom: "1px solid var(--border)",
               marginBottom: 4,
             }}>
               {schemaContextMenu.type.toUpperCase()} · {schemaContextMenu.name}
@@ -3172,7 +3312,7 @@ function handleCellCommit(
                   setSchemaContextMenu(null);
                 }}
                 style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                 onMouseLeave={e => (e.currentTarget.style.background = "none")}
               >
                 📄 Open Definition
@@ -3193,7 +3333,7 @@ function handleCellCommit(
                   setSchemaContextMenu(null);
                 }}
                 style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                 onMouseLeave={e => (e.currentTarget.style.background = "none")}
               >
                 📄 Open Definition
@@ -3209,7 +3349,7 @@ function handleCellCommit(
               return (
                 <>
                   <div style={{
-                    height: 1, background: "#2d2f36",
+                    height: 1, background: "var(--surface-3)",
                     margin: "4px 0",
                   }} />
                   {(["select", "insert", "update", "delete"] as const).map(type => (
@@ -3220,7 +3360,7 @@ function handleCellCommit(
                         setSchemaContextMenu(null);
                       }}
                       style={menuItemStyle}
-                      onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                      onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                       onMouseLeave={e => (e.currentTarget.style.background = "none")}
                     >
                       ✦ Script {type.toUpperCase()}
@@ -3242,7 +3382,7 @@ function handleCellCommit(
                   setSchemaContextMenu(null);
                 }}
                 style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                 onMouseLeave={e => (e.currentTarget.style.background = "none")}
               >
                 ▶ Query View
@@ -3257,14 +3397,14 @@ function handleCellCommit(
               if (!proc) return null;
               return (
                 <>
-                  <div style={{ height: 1, background: "#2d2f36", margin: "4px 0" }} />
+                  <div style={{ height: 1, background: "var(--surface-3)", margin: "4px 0" }} />
                   <button
                     onClick={() => {
                       setEditorScript(scriptExecute(proc, engine));
                       setSchemaContextMenu(null);
                     }}
                     style={menuItemStyle}
-                    onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                     onMouseLeave={e => (e.currentTarget.style.background = "none")}
                   >
                     ▶ Script EXECUTE
@@ -3288,7 +3428,7 @@ function handleCellCommit(
                   setSchemaContextMenu(null);
                 }}
                 style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                 onMouseLeave={e => (e.currentTarget.style.background = "none")}
               >
                 ⬇ Script DROP and CREATE
@@ -3355,7 +3495,7 @@ function handleCellCommit(
                   setSchemaContextMenu(null);
                 }}
                 style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                 onMouseLeave={e => (e.currentTarget.style.background = "none")}
               >
                 ✦ Script CREATE OR ALTER
@@ -3363,7 +3503,7 @@ function handleCellCommit(
             )}
 
             {/* Drop — all types */}
-            <div style={{ height: 1, background: "#2d2f36", margin: "4px 0" }} />
+            <div style={{ height: 1, background: "var(--surface-3)", margin: "4px 0" }} />
             <button
               onClick={() => {
                 const dropSql = buildDropSql(
@@ -3383,8 +3523,8 @@ function handleCellCommit(
                 });
                 setSchemaContextMenu(null);
               }}
-              style={{ ...menuItemStyle, color: "#ef4444" }}
-              onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+              style={{ ...menuItemStyle, color: "var(--error)" }}
+              onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
               onMouseLeave={e => (e.currentTarget.style.background = "none")}
             >
               🗑️ Drop {schemaContextMenu.type}
@@ -3401,16 +3541,16 @@ function handleCellCommit(
           <div style={{
             position: "fixed", top: "50%", left: "50%",
             transform: "translate(-50%, -50%)",
-            zIndex: 1000, background: "#1e2026",
-            border: "1px solid #2d2f36", borderRadius: 12,
+            zIndex: 1000, background: "var(--surface-2)",
+            border: "1px solid var(--border)", borderRadius: 12,
             padding: "24px 28px", minWidth: 340,
-            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+            boxShadow: "var(--shadow-lg)",
           }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec", marginBottom: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
               Delete connection
             </div>
-            <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 20, lineHeight: 1.6 }}>
-              Delete <strong style={{ color: "#e8e9ec" }}>{deletingConnection.name}</strong>?
+            <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 20, lineHeight: 1.6 }}>
+              Delete <strong style={{ color: "var(--text)" }}>{deletingConnection.name}</strong>?
               This removes the TOML file and keychain entry. This cannot be undone.
             </div>
             <div style={{ display: "flex", gap: 8 }}>
@@ -3432,7 +3572,7 @@ function handleCellCommit(
                   }
                 }}
                 style={{
-                  flex: 1, padding: "8px 0", background: "#ef4444", color: "white",
+                  flex: 1, padding: "8px 0", background: "var(--error)", color: "white",
                   border: "none", borderRadius: 6, cursor: "pointer",
                   fontSize: 12, fontFamily: "monospace",
                 }}
@@ -3442,8 +3582,8 @@ function handleCellCommit(
               <button
                 onClick={() => setDeletingConnection(null)}
                 style={{
-                  flex: 1, padding: "8px 0", background: "transparent", color: "#6b7280",
-                  border: "1px solid #2d2f36", borderRadius: 6, cursor: "pointer",
+                  flex: 1, padding: "8px 0", background: "transparent", color: "var(--text-tertiary)",
+                  border: "1px solid var(--border)", borderRadius: 6, cursor: "pointer",
                   fontSize: 12, fontFamily: "monospace",
                 }}
               >
@@ -3465,25 +3605,25 @@ function handleCellCommit(
           <div style={{
             position: "fixed", top: "50%", left: "50%",
             transform: "translate(-50%,-50%)",
-            zIndex: 1000, background: "#1e2026",
-            border: "1px solid #2d2f36", borderRadius: 12,
+            zIndex: 1000, background: "var(--surface-2)",
+            border: "1px solid var(--border)", borderRadius: 12,
             padding: "24px 28px", minWidth: 380, maxWidth: 520,
-            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+            boxShadow: "var(--shadow-lg)",
           }}>
             {/* Header */}
             <div style={{ display: "flex", alignItems: "center",
               gap: 10, marginBottom: 12 }}>
               <span style={{ fontSize: 20 }}>⚠️</span>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
                 Drop {dropConfirm.type}
               </div>
             </div>
 
             {/* Warning text */}
-            <div style={{ fontSize: 12, color: "#9ca3af",
+            <div style={{ fontSize: 12, color: "var(--text-secondary)",
               marginBottom: 16, lineHeight: 1.6 }}>
               This will permanently drop{" "}
-              <strong style={{ color: "#e8e9ec" }}>
+              <strong style={{ color: "var(--text)" }}>
                 {dropConfirm.name}
               </strong>.
               This action cannot be undone.
@@ -3491,14 +3631,14 @@ function handleCellCommit(
 
             {/* SQL preview */}
             <div style={{
-              background: "#0e0f11",
-              border: "1px solid #2d2f36",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
               borderRadius: 6,
               padding: "10px 14px",
               marginBottom: 20,
               fontFamily: "monospace",
               fontSize: 12,
-              color: "#ef4444",
+              color: "var(--error)",
             }}>
               {dropConfirm.dropSql}
             </div>
@@ -3542,7 +3682,7 @@ function handleCellCommit(
                 }}
                 style={{
                   flex: 1, padding: "8px 0",
-                  background: "#ef4444", color: "white",
+                  background: "var(--error)", color: "white",
                   border: "none", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
                   fontFamily: "monospace", fontWeight: 600,
@@ -3554,8 +3694,8 @@ function handleCellCommit(
                 onClick={() => setDropConfirm(null)}
                 style={{
                   flex: 1, padding: "8px 0",
-                  background: "transparent", color: "#6b7280",
-                  border: "1px solid #2d2f36", borderRadius: 6,
+                  background: "transparent", color: "var(--text-tertiary)",
+                  border: "1px solid var(--border)", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
                   fontFamily: "monospace",
                 }}
@@ -3578,27 +3718,27 @@ function handleCellCommit(
           <div style={{
             position: "fixed", top: "50%", left: "50%",
             transform: "translate(-50%,-50%)",
-            zIndex: 1000, background: "#1e2026",
-            border: "1px solid #2d2f36", borderRadius: 12,
+            zIndex: 1000, background: "var(--surface-2)",
+            border: "1px solid var(--border)", borderRadius: 12,
             padding: "0", width: 480, maxHeight: "80vh",
-            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+            boxShadow: "var(--shadow-lg)",
             display: "flex", flexDirection: "column",
           }}>
 
             {/* Header */}
             <div style={{
               padding: "16px 24px",
-              borderBottom: "1px solid #2d2f36",
+              borderBottom: "1px solid var(--border)",
               display: "flex", alignItems: "center",
               justifyContent: "space-between", flexShrink: 0,
             }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
                 ⚙ Settings
               </div>
               <button
                 onClick={() => setShowSettings(false)}
                 style={{ background: "none", border: "none",
-                  color: "#4b5563", cursor: "pointer", fontSize: 18 }}
+                  color: "var(--text-tertiary)", cursor: "pointer", fontSize: 18 }}
               >
                 ✕
               </button>
@@ -3754,11 +3894,31 @@ function handleCellCommit(
                   </select>
                 </SettingsRow>
               </SettingsSection>
+
+              {/* Section: Appearance */}
+              {/* Theme applies immediately on change rather than waiting for
+                  Save — matches user expectation for visual preferences. */}
+              <SettingsSection label="Appearance">
+                <SettingsRow
+                  label="Theme"
+                  description="System follows your OS; choose Light or Dark to override"
+                >
+                  <select
+                    value={themePreference}
+                    onChange={e => setThemePreference(e.target.value as ThemePreference)}
+                    style={selectStyle}
+                  >
+                    <option value="system">System</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </SettingsRow>
+              </SettingsSection>
             </div>
             {/* Footer */}
             <div style={{
               padding: "12px 24px",
-              borderTop: "1px solid #2d2f36",
+              borderTop: "1px solid var(--border)",
               display: "flex", gap: 8, flexShrink: 0,
             }}>
               <button
@@ -3787,7 +3947,7 @@ function handleCellCommit(
                 }}
                 style={{
                   flex: 1, padding: "8px 0",
-                  background: "#6c63ff", color: "white",
+                  background: "var(--accent)", color: "white",
                   border: "none", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
                   fontFamily: "monospace",
@@ -3799,8 +3959,8 @@ function handleCellCommit(
                 onClick={() => setShowSettings(false)}
                 style={{
                   flex: 1, padding: "8px 0",
-                  background: "transparent", color: "#6b7280",
-                  border: "1px solid #2d2f36", borderRadius: 6,
+                  background: "transparent", color: "var(--text-secondary)",
+                  border: "1px solid var(--border)", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
                   fontFamily: "monospace",
                 }}
@@ -3811,8 +3971,8 @@ function handleCellCommit(
                 onClick={() => setSettingsDraft(DEFAULT_SETTINGS)}
                 style={{
                   padding: "8px 14px",
-                  background: "transparent", color: "#4b5563",
-                  border: "1px solid #2d2f36", borderRadius: 6,
+                  background: "transparent", color: "var(--text-tertiary)",
+                  border: "1px solid var(--border)", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
                   fontFamily: "monospace",
                 }}
@@ -3831,10 +3991,10 @@ function handleCellCommit(
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
         }}>
           <div style={{
-            background: "#1a1d23", border: "1px solid #2a2d35",
+            background: "var(--surface)", border: "1px solid var(--border)",
             borderRadius: 8, padding: 24, width: 380,
           }}>
-            <div style={{ color: "#e8e9ec", fontWeight: 600, marginBottom: 16 }}>
+            <div style={{ color: "var(--text)", fontWeight: 600, marginBottom: 16 }}>
               Save Query
             </div>
             <input
@@ -3844,8 +4004,8 @@ function handleCellCommit(
               onChange={e => setSaveQueryName(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") handleSaveQuery(); if (e.key === "Escape") setSaveQueryOpen(false); }}
               style={{
-                width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
-                borderRadius: 4, padding: "6px 10px", color: "#e8e9ec",
+                width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
+                borderRadius: 4, padding: "6px 10px", color: "var(--text)",
                 marginBottom: 10, boxSizing: "border-box", fontSize: 13,
               }}
             />
@@ -3854,8 +4014,8 @@ function handleCellCommit(
               value={saveQueryTags}
               onChange={e => setSaveQueryTags(e.target.value)}
               style={{
-                width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
-                borderRadius: 4, padding: "6px 10px", color: "#e8e9ec",
+                width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
+                borderRadius: 4, padding: "6px 10px", color: "var(--text)",
                 marginBottom: 10, boxSizing: "border-box", fontSize: 13,
               }}
             />
@@ -3864,18 +4024,18 @@ function handleCellCommit(
               value={saveQueryDesc}
               onChange={e => setSaveQueryDesc(e.target.value)}
               style={{
-                width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
-                borderRadius: 4, padding: "6px 10px", color: "#e8e9ec",
+                width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
+                borderRadius: 4, padding: "6px 10px", color: "var(--text)",
                 marginBottom: 16, boxSizing: "border-box", fontSize: 13,
               }}
             />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button onClick={() => setSaveQueryOpen(false)}
-                style={{ padding: "6px 14px", background: "transparent", border: "1px solid #2a2d35", borderRadius: 4, color: "#9ca3af", cursor: "pointer" }}>
+                style={{ padding: "6px 14px", background: "transparent", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-secondary)", cursor: "pointer" }}>
                 Cancel
               </button>
               <button onClick={handleSaveQuery}
-                style={{ padding: "6px 14px", background: "#7c3aed", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer" }}>
+                style={{ padding: "6px 14px", background: "var(--accent-hover)", border: "none", borderRadius: 4, color: "white", cursor: "pointer" }}>
                 Save
               </button>
             </div>
@@ -3893,19 +4053,19 @@ function handleCellCommit(
           <div style={{
             position: "fixed", top: "50%", left: "50%",
             transform: "translate(-50%,-50%)",
-            zIndex: 1000, background: "#1e2026",
-            border: "1px solid #2d2f36", borderRadius: 12,
+            zIndex: 1000, background: "var(--surface-2)",
+            border: "1px solid var(--border)", borderRadius: 12,
             padding: "24px 28px", width: 440,
-            boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+            boxShadow: "var(--shadow-lg)",
           }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: "#e8e9ec", marginBottom: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
               Import from DBeaver
             </div>
 
             {!dbeaverResult && (
               <>
-                <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 20, lineHeight: 1.6 }}>
-                  Reads <code style={{ color: "#9ca3af" }}>~/.dbeaver/data-sources.json</code> and
+                <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 20, lineHeight: 1.6 }}>
+                  Reads <code style={{ color: "var(--text-secondary)" }}>~/.dbeaver/data-sources.json</code> and
                   imports all PostgreSQL, MySQL, SQLite, and SQL Server connections into DbArk.
                   Passwords are moved to the OS keychain.
                 </div>
@@ -3915,7 +4075,7 @@ function handleCellCommit(
                     disabled={dbeaverImporting}
                     style={{
                       flex: 1, padding: "8px 0",
-                      background: "#6c63ff", color: "white",
+                      background: "var(--accent)", color: "white",
                       border: "none", borderRadius: 6,
                       cursor: dbeaverImporting ? "not-allowed" : "pointer",
                       fontSize: 12, fontFamily: "monospace",
@@ -3927,8 +4087,8 @@ function handleCellCommit(
                     onClick={() => setShowDbeaverImport(false)}
                     style={{
                       flex: 1, padding: "8px 0",
-                      background: "transparent", color: "#6b7280",
-                      border: "1px solid #2d2f36", borderRadius: 6,
+                      background: "transparent", color: "var(--text-tertiary)",
+                      border: "1px solid var(--border)", borderRadius: 6,
                       cursor: "pointer", fontSize: 12, fontFamily: "monospace",
                     }}
                   >
@@ -3943,8 +4103,8 @@ function handleCellCommit(
                 {dbeaverResult.error && (
                   <div style={{
                     padding: "10px 14px", borderRadius: 6, marginBottom: 16,
-                    background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.2)",
-                    color: "#ef4444", fontSize: 12, fontFamily: "monospace",
+                    background: "var(--error-bg)", border: "1px solid var(--error)",
+                    color: "var(--error)", fontSize: 12, fontFamily: "monospace",
                   }}>
                     ❌ {dbeaverResult.error}
                   </div>
@@ -3952,12 +4112,12 @@ function handleCellCommit(
 
                 {dbeaverResult.imported.length > 0 && (
                   <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 11, color: "#10b981", marginBottom: 8, fontFamily: "monospace" }}>
+                    <div style={{ fontSize: 11, color: "var(--success)", marginBottom: 8, fontFamily: "monospace" }}>
                       ✓ {dbeaverResult.imported.length} connection{dbeaverResult.imported.length > 1 ? "s" : ""} imported
                     </div>
                     {dbeaverResult.imported.map(c => (
                       <div key={c.name} style={{
-                        fontSize: 11, color: "#6b7280", fontFamily: "monospace",
+                        fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace",
                         padding: "2px 0",
                       }}>
                         · {c.name} ({c.engine} · {c.host})
@@ -3968,12 +4128,12 @@ function handleCellCommit(
 
                 {dbeaverResult.skipped.length > 0 && (
                   <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 11, color: "#f59e0b", marginBottom: 8, fontFamily: "monospace" }}>
+                    <div style={{ fontSize: 11, color: "var(--warning)", marginBottom: 8, fontFamily: "monospace" }}>
                       ⚠ {dbeaverResult.skipped.length} skipped
                     </div>
                     {dbeaverResult.skipped.map(s => (
                       <div key={s} style={{
-                        fontSize: 11, color: "#4b5563", fontFamily: "monospace",
+                        fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace",
                         padding: "2px 0",
                       }}>
                         · {s}
@@ -3986,8 +4146,8 @@ function handleCellCommit(
                   onClick={() => { setShowDbeaverImport(false); setDbeaverResult(null); }}
                   style={{
                     width: "100%", padding: "8px 0",
-                    background: "transparent", color: "#6b7280",
-                    border: "1px solid #2d2f36", borderRadius: 6,
+                    background: "transparent", color: "var(--text-tertiary)",
+                    border: "1px solid var(--border)", borderRadius: 6,
                     cursor: "pointer", fontSize: 12, fontFamily: "monospace",
                   }}
                 >
@@ -4002,15 +4162,15 @@ function handleCellCommit(
       {/* Sidebar */}
       <div style={{
         width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth,
-        background: "#13141a", borderRight: "1px solid #1e2026",
+        background: "var(--surface)", borderRight: "1px solid var(--border)",
         display: "flex", flexDirection: "column", overflow: "hidden", flexShrink: 0,
       }}>
         {/* Sidebar header */}
         <div style={{
-          padding: "12px 14px", borderBottom: "1px solid #1e2026",
+          padding: "12px 14px", borderBottom: "1px solid var(--border)",
           display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0,
         }}>
-          <span style={{ color: "#6c63ff", fontWeight: 700, fontSize: 14, letterSpacing: ".02em" }}>DevSQL</span>
+          <span style={{ color: "var(--accent)", fontWeight: 700, fontSize: 14, letterSpacing: ".02em" }}>DevSQL</span>
         </div>
 
         {showAddForm ? (
@@ -4032,14 +4192,14 @@ function handleCellCommit(
         ) : (
           <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
             {showQueryLibrary && (
-            <div style={{ borderBottom: "1px solid #1e2028", paddingBottom: 8, marginBottom: 8 }}>
+            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8, marginBottom: 8 }}>
               <input
                 placeholder="Search queries..."
                 value={querySearch}
                 onChange={e => setQuerySearch(e.target.value)}
                 style={{
-                  width: "100%", background: "#0d0f13", border: "1px solid #2a2d35",
-                  borderRadius: 4, padding: "4px 8px", color: "#e8e9ec",
+                  width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
+                  borderRadius: 4, padding: "4px 8px", color: "var(--text)",
                   fontSize: 12, boxSizing: "border-box", marginBottom: 6,
                 }}
               />
@@ -4056,7 +4216,7 @@ function handleCellCommit(
                       padding: "5px 8px", borderRadius: 4, cursor: "pointer",
                       display: "flex", alignItems: "center", justifyContent: "space-between",
                     }}
-                    onMouseEnter={e => (e.currentTarget.style.background = "#1e2028")}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-2)")}
                     onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
                     onClick={() => {
                       editorRef.current?.setValue(q.sql);
@@ -4064,13 +4224,13 @@ function handleCellCommit(
                     }}
                   >
                     <div>
-                      <div style={{ color: "#e8e9ec", fontSize: 12 }}>{q.meta.name}</div>
+                      <div style={{ color: "var(--text)", fontSize: 12 }}>{q.meta.name}</div>
                       {q.meta.tags?.length > 0 && (
                         <div style={{ display: "flex", gap: 4, marginTop: 2, flexWrap: "wrap" }}>
                           {q.meta.tags.map((t: string) => (
                             <span key={t} style={{
-                              fontSize: 10, background: "rgba(124,58,237,0.2)",
-                              color: "#a78bfa", borderRadius: 3, padding: "1px 5px",
+                              fontSize: 10, background: "var(--accent-bg)",
+                              color: "var(--accent-hover)", borderRadius: 3, padding: "1px 5px",
                             }}>{t}</span>
                           ))}
                         </div>
@@ -4083,25 +4243,25 @@ function handleCellCommit(
                       }}
                       style={{
                         background: "transparent", border: "none",
-                        color: "#4b5563", cursor: "pointer", fontSize: 14, padding: 2,
+                        color: "var(--text-disabled)", cursor: "pointer", fontSize: 14, padding: 2,
                       }}
                       title="Delete query"
                     >✕</button>
                   </div>
                 ))}
               {savedQueries.length === 0 && (
-                <div style={{ color: "#4b5563", fontSize: 11, padding: "4px 8px" }}>
+                <div style={{ color: "var(--text-disabled)", fontSize: 11, padding: "4px 8px" }}>
                   No saved queries. Press Cmd+S to save.
                 </div>
               )}
             </div>
           )}
             {/* Connections section label */}
-            <div style={{ padding: "8px 14px 4px", borderBottom: "1px solid #1e2026", fontSize: 10, fontWeight: 600, color: "#4b5563", textTransform: "uppercase", letterSpacing: ".06em" }}>
+            <div style={{ padding: "8px 14px 4px", borderBottom: "1px solid var(--border)", fontSize: 10, fontWeight: 600, color: "var(--text-disabled)", textTransform: "uppercase", letterSpacing: ".06em" }}>
               Connections &nbsp;&nbsp;
               <button onClick={() => setShowAddForm(v => !v)} title="Add connection" style={{
-                  background: "none", border: "1px solid #2d2f36", borderRadius: 4,
-                  color: "#9ca3af", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 7px", flexShrink: 0,
+                  background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                  color: "var(--text-secondary)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 7px", flexShrink: 0,
                 }}>
                   {showAddForm ? "×" : "+"}
               </button>
@@ -4109,8 +4269,8 @@ function handleCellCommit(
                 onClick={() => setShowQueryLibrary(v => !v)}
                 title="Saved queries"
                 style={{
-                  background: showQueryLibrary ? "rgba(124,58,237,0.2)" : "transparent",
-                  border: "none", color: "#9ca3af", cursor: "pointer",
+                  background: showQueryLibrary ? "var(--accent-bg)" : "transparent",
+                  border: "none", color: "var(--text-secondary)", cursor: "pointer",
                   padding: "2px 6px", borderRadius: 4, fontSize: 14,
                 }}
               >
@@ -4120,8 +4280,8 @@ function handleCellCommit(
                 onClick={() => setShowDbeaverImport(true)}
                 title="Import from DBeaver"
                 style={{
-                  background: "none", border: "1px solid #2d2f36", borderRadius: 4,
-                  color: "#9ca3af", cursor: "pointer", fontSize: 11,
+                  background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                  color: "var(--text-secondary)", cursor: "pointer", fontSize: 11,
                   lineHeight: 1, padding: "2px 7px", flexShrink: 0,
                   fontFamily: "monospace",
                 }}
@@ -4131,7 +4291,7 @@ function handleCellCommit(
             </div>
 
             {connections.length === 0 ? (
-              <div style={{ padding: "6px 14px 10px", color: "#4b5563", fontSize: 12, textAlign: "center", lineHeight: 1.6 }}>
+              <div style={{ padding: "6px 14px 10px", color: "var(--text-disabled)", fontSize: 12, textAlign: "center", lineHeight: 1.6 }}>
                 No connections yet.<br />Click + to add one.
               </div>
             ) : (groupedConnections.map(([groupKey, groupConns]) => {
@@ -4151,25 +4311,25 @@ function handleCellCommit(
                   gap: 6,
                   padding: "5px 14px",
                   cursor: "pointer",
-                  borderBottom: "1px solid #1e2026",
-                  borderTop: "2px solid #13141a",        // ← adds top separation
-                  background: "#16181c",                  // ← slightly lighter, distinct from #0e0f11
+                  borderBottom: "1px solid var(--border)",
+                  borderTop: "1px solid var(--border)",
+                  background: "var(--surface)",
                   userSelect: "none",
                 }}
                 onMouseEnter={e =>
-                  (e.currentTarget.style.background = "#1a1c22")}
+                  (e.currentTarget.style.background = "var(--surface)")}
                 onMouseLeave={e =>
-                  (e.currentTarget.style.background = "#16181c")}
+                  (e.currentTarget.style.background = "var(--surface)")}
               >
                 <span style={{
-                  fontSize: 8, color: "#4b5563",
+                  fontSize: 8, color: "var(--text-disabled)",
                   flexShrink: 0, width: 10,
                 }}>
                   {collapsed ? "▸" : "▾"}
                 </span>
                 <span style={{
                   fontSize: 10, fontWeight: 600,
-                  color: "#6c63ff",                       // ← accent color instead of #4b5563
+                  color: "var(--accent)",                       // ← accent color instead of var(--text-disabled)
                   flex: 1,
                   textTransform: "uppercase",
                   letterSpacing: ".06em",
@@ -4181,7 +4341,7 @@ function handleCellCommit(
                   {groupLabel}
                 </span>
                 <span style={{
-                  fontSize: 9, color: "#374151",
+                  fontSize: 9, color: "var(--text-disabled)",
                   fontFamily: "monospace", flexShrink: 0,
                 }}>
                   {groupConns.length}
@@ -4221,21 +4381,21 @@ function handleCellCommit(
                       padding: "9px 14px",
                       paddingLeft: groupLabel ? 22 : 14,
                       cursor: "pointer",
-                      borderBottom: "1px solid #1e2026",
+                      borderBottom: "1px solid var(--surface-3)",
                       borderLeft: `3px solid ${
                         activeTab.connection?.id === conn.id
                           ? conn.color
                           : "transparent"
                       }`,
                       background: activeTab.connection?.id === conn.id
-                        ? "#1e2026"
+                        ? "var(--surface-3)"
                         : "transparent",
                       transition: "background .1s",
                     }}
                   >
                     <div style={{
                       fontSize: 12, fontWeight: 500,
-                      marginBottom: 3, color: "#e8e9ec",
+                      marginBottom: 3, color: "var(--text)",
                       overflow: "hidden", textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
                     }}>
@@ -4247,7 +4407,7 @@ function handleCellCommit(
                     }}>
                       <EngineBadge engine={conn.engine} />
                       <span style={{
-                        fontSize: 10, color: "#4b5563",
+                        fontSize: 10, color: "var(--text-disabled)",
                         overflow: "hidden", textOverflow: "ellipsis",
                         whiteSpace: "nowrap", minWidth: 0,
                       }}>
@@ -4258,20 +4418,20 @@ function handleCellCommit(
 
                   {/* Schema tree — only shown for the active connection */}
                   {activeTab.connection?.id === conn.id && (
-                    <div style={{ background: "#0e0f11", borderBottom: "1px solid #1e2026" }}>
+                    <div style={{ background: "var(--bg)", borderBottom: "1px solid var(--border)" }}>
                       {schemaLoading && (
-                        <div style={{ padding: "8px 14px", fontSize: 11, color: "#4b5563", fontFamily: "monospace" }}>
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace" }}>
                           Loading schema…
                         </div>
                       )}
 
                       {schema?.error && !(conn.sshEnabled && !tunnelPorts[conn.id]) && (
-                        <div style={{ padding: "8px 14px", fontSize: 11, color: "#ef4444", fontFamily: "monospace" }}>
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--error)", fontFamily: "monospace" }}>
                           {schema.error}
                         </div>
                       )}
                       {schema?.error && conn.sshEnabled && !tunnelPorts[conn.id] && (
-                        <div style={{ padding: "8px 14px", fontSize: 11, color: "#f59e0b", fontFamily: "monospace" }}>
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--warning)", fontFamily: "monospace" }}>
                           ⚠ Run a query to open the SSH tunnel, then schema will load
                         </div>
                       )}
@@ -4295,7 +4455,7 @@ function handleCellCommit(
                                 schemaCache.current.delete(conn.id);
                                 loadSchema(conn);
                               }}
-                              style={{ background: "none", border: "none", color: "#4b5563",
+                              style={{ background: "none", border: "none", color: "var(--text-disabled)",
                                 cursor: "pointer", fontSize: 10, fontFamily: "monospace", padding: "2px 4px" }}
                               title="Refresh schema"
                             >
@@ -4331,29 +4491,29 @@ function handleCellCommit(
                                         display: "flex", alignItems: "center", gap: 6,
                                         padding: "5px 14px",
                                         cursor: "pointer",
-                                        borderTop: "1px solid #1a1b21",
-                                        background: "#0a0b0d",
+                                        borderTop: "1px solid var(--border)",
+                                        background: "var(--bg)",
                                       }}
                                       onMouseEnter={e =>
-                                        (e.currentTarget.style.background = "#111318")}
+                                        (e.currentTarget.style.background = "var(--bg)")}
                                       onMouseLeave={e =>
-                                        (e.currentTarget.style.background = "#0a0b0d")}
+                                        (e.currentTarget.style.background = "var(--bg)")}
                                     >
                                       <span style={{
-                                        fontSize: 9, color: "#6c63ff",
+                                        fontSize: 9, color: "var(--accent)",
                                         flexShrink: 0, width: 10,
                                       }}>
                                         {expandedSchemas.has(schemaName) ? "▾" : "▸"}
                                       </span>
                                       <span style={{
-                                        fontSize: 10, color: "#6c63ff",
+                                        fontSize: 10, color: "var(--accent)",
                                         fontFamily: "monospace", flex: 1,
                                         fontWeight: 600, letterSpacing: ".03em",
                                       }}>
                                         {schemaName}
                                       </span>
                                       <span style={{
-                                        fontSize: 9, color: "#374151",
+                                        fontSize: 9, color: "var(--text-disabled)",
                                         fontFamily: "monospace", flexShrink: 0,
                                       }}>
                                         {tables.length}
@@ -4391,25 +4551,25 @@ function handleCellCommit(
                                             display: "flex", alignItems: "center", gap: 6,
                                             padding: "5px 14px 5px 24px",
                                             cursor: "pointer",
-                                            borderTop: "1px solid #1a1b21",
+                                            borderTop: "1px solid var(--border)",
                                           }}
                                         >
                                           <span style={{
-                                            fontSize: 9, color: "#4b5563",
+                                            fontSize: 9, color: "var(--text-disabled)",
                                             flexShrink: 0, width: 10,
                                           }}>
                                             {expandedTables.has(`${schemaName}.${table.name}`)
                                               ? "▾" : "▸"}
                                           </span>
                                           <span style={{
-                                            fontSize: 11, color: "#9ca3af", flex: 1,
+                                            fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                             overflow: "hidden", textOverflow: "ellipsis",
                                             whiteSpace: "nowrap", fontFamily: "monospace",
                                           }}>
                                             {table.name}
                                           </span>
                                           <span style={{
-                                            fontSize: 9, color: "#374151",
+                                            fontSize: 9, color: "var(--text-disabled)",
                                             fontFamily: "monospace", flexShrink: 0,
                                           }}>
                                             {table.columns?.length ?? 0}
@@ -4424,17 +4584,17 @@ function handleCellCommit(
                                               style={{
                                                 display: "flex", alignItems: "center", gap: 6,
                                                 padding: "3px 14px 3px 36px",
-                                                borderTop: "1px solid #111318",
+                                                borderTop: "1px solid var(--bg)",
                                               }}
                                             >
                                               {col.isPrimaryKey && (
                                                 <span style={{
-                                                  fontSize: 8, color: "#f59e0b", flexShrink: 0,
+                                                  fontSize: 8, color: "var(--warning)", flexShrink: 0,
                                                 }}>🔑</span>
                                               )}
                                               <span style={{
                                                 fontSize: 11,
-                                                color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
+                                                color: col.isPrimaryKey ? "var(--text)" : "var(--text-tertiary)",
                                                 fontFamily: "monospace", flex: 1,
                                                 overflow: "hidden", textOverflow: "ellipsis",
                                                 whiteSpace: "nowrap",
@@ -4442,7 +4602,7 @@ function handleCellCommit(
                                                 {col.name}
                                               </span>
                                               <span style={{
-                                                fontSize: 9, color: "#374151",
+                                                fontSize: 9, color: "var(--text-disabled)",
                                                 fontFamily: "monospace", flexShrink: 0,
                                               }}>
                                                 {col.dataType}
@@ -4484,24 +4644,24 @@ function handleCellCommit(
                                       style={{
                                         display: "flex", alignItems: "center", gap: 6,
                                         padding: "5px 14px", cursor: "pointer",
-                                        borderTop: "1px solid #1a1b21",
+                                        borderTop: "1px solid var(--border)",
                                       }}
                                     >
                                       <span style={{
-                                        fontSize: 9, color: "#4b5563",
+                                        fontSize: 9, color: "var(--text-disabled)",
                                         flexShrink: 0, width: 10,
                                       }}>
                                         {expandedTables.has(table.name) ? "▾" : "▸"}
                                       </span>
                                       <span style={{
-                                        fontSize: 11, color: "#9ca3af", flex: 1,
+                                        fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                         overflow: "hidden", textOverflow: "ellipsis",
                                         whiteSpace: "nowrap", fontFamily: "monospace",
                                       }}>
                                         {table.name}
                                       </span>
                                       <span style={{
-                                        fontSize: 9, color: "#374151",
+                                        fontSize: 9, color: "var(--text-disabled)",
                                         fontFamily: "monospace", flexShrink: 0,
                                       }}>
                                         {table.columns?.length ?? 0}
@@ -4515,17 +4675,17 @@ function handleCellCommit(
                                           style={{
                                             display: "flex", alignItems: "center", gap: 6,
                                             padding: "3px 14px 3px 26px",
-                                            borderTop: "1px solid #111318",
+                                            borderTop: "1px solid var(--bg)",
                                           }}
                                         >
                                           {col.isPrimaryKey && (
                                             <span style={{
-                                              fontSize: 8, color: "#f59e0b", flexShrink: 0,
+                                              fontSize: 8, color: "var(--warning)", flexShrink: 0,
                                             }}>🔑</span>
                                           )}
                                           <span style={{
                                             fontSize: 11,
-                                            color: col.isPrimaryKey ? "#e8e9ec" : "#6b7280",
+                                            color: col.isPrimaryKey ? "var(--text)" : "var(--text-tertiary)",
                                             fontFamily: "monospace", flex: 1,
                                             overflow: "hidden", textOverflow: "ellipsis",
                                             whiteSpace: "nowrap",
@@ -4533,7 +4693,7 @@ function handleCellCommit(
                                             {col.name}
                                           </span>
                                           <span style={{
-                                            fontSize: 9, color: "#374151",
+                                            fontSize: 9, color: "var(--text-disabled)",
                                             fontFamily: "monospace", flexShrink: 0,
                                           }}>
                                             {col.dataType}
@@ -4570,16 +4730,16 @@ function handleCellCommit(
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid #1a1b21", cursor: "default",
+                                  borderTop: "1px solid var(--border)", cursor: "default",
                                 }}
                               >
-                                <span style={{ fontSize: 10, color: "#6c63ff", flexShrink: 0 }}>ƒ</span>
-                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                <span style={{ fontSize: 10, color: "var(--accent)", flexShrink: 0 }}>ƒ</span>
+                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                                   fontFamily: "monospace" }}>
                                   {proc.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace", flexShrink: 0 }}>
                                   {proc.parameterCount}p
                                 </span>
                               </div>
@@ -4611,20 +4771,20 @@ function handleCellCommit(
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid #1a1b21",
+                                  borderTop: "1px solid var(--border)",
                                 }}
                               >
                                 <span style={{ fontSize: 10,
-                                  color: fn.functionType === "table" ? "#10b981" : "#f59e0b",
+                                  color: fn.functionType === "table" ? "var(--success)" : "var(--warning)",
                                   flexShrink: 0 }}>
                                   λ
                                 </span>
-                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                                   fontFamily: "monospace" }}>
                                   {fn.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace", flexShrink: 0 }}>
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace", flexShrink: 0 }}>
                                   {fn.functionType}
                                 </span>
                               </div>
@@ -4653,7 +4813,7 @@ function handleCellCommit(
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid #1a1b21", cursor: "pointer",
+                                  borderTop: "1px solid var(--border)", cursor: "pointer",
                                 }}
                             onDoubleClick={() => {
                               const limit = conn.engine === "sqlserver"
@@ -4664,8 +4824,8 @@ function handleCellCommit(
                             }}
                                 title="Double-click to query"
                               >
-                                <span style={{ fontSize: 9, color: "#3b82f6", flexShrink: 0 }}>◫</span>
-                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                <span style={{ fontSize: 9, color: "var(--info)", flexShrink: 0 }}>◫</span>
+                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                                   fontFamily: "monospace" }}>
                                   {view.name}
@@ -4696,16 +4856,16 @@ function handleCellCommit(
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid #1a1b21",
+                                  borderTop: "1px solid var(--border)",
                                 }}
                               >
-                                <span style={{ fontSize: 9, color: "#ef4444", flexShrink: 0 }}>⚡</span>
-                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                <span style={{ fontSize: 9, color: "var(--error)", flexShrink: 0 }}>⚡</span>
+                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                                   fontFamily: "monospace" }}>
                                   {trigger.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace",
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace",
                                   flexShrink: 0, textAlign: "right" }}>
                                   {trigger.timing} {trigger.event}
                                 </span>
@@ -4743,20 +4903,20 @@ function handleCellCommit(
                                 style={{
                                   display: "flex", alignItems: "center", gap: 6,
                                   padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid #1a1b21",
+                                  borderTop: "1px solid var(--border)",
                                 }}
                               >
                                 <span style={{ fontSize: 9,
-                                  color: idx.isPrimary ? "#f59e0b" : idx.isUnique ? "#6c63ff" : "#4b5563",
+                                  color: idx.isPrimary ? "var(--warning)" : idx.isUnique ? "var(--accent)" : "var(--text-disabled)",
                                   flexShrink: 0 }}>
                                   {idx.isPrimary ? "🔑" : idx.isUnique ? "◈" : "◇"}
                                 </span>
-                                <span style={{ fontSize: 11, color: "#9ca3af", flex: 1,
+                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                                   fontFamily: "monospace" }}>
                                   {idx.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace",
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace",
                                   flexShrink: 0, maxWidth: 80, overflow: "hidden",
                                   textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                                   title={idx.columns}>
@@ -4776,23 +4936,23 @@ function handleCellCommit(
           );
           }))}
             {/* Files section */}
-            <div style={{ borderTop: "1px solid #1e2026", marginTop: 4 }}>
+            <div style={{ borderTop: "1px solid var(--border)", marginTop: 4 }}>
               <div style={{
-                padding: "8px 14px 4px", fontSize: 10, fontWeight: 600, color: "#4b5563",
+                padding: "8px 14px 4px", fontSize: 10, fontWeight: 600, color: "var(--text-disabled)",
                 textTransform: "uppercase", letterSpacing: ".06em",
                 display: "flex", alignItems: "center", justifyContent: "space-between",
               }}>
                 <span>Files</span>
                 <button onClick={openFile} title="Open file" style={{
-                  background: "none", border: "1px solid #2d2f36", borderRadius: 4,
-                  color: "#9ca3af", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "1px 6px",
+                  background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                  color: "var(--text-secondary)", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "1px 6px",
                 }}>
                   +
                 </button>
               </div>
 
               {recentFiles.length === 0 ? (
-                <div style={{ padding: "6px 14px 10px", color: "#4b5563", fontSize: 11 }}>
+                <div style={{ padding: "6px 14px 10px", color: "var(--text-disabled)", fontSize: 11 }}>
                   Open a CSV or JSON file
                 </div>
               ) : (
@@ -4813,17 +4973,17 @@ function handleCellCommit(
                     }}
                     style={{
                       padding: "8px 14px", cursor: "pointer",
-                      borderBottom: "1px solid #1e2026",
-                      borderLeft: `3px solid ${activeTab.file?.id === file.id ? "#10b981" : "transparent"}`,
-                      background: activeTab.file?.id === file.id ? "#1e2026" : "transparent",
+                      borderBottom: "1px solid var(--border)",
+                      borderLeft: `3px solid ${activeTab.file?.id === file.id ? "var(--success)" : "transparent"}`,
+                      background: activeTab.file?.id === file.id ? "var(--surface-2)" : "transparent",
                     }}
                   >
-                    <div style={{ fontSize: 12, fontWeight: 500, color: "#e8e9ec", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 2 }}>
                       {file.name}
                     </div>
                     <span style={{
                       fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
-                      background: "rgba(16,185,129,0.12)", color: "#10b981",
+                      background: "var(--success-bg)", color: "var(--success)",
                       textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "monospace",
                     }}>
                       {file.type}
@@ -4838,7 +4998,7 @@ function handleCellCommit(
 
       {/* Sidebar footer — settings gear */}
       <div style={{
-        borderTop: "1px solid #1e2026",
+        borderTop: "1px solid var(--border)",
         padding: "8px 14px",
         display: "flex",
         alignItems: "center",
@@ -4853,12 +5013,12 @@ function handleCellCommit(
           title="Settings"
           style={{
             background: "none", border: "none",
-            color: "#4b5563", cursor: "pointer",
+            color: "var(--text-disabled)", cursor: "pointer",
             fontSize: 16, padding: "4px 6px",
             borderRadius: 6, transition: "color .15s",
           }}
-          onMouseEnter={e => (e.currentTarget.style.color = "#9ca3af")}
-          onMouseLeave={e => (e.currentTarget.style.color = "#4b5563")}
+          onMouseEnter={e => (e.currentTarget.style.color = "var(--text-secondary)")}
+          onMouseLeave={e => (e.currentTarget.style.color = "var(--text-disabled)")}
         >
           ⚙
         </button>
@@ -4868,7 +5028,7 @@ function handleCellCommit(
       <div
         onMouseDown={onSidebarDragStart}
         style={{ width: 4, cursor: "col-resize", background: "transparent", flexShrink: 0, transition: "background .15s", zIndex: 10 }}
-        onMouseEnter={e => (e.currentTarget.style.background = "#6c63ff44")}
+        onMouseEnter={e => (e.currentTarget.style.background = "var(--accent-bg)")}
         onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
       />
 
@@ -4879,8 +5039,8 @@ function handleCellCommit(
         <div style={{
           display: "flex",
           alignItems: "center",
-          background: "#0e0f11",
-          borderBottom: "1px solid #1e2026",
+          background: "var(--bg)",
+          borderBottom: "1px solid var(--border)",
           overflowX: "auto",
           flexShrink: 0,
           minHeight: 38,
@@ -4911,9 +5071,9 @@ function handleCellCommit(
                 padding: "0 12px",
                 height: 38,
                 cursor: "pointer",
-                borderRight: "1px solid #1e2026",
-                borderBottom: `2px solid ${tab.id === activeTabId ? "#6c63ff" : "transparent"}`,
-                background: tab.id === activeTabId ? "#13141a" : "transparent",
+                borderRight: "1px solid var(--border)",
+                borderBottom: `2px solid ${tab.id === activeTabId ? "var(--accent)" : "transparent"}`,
+                background: tab.id === activeTabId ? "var(--surface)" : "transparent",
                 flexShrink: 0,
                 maxWidth: 200,
                 minWidth: 120,
@@ -4930,14 +5090,14 @@ function handleCellCommit(
               {tab.file && (
                 <div style={{
                   width: 6, height: 6, borderRadius: "50%",
-                  background: "#10b981", flexShrink: 0,
+                  background: "var(--success)", flexShrink: 0,
                 }} />
               )}
 
               {/* Tab title */}
               <span style={{
                 fontSize: 12,
-                color: tab.id === activeTabId ? "#e8e9ec" : "#6b7280",
+                color: tab.id === activeTabId ? "var(--text)" : "var(--text-tertiary)",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -4969,13 +5129,13 @@ function handleCellCommit(
                   }}
                   style={{
                     background: "none", border: "none",
-                    color: "#4b5563", cursor: "pointer",
+                    color: "var(--text-disabled)", cursor: "pointer",
                     fontSize: 14, lineHeight: 1,
                     padding: "2px 4px", flexShrink: 0,
                     borderRadius: 3,
                   }}
-                  onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
-                  onMouseLeave={e => (e.currentTarget.style.color = "#4b5563")}
+                  onMouseEnter={e => (e.currentTarget.style.color = "var(--error)")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "var(--text-disabled)")}
                 >
                   ×
                 </button>
@@ -5000,13 +5160,13 @@ function handleCellCommit(
             }}
             style={{
               background: "none", border: "none",
-              color: "#4b5563", cursor: "pointer",
+              color: "var(--text-disabled)", cursor: "pointer",
               fontSize: 18, lineHeight: 1,
               padding: "0 12px", height: 38,
               flexShrink: 0,
             }}
-            onMouseEnter={e => (e.currentTarget.style.color = "#e8e9ec")}
-            onMouseLeave={e => (e.currentTarget.style.color = "#4b5563")}
+            onMouseEnter={e => (e.currentTarget.style.color = "var(--text)")}
+            onMouseLeave={e => (e.currentTarget.style.color = "var(--text-disabled)")}
             title="New tab (Cmd+T)"
           >
             +
@@ -5016,7 +5176,7 @@ function handleCellCommit(
         {/* Toolbar */}
         <div style={{
           display: "flex", alignItems: "center", gap: 10, padding: "8px 14px",
-          borderBottom: "1px solid #1e2026", background: "#13141a",
+          borderBottom: "1px solid var(--border)", background: "var(--surface)",
           flexShrink: 0, flexWrap: "wrap", minHeight: 44,
         }}>
           {/* Active connection pill */}
@@ -5025,21 +5185,21 @@ function handleCellCommit(
               display: "flex", alignItems: "center", gap: 6,
               padding: "4px 10px", borderRadius: 6,
               background: tunnelPorts[activeTab.connection.id]
-                ? "rgba(16,185,129,0.1)"
+                ? "var(--success-bg)"
                 : tunnelLoading[activeTab.connection.id]
-                ? "rgba(245,158,11,0.1)"
-                : "rgba(239,68,68,0.1)",
+                ? "var(--warning-bg)"
+                : "var(--error-bg)",
               border: `1px solid ${tunnelPorts[activeTab.connection.id]
-                ? "rgba(16,185,129,0.2)"
+                ? "var(--success)"
                 : tunnelLoading[activeTab.connection.id]
-                ? "rgba(245,158,11,0.2)"
-                : "rgba(239,68,68,0.2)"}`,
+                ? "var(--warning)"
+                : "var(--error)"}`,
               fontSize: 11, fontFamily: "monospace",
               color: tunnelPorts[activeTab.connection.id]
-                ? "#10b981"
+                ? "var(--success)"
                 : tunnelLoading[activeTab.connection.id]
-                ? "#f59e0b"
-                : "#ef4444",
+                ? "var(--warning)"
+                : "var(--error)",
             }}>
               {tunnelLoading[activeTab.connection.id]
                 ? "⏳ Opening tunnel…"
@@ -5053,13 +5213,13 @@ function handleCellCommit(
           {activeTab.file && (
             <div style={{
               display: "flex", alignItems: "center", gap: 8, padding: "4px 10px",
-              background: "#1e2026", borderRadius: 6, border: "1px solid rgba(16,185,129,0.3)",
+              background: "var(--surface-2)", borderRadius: 6, border: "1px solid var(--success)",
             }}>
-              <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981", flexShrink: 0 }} />
-              <span style={{ fontSize: 12, color: "#e8e9ec" }}>{activeTab.file.name}</span>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--success)", flexShrink: 0 }} />
+              <span style={{ fontSize: 12, color: "var(--text)" }}>{activeTab.file.name}</span>
               <span style={{
                 fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
-                background: "rgba(16,185,129,0.12)", color: "#10b981",
+                background: "var(--success-bg)", color: "var(--success)",
                 textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "monospace",
               }}>
                 {activeTab.file.type}
@@ -5073,7 +5233,7 @@ function handleCellCommit(
             disabled={activeTab.loading || (!activeTab.connection && !activeTab.file)}
             style={{
               padding: "6px 14px",
-              background: activeTab.loading || (!activeTab.connection && !activeTab.file) ? "#2d2f36" : "#6c63ff",
+              background: activeTab.loading || (!activeTab.connection && !activeTab.file) ? "var(--surface-3)" : "var(--accent)",
               color: "white", border: "none", borderRadius: 6,
               cursor: activeTab.loading || (!activeTab.connection && !activeTab.file) ? "not-allowed" : "pointer",
               fontSize: 12, fontFamily: "monospace", flexShrink: 0, whiteSpace: "nowrap",
@@ -5085,10 +5245,10 @@ function handleCellCommit(
             <div style={{
               display: "flex", alignItems: "center", gap: 6,
               padding: "4px 10px", borderRadius: 6,
-              background: "rgba(245,158,11,0.1)",
-              border: "1px solid rgba(245,158,11,0.2)",
+              background: "var(--warning-bg)",
+              border: "1px solid var(--warning)",
               fontSize: 11, fontFamily: "monospace",
-              color: "#f59e0b", flexShrink: 0,
+              color: "var(--warning)", flexShrink: 0,
             }}
               title="CREATE statements were automatically rewritten to CREATE OR ALTER / CREATE OR REPLACE"
             >
@@ -5103,9 +5263,9 @@ function handleCellCommit(
             }}
             style={{
               padding: "6px 14px",
-              background: showHistory ? "#1e2026" : "none",
-              color: showHistory ? "#e8e9ec" : "#6b7280",
-              border: "1px solid #2d2f36",
+              background: showHistory ? "var(--surface-2)" : "none",
+              color: showHistory ? "var(--text)" : "var(--text-tertiary)",
+              border: "1px solid var(--border)",
               borderRadius: 6,
               cursor: "pointer",
               fontSize: 12,
@@ -5126,9 +5286,9 @@ function handleCellCommit(
             title={auditLogEnabled ? "Audit log ON — click to disable" : "Audit log OFF — click to enable"}
             style={{
               padding: "6px 10px",
-              background: auditLogEnabled ? "rgba(16,185,129,0.1)" : "none",
-              color: auditLogEnabled ? "#10b981" : "#4b5563",
-              border: `1px solid ${auditLogEnabled ? "rgba(16,185,129,0.2)" : "#2d2f36"}`,
+              background: auditLogEnabled ? "var(--success-bg)" : "none",
+              color: auditLogEnabled ? "var(--success)" : "var(--text-disabled)",
+              border: `1px solid ${auditLogEnabled ? "var(--success)" : "var(--border)"}`,
               borderRadius: 6,
               cursor: "pointer",
               fontSize: 11,
@@ -5147,8 +5307,8 @@ function handleCellCommit(
                 style={{
                   padding: "6px 14px",
                   background: "none",
-                  color: "#6b7280",
-                  border: "1px solid #2d2f36",
+                  color: "var(--text-tertiary)",
+                  border: "1px solid var(--border)",
                   borderRadius: 6,
                   cursor: "pointer",
                   fontSize: 12,
@@ -5170,12 +5330,12 @@ function handleCellCommit(
                     top: "calc(100% + 4px)",
                     right: 0,
                     zIndex: 100,
-                    background: "#1e2026",
-                    border: "1px solid #2d2f36",
+                    background: "var(--surface-2)",
+                    border: "1px solid var(--border)",
                     borderRadius: 8,
                     padding: "4px 0",
                     minWidth: 140,
-                    boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                    boxShadow: "var(--shadow)",
                   }}>
                     {[
                       { label: "Export as CSV",  format: "csv"  as const },
@@ -5188,11 +5348,11 @@ function handleCellCommit(
                           display: "block", width: "100%",
                           padding: "8px 16px",
                           background: "none", border: "none",
-                          color: "#e8e9ec", fontSize: 12,
+                          color: "var(--text)", fontSize: 12,
                           fontFamily: "monospace", cursor: "pointer",
                           textAlign: "left",
                         }}
-                        onMouseEnter={e => (e.currentTarget.style.background = "#2d2f36")}
+                        onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
                         onMouseLeave={e => (e.currentTarget.style.background = "none")}
                       >
                         {label}
@@ -5206,7 +5366,7 @@ function handleCellCommit(
 
           {/* Row Count Display */}
           {activeTab.duration !== null && !activeTab.loading && (
-            <span style={{ color: "#6b7280", fontSize: 11, whiteSpace: "nowrap" }}>
+            <span style={{ color: "var(--text-tertiary)", fontSize: 11, whiteSpace: "nowrap" }}>
               {activeTab.results.length > 1
                 ? `${activeTab.results.length} statements · `
                 : activeTab.results[0]?.rowCount
@@ -5214,7 +5374,7 @@ function handleCellCommit(
                 : ""}
               {activeTab.duration}ms
               {activeTab.results.some(r => r.truncated) && (
-                <span style={{ color: "#f59e0b", marginLeft: 8 }}>
+                <span style={{ color: "var(--warning)", marginLeft: 8 }}>
                   ⚠ some results truncated at 10,000 rows
                 </span>
               )}
@@ -5225,8 +5385,8 @@ function handleCellCommit(
         {/* History panel — only shown when a connection is active and history is toggled on */}
         {showHistory && (
           <div style={{
-            borderBottom: "1px solid #1e2026",
-            background: "#13141a",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--surface)",
             maxHeight: 240,
             overflow: "auto",
             flexShrink: 0,
@@ -5236,12 +5396,12 @@ function handleCellCommit(
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              borderBottom: "1px solid #1e2026",
+              borderBottom: "1px solid var(--border)",
               position: "sticky",
               top: 0,
-              background: "#13141a",
+              background: "var(--surface)",
             }}>
-             <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+             <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace" }}>
                 {activeTab.connection
                   ? `${activeTab.connection.name} — recent queries`
                   : "All recent queries"}
@@ -5254,7 +5414,7 @@ function handleCellCommit(
                   setHistory([]);
                 }}
                 style={{
-                  background: "none", border: "none", color: "#6b7280",
+                  background: "none", border: "none", color: "var(--text-tertiary)",
                   cursor: "pointer", fontSize: 11, fontFamily: "monospace",
                 }}
               >
@@ -5263,7 +5423,7 @@ function handleCellCommit(
             </div>
 
             {history.length === 0 ? (
-              <div style={{ padding: "12px 14px", color: "#4b5563", fontSize: 12, fontFamily: "monospace" }}>
+              <div style={{ padding: "12px 14px", color: "var(--text-disabled)", fontSize: 12, fontFamily: "monospace" }}>
                 No history yet
               </div>
             ) : (
@@ -5276,16 +5436,16 @@ function handleCellCommit(
                   }}
                   style={{
                     padding: "8px 14px",
-                    borderBottom: "1px solid #1a1b21",
+                    borderBottom: "1px solid var(--border)",
                     cursor: "pointer",
                     transition: "background .1s",
                   }}
-                  onMouseEnter={e => (e.currentTarget.style.background = "#1e2026")}
+                  onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-2)")}
                   onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
                 >
                   <div style={{
                     fontSize: 11,
-                    color: entry.success ? "#9ca3af" : "#ef4444",
+                    color: entry.success ? "var(--text-secondary)" : "var(--error)",
                     fontFamily: "monospace",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -5298,7 +5458,7 @@ function handleCellCommit(
                     display: "flex",
                     gap: 10,
                     fontSize: 10,
-                    color: "#4b5563",
+                    color: "var(--text-disabled)",
                     fontFamily: "monospace",
                   }}>
                     <span>{entry.connectionName}</span>
@@ -5322,12 +5482,12 @@ function handleCellCommit(
         )}
 
         {/* Editor */}
-        <div style={{ height: editorHeight, minHeight: editorHeight, maxHeight: editorHeight, borderBottom: "1px solid #1e2026", flexShrink: 0, overflow: "hidden" }}>
+        <div style={{ height: editorHeight, minHeight: editorHeight, maxHeight: editorHeight, borderBottom: "1px solid var(--border)", flexShrink: 0, overflow: "hidden" }}>
           <Editor
             beforeMount={handleBeforeMount}
             height="100%"
             defaultLanguage="sql"
-            theme="vs-dark"
+            theme={resolvedTheme === "dark" ? "vs-dark" : "vs"}
             defaultValue="-- Write your query here&#10;SELECT 1"
             onMount={handleEditorMount}
             options={{
@@ -5343,7 +5503,7 @@ function handleCellCommit(
         <div
           onMouseDown={onEditorDragStart}
           style={{ height: 4, cursor: "row-resize", background: "transparent", flexShrink: 0, transition: "background .15s", zIndex: 10 }}
-          onMouseEnter={e => (e.currentTarget.style.background = "#6c63ff44")}
+          onMouseEnter={e => (e.currentTarget.style.background = "var(--accent-bg)")}
           onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
         />
 
@@ -5353,9 +5513,9 @@ function handleCellCommit(
           {activeTab.error && (
             <div style={{
               padding: "10px 14px",
-              background: "rgba(239,68,68,0.1)",
-              borderBottom: "1px solid rgba(239,68,68,0.2)",
-              color: "#ef4444", fontSize: 12,
+              background: "var(--error-bg)",
+              borderBottom: "1px solid var(--error)",
+              color: "var(--error)", fontSize: 12,
               wordBreak: "break-word", flexShrink: 0,
             }}>
               ❌ {activeTab.error}
@@ -5367,8 +5527,8 @@ function handleCellCommit(
             <div style={{
               display: "flex",
               alignItems: "center",
-              background: "#0e0f11",
-              borderBottom: "1px solid #1e2026",
+              background: "var(--bg)",
+              borderBottom: "1px solid var(--border)",
               overflowX: "auto",
               flexShrink: 0,
             }}>
@@ -5381,9 +5541,9 @@ function handleCellCommit(
                     background: "none",
                     border: "none",
                     borderBottom: `2px solid ${
-                      activeTab.activeResult === i ? "#6c63ff" : "transparent"
+                      activeTab.activeResult === i ? "var(--accent)" : "transparent"
                     }`,
-                    color: activeTab.activeResult === i ? "#e8e9ec" : "#6b7280",
+                    color: activeTab.activeResult === i ? "var(--text)" : "var(--text-tertiary)",
                     cursor: "pointer",
                     fontSize: 11,
                     fontFamily: "monospace",
@@ -5399,7 +5559,7 @@ function handleCellCommit(
                   {result.sql && (
                     <span style={{
                       marginLeft: 6,
-                      color: "#4b5563",
+                      color: "var(--text-disabled)",
                       fontSize: 10,
                       maxWidth: 120,
                       overflow: "hidden",
@@ -5421,7 +5581,7 @@ function handleCellCommit(
             if (!result) {
               if (!activeTab.error && !activeTab.loading) {
                 return (
-                  <div style={{ padding: "40px 16px", color: "#374151",
+                  <div style={{ padding: "40px 16px", color: "var(--text-disabled)",
                     fontSize: 13, textAlign: "center" }}>
                     {activeTab.file
                       ? "Write a query using \"data\" as the table name"
@@ -5438,8 +5598,8 @@ function handleCellCommit(
               return (
                 <div style={{
                   padding: "10px 14px",
-                  background: "rgba(239,68,68,0.1)",
-                  color: "#ef4444", fontSize: 12,
+                  background: "var(--error-bg)",
+                  color: "var(--error)", fontSize: 12,
                   wordBreak: "break-word",
                 }}>
                   ❌ {result.error}
@@ -5456,16 +5616,16 @@ function handleCellCommit(
                   gap: 8,
                 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ color: "#10b981", fontSize: 18 }}>✓</span>
+                    <span style={{ color: "var(--success)", fontSize: 18 }}>✓</span>
                     <span style={{
-                      color: "#9ca3af", fontSize: 13, fontFamily: "monospace",
+                      color: "var(--text-secondary)", fontSize: 13, fontFamily: "monospace",
                     }}>
                       {result.rows[0]?.[0] ?? "Command completed successfully."}
                     </span>
                   </div>
                   {result.wasRewritten && (
                     <div style={{
-                      fontSize: 11, color: "#f59e0b",
+                      fontSize: 11, color: "var(--warning)",
                       fontFamily: "monospace", paddingLeft: 28,
                     }}>
                       ✦ Automatically rewritten to CREATE OR ALTER / CREATE OR REPLACE
@@ -5477,7 +5637,7 @@ function handleCellCommit(
 
             if (result.rows.length === 0) {
               return (
-                <div style={{ padding: "16px", color: "#6b7280", fontSize: 13 }}>
+                <div style={{ padding: "16px", color: "var(--text-tertiary)", fontSize: 13 }}>
                   Query executed successfully — 0 rows returned
                 </div>
               );
