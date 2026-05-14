@@ -27,7 +27,7 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 // DLL integrity hashes — regenerate after every DLL rebuild
 const HASH_CONNECTIONMANAGER: &str = "618b21ff617d4d1f75b3c6b8c2946c3e0f22f4107423a239a68caa278123ded3";
 const HASH_FILEQUERYENGINE: &str = "e2afb7771c1c397ad298f997a697eb327f8db441e294d664835251bcbdeec4bb";
-const HASH_QUERYEXECUTOR: &str = "99f3b8e6d808f3998b5cf4b739d9a728afa4cb1c0018e1c8ee3b94821824dd45";
+const HASH_QUERYEXECUTOR: &str = "6861ca8534cac480639a88dfaf21709317d57cbfec4225f0b64c9de6188378a7";
 const HASH_QUERYHISTORY: &str = "5bcf7fbce40ce737eb97c4a455161c947d04b841177091f670dfdf5f7bbda0ff";
 const HASH_SCHEMAEXPLORER: &str = "e13357811d16176b4faabbe987fab599650adfac5cc8f7db5ce2a65b0571909b";
 const HASH_SSHTUNNEL: &str = "fde39b1a8439f07de3c3edb7c9e6e4b136f363fb3bc5184b123de9e82f420aa5";
@@ -94,7 +94,7 @@ fn get_sqlcipher() -> &'static libloading::Library {
 }
 
 #[tauri::command]
-fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>) -> String {
+async fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>) -> String {
     let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -304,7 +304,7 @@ fn build_connection_string(
 }
 
 #[tauri::command]
-fn query_file(file_path: String, sql: String) -> String {
+async fn query_file(file_path: String, sql: String) -> String {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
@@ -318,7 +318,7 @@ fn query_file(file_path: String, sql: String) -> String {
 }
 
 #[tauri::command]
-fn get_file_schema(file_path: String) -> String {
+async fn get_file_schema(file_path: String) -> String {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
             get_file_query_engine().get(b"get_file_schema").expect("get_file_schema");
@@ -330,7 +330,7 @@ fn get_file_schema(file_path: String) -> String {
 }
 
 #[tauri::command]
-fn list_db_tables(
+async fn list_db_tables(
     credential_ref: String, engine: String, host: String,
     port: u16, database: String, username: String,
 ) -> Result<String, String> {
@@ -361,7 +361,7 @@ fn list_db_tables(
 }
 
 #[tauri::command]
-fn query_file_with_db(
+async fn query_file_with_db(
     file_path: String, sql: String, credential_ref: String,
     engine: String, host: String, port: u16,
     database: String, username: String, table_names: String,
@@ -403,7 +403,7 @@ fn query_file_with_db(
 }
 
 #[tauri::command]
-fn get_schema(
+async fn get_schema(
     credential_ref: String,
     engine: String,
     host: String,
@@ -488,7 +488,7 @@ fn get_schema(
 }
 
 #[tauri::command]
-fn add_history_entry(
+async fn add_history_entry(
     connection_id: String, connection_name: String, sql: String,
     executed_at: i64, duration_ms: i32, row_count: i32, success: bool,
 ) -> bool {
@@ -508,7 +508,7 @@ fn add_history_entry(
 }
 
 #[tauri::command]
-fn get_history(connection_id: String, limit: i32) -> String {
+async fn get_history(connection_id: String, limit: i32) -> String {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char, i32) -> *const c_char> =
             get_query_history().get(b"get_history").expect("get_history");
@@ -520,7 +520,7 @@ fn get_history(connection_id: String, limit: i32) -> String {
 }
 
 #[tauri::command]
-fn clear_history(connection_id: String) -> bool {
+async fn clear_history(connection_id: String) -> bool {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
             get_query_history().get(b"clear_history").expect("clear_history");
@@ -530,7 +530,7 @@ fn clear_history(connection_id: String) -> bool {
 }
 
 #[tauri::command]
-fn test_connection(
+async fn test_connection(
     credential_ref: String,
     engine: String,
     host: String,
@@ -657,7 +657,7 @@ fn migrate_credential(
 }
 
 #[tauri::command]
-fn open_tunnel(
+async fn open_tunnel(
     tunnel_id: String,
     ssh_host: String,
     ssh_port: i32,
@@ -800,7 +800,7 @@ fn get_ssh_password(target: String, username: String) -> Result<String, String> 
 }
 
 #[tauri::command]
-fn export_results(
+async fn export_results(
     path: String,
     format: String,
     columns: Vec<String>,
@@ -933,7 +933,7 @@ fn append_audit_log(
 }
 
 #[tauri::command]
-fn get_object_definition(
+async fn get_object_definition(
     credential_ref: String,
     engine: String,
     host: String,
@@ -1132,7 +1132,7 @@ fn scrub_sql_for_log(sql: &str) -> String {
 }
 
 #[tauri::command]
-fn get_sqlite_objects(database: String) -> Result<String, String> {
+async fn get_sqlite_objects(database: String) -> Result<String, String> {
     let conn_str = format!("Data Source={}", database);
 
     // Single query fetches all programmable objects at once
@@ -1165,7 +1165,7 @@ fn get_sqlite_objects(database: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn drop_object(
+async fn drop_object(
     credential_ref: String,
     engine: String,
     host: String,
@@ -1381,7 +1381,7 @@ fn queries_dir() -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn save_query(id: String, sql: String, meta_json: String) -> Result<(), String> {
+async fn save_query(id: String, sql: String, meta_json: String) -> Result<(), String> {
     let dir = queries_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
@@ -1410,7 +1410,7 @@ fn save_query(id: String, sql: String, meta_json: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn list_queries() -> Result<String, String> {
+async fn list_queries() -> Result<String, String> {
     let dir = queries_dir();
     if !dir.exists() {
         return Ok("[]".to_string());
@@ -1465,7 +1465,7 @@ fn list_queries() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn delete_query(id: String) -> Result<(), String> {
+async fn delete_query(id: String) -> Result<(), String> {
     let dir = queries_dir();
     let sql_path  = dir.join(format!("{}.sql", id));
     let meta_path = dir.join(format!("{}.meta.toml", id));
@@ -1480,7 +1480,7 @@ fn delete_query(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn load_query(id: String) -> Result<String, String> {
+async fn load_query(id: String) -> Result<String, String> {
     let path = queries_dir().join(format!("{}.sql", id));
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
@@ -1741,6 +1741,104 @@ fn import_dbeaver_connections() -> String {
     serde_json::to_string(&DbeaverImportResult { imported, skipped, error: None }).unwrap()
 }
 
+// Two new Tauri commands for the Activity panel.
+// Both follow the existing execute_query pattern:
+//   - mut connection_string so we can zero it after use
+//   - libloading::Symbol resolves the C# entry point
+//   - C-string round-trip across the FFI boundary
+//   - Null-pointer guard returns a JSON error envelope
+//   - Zero the connection string in memory immediately after the call
+
+// ── get_activity ─────────────────────────────────────────────────────────────
+#[tauri::command]
+async fn get_activity(mut connection_string: String, engine: String) -> String {
+    let result = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_query_executor()
+            .get(b"get_activity")
+            .expect("get_activity");
+        let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
+        let c_engine = CString::new(engine).unwrap_or_default();
+        let ptr = func(c_conn.as_ptr(), c_engine.as_ptr());
+        if ptr.is_null() {
+            "{\"error\":\"null response\"}".to_string()
+        } else {
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    };
+    // Zero the connection string in memory after use — same pattern as
+    // execute_query. Prevents passwords lingering in process memory.
+    unsafe {
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+    }
+    result
+}
+
+
+// ── kill_session ─────────────────────────────────────────────────────────────
+#[tauri::command]
+async fn kill_session(mut connection_string: String, engine: String, pid: String) -> String {
+    let result = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char, *const c_char,
+        ) -> *const c_char> = get_query_executor()
+            .get(b"kill_session")
+            .expect("kill_session");
+        let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
+        let c_engine = CString::new(engine).unwrap_or_default();
+        let c_pid    = CString::new(pid).unwrap_or_default();
+        let ptr = func(c_conn.as_ptr(), c_engine.as_ptr(), c_pid.as_ptr());
+        if ptr.is_null() {
+            "{\"error\":\"null response\"}".to_string()
+        } else {
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    };
+    unsafe {
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+    }
+    result
+}
+
+
+// ─── invoke_handler addition ────────────────────────────────────────────────
+//
+// In your existing tauri::generate_handler![ ... ] block near the end of run(),
+// add these two lines (anywhere in the list, comma-separated like the others):
+//
+//             get_activity,
+//             kill_session,
+//
+// For example, near the end of the existing list it would look like:
+//
+//             ...
+//             import_dbeaver_connections,
+//             get_activity,
+//             kill_session])
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+// ─── Update DLL hash after rebuild ──────────────────────────────────────────
+//
+// Because you're adding two new exports to QueryExecutor.dll, the hash will
+// change after the next build. After running `dotnet publish` on the
+// QueryExecutor project, regenerate the hash:
+//
+//   sha256sum natives/QueryExecutor.dll
+//   (or on Windows: Get-FileHash natives/QueryExecutor.dll -Algorithm SHA256)
+//
+// Then update this line at the top of main.rs:
+//
+//   const HASH_QUERYEXECUTOR: &str = "...";
+//
+// If you have the update-hashes.ps1 script mentioned in the Week 7-8 checklist
+// item, just run that — it'll handle all the hashes in one shot.
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn main() {
 
      // Verify all native DLL integrity before loading
@@ -1836,7 +1934,9 @@ fn main() {
             list_queries,
             delete_query,
             load_query,
-            import_dbeaver_connections])
+            import_dbeaver_connections,
+            get_activity,
+            kill_session])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

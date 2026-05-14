@@ -130,6 +130,20 @@ interface HistoryEntry {
   success: boolean;
 }
 
+// ── Activity panel ─────────────────────────────────────────────────────────
+// Matches ActivityRow from ActivityExecutor.cs (camelCase JSON).
+// All string fields may be empty — engines populate optional columns
+// inconsistently (CockroachDB notably leaves several blank).
+interface ActivityRow {
+  pid:        string;
+  user:       string;
+  database:   string;
+  state:      string;
+  durationMs: number;
+  query:      string;
+  host:       string;
+}
+
 interface Tab {
   id:          string;
   title:       string;
@@ -1318,6 +1332,198 @@ function useDebounce<T>(value: T, delay: number): T {
 }
 
 {/*Renders a section in the schema sidebar for tables, views, or routines*/}
+// ── Activity panel body ─────────────────────────────────────────────────────
+// Pure presentation: takes already-loaded rows and emits a row-per-query.
+// Polling, loading-state management, and kill-execution all live in App();
+// this component just renders what it's handed and emits user intent
+// (refresh request, kill request) back up through callbacks.
+function ActivityPanelBody({
+  rows, loading, error, engine, onRefresh, onKillRequest,
+}: {
+  rows:          ActivityRow[];
+  loading:       boolean;
+  error:         string | null;
+  engine:        string;
+  onRefresh:     () => void;
+  onKillRequest: (row: ActivityRow) => void;
+}) {
+  // Format milliseconds → human-readable duration.
+  // <1s shows ms; <60s shows seconds; otherwise mm:ss.
+  function fmtDuration(ms: number): string {
+    if (ms < 1000) return `${ms}ms`;
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    return `${m}m ${s % 60}s`;
+  }
+
+  return (
+    <div style={{
+      flex: 1, display: "flex", flexDirection: "column",
+      overflow: "hidden", minHeight: 0,
+    }}>
+      {/* Header strip — refresh button + status */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "6px 14px",
+        borderBottom: "1px solid var(--border)",
+        background: "var(--bg)",
+        fontFamily: "monospace", fontSize: 11, flexShrink: 0,
+      }}>
+        <span style={{ color: "var(--text-secondary)" }}>
+          ⚡ Active queries on this connection — auto-refresh every 5s
+        </span>
+        <span style={{ flex: 1 }} />
+        {loading && (
+          <span style={{ color: "var(--text-tertiary)" }}>Loading…</span>
+        )}
+        <button
+          onClick={onRefresh}
+          style={{
+            padding: "3px 10px",
+            background: "var(--surface-2)",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+            color: "var(--text-secondary)",
+            fontFamily: "monospace",
+            fontSize: 10,
+            cursor: "pointer",
+          }}
+        >
+          ↻ Refresh
+        </button>
+      </div>
+
+      {/* Error banner if last fetch failed.
+          Doesn't replace the rows — failed refresh keeps stale data visible,
+          which is preferable to blanking the panel on a transient blip. */}
+      {error && (
+        <div style={{
+          padding: "8px 14px",
+          background: "var(--error-bg)",
+          color: "var(--error)",
+          fontSize: 11, fontFamily: "monospace",
+          borderBottom: "1px solid var(--error)",
+          flexShrink: 0,
+        }}>
+          ❌ {error}
+        </div>
+      )}
+
+      {/* Empty state */}
+      {!loading && rows.length === 0 && !error && (
+        <div style={{
+          padding: "40px 16px",
+          color: "var(--text-disabled)",
+          fontSize: 13, textAlign: "center",
+        }}>
+          No active queries — server is idle (or all activity is from this connection).
+        </div>
+      )}
+
+      {/* Row list — scrollable. Each row is a card so query text can wrap
+          without breaking the table grid. A real table would force
+          horizontal scrolling for long queries which is worse UX. */}
+      {rows.length > 0 && (
+        <div style={{ flex: 1, overflow: "auto", padding: "8px 0" }}>
+          {rows.map((row) => (
+            <div
+              key={row.pid}
+              style={{
+                padding: "8px 14px",
+                borderBottom: "1px solid var(--surface-3)",
+                fontFamily: "monospace", fontSize: 11,
+                display: "flex", flexDirection: "column", gap: 4,
+              }}
+            >
+              {/* Top meta row — pid, user, db, state, duration, kill */}
+              <div style={{
+                display: "flex", alignItems: "center", gap: 12,
+                color: "var(--text-tertiary)",
+              }}>
+                <span style={{ color: "var(--accent)", fontWeight: 600 }}>
+                  #{row.pid}
+                </span>
+                {row.user && <span>👤 {row.user}</span>}
+                {row.database && <span>🗄 {row.database}</span>}
+                {row.state && (
+                  <span style={{
+                    padding: "1px 6px",
+                    background: row.state.toLowerCase() === "active"
+                      ? "var(--success-bg)" : "var(--surface-3)",
+                    color: row.state.toLowerCase() === "active"
+                      ? "var(--success)" : "var(--text-secondary)",
+                    borderRadius: 3,
+                    fontSize: 10,
+                  }}>
+                    {row.state}
+                  </span>
+                )}
+                <span style={{ color: "var(--warning)" }}>
+                  ⏱ {fmtDuration(row.durationMs)}
+                </span>
+                {row.host && (
+                  <span style={{ color: "var(--text-disabled)" }}>
+                    {row.host}
+                  </span>
+                )}
+                <span style={{ flex: 1 }} />
+                <button
+                  onClick={() => onKillRequest(row)}
+                  title={`Kill session ${row.pid}`}
+                  style={{
+                    padding: "2px 8px",
+                    background: "var(--error-bg)",
+                    border: "1px solid var(--error)",
+                    borderRadius: 3,
+                    color: "var(--error)",
+                    fontFamily: "monospace",
+                    fontSize: 10,
+                    cursor: "pointer",
+                  }}
+                >
+                  Kill
+                </button>
+              </div>
+              {/* Query text — wraps; we use the raw query as-is and let CSS
+                  break long lines. Truncating in TS would hide useful detail. */}
+              {row.query && (
+                <div style={{
+                  color: "var(--text)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  fontSize: 11,
+                  paddingLeft: 4,
+                  paddingRight: 4,
+                  maxHeight: 120,
+                  overflow: "auto",
+                }}>
+                  {row.query}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Footer note for CockroachDB — its pg_stat_activity columns
+          are sparse, so we tell the user not to expect everything. */}
+      {engine === "cockroachdb" && (
+        <div style={{
+          padding: "6px 14px",
+          fontSize: 10, fontFamily: "monospace",
+          color: "var(--text-tertiary)",
+          borderTop: "1px solid var(--border)",
+          flexShrink: 0,
+        }}>
+          ℹ CockroachDB exposes a subset of Postgres activity columns — some fields may be blank.
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function SchemaSection({
   label, count, expanded, onToggle,
   children, emptyMessage,
@@ -1473,6 +1679,15 @@ function App() {
   const schemaRef = useRef<SchemaResult | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+
+  // Activity panel — bottom panel peer to results tabs.
+  // Hidden for SQLite (no concept of server-side activity).
+  // Polled every 5s only when open AND app focused.
+  const [showActivity, setShowActivity]     = useState(false);
+  const [activityRows, setActivityRows]     = useState<ActivityRow[]>([]);
+  const [activityError, setActivityError]   = useState<string | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [killPending, setKillPending]       = useState<ActivityRow | null>(null);
   const [locked, setLocked] = useState(false);
   const [saveQueryOpen, setSaveQueryOpen] = useState(false);
   const [saveQueryName, setSaveQueryName] = useState("");
@@ -2730,6 +2945,13 @@ function App() {
         () => { formatSqlRef.current(); }
       );
 
+      // Ctrl+Shift+A / Cmd+Shift+A — toggle Activity panel
+      // No ref needed; toggle is a simple state flip with no closure issues.
+      editor.addCommand(
+        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyA,
+        () => { setShowActivity(prev => !prev); }
+      );
+
     // Save SQL to tab on every change
     editor.onDidChangeModelContent(() => {
       const sql = editor.getValue();
@@ -2887,6 +3109,139 @@ function App() {
       console.error("Failed to load history:", e);
     }
   }
+
+  // ── Activity panel: load + kill ──────────────────────────────────────────
+  // Builds the connection string for the active tab's connection (same path
+  // as execute_query) and asks the C# side for currently-running queries.
+  // No-op when no connection, SQLite connection, or activity panel closed.
+  async function loadActivity(conn: ConnectionConfig | null, silent = false) {
+    if (!conn || conn.engine === "sqlite") {
+      setActivityRows([]);
+      return;
+    }
+    if (!silent) setActivityLoading(true);
+    try {
+      // Same tunnel handling as runQuery — if SSH is enabled we route via
+      // 127.0.0.1:<tunnelPort> with SSL disabled (the tunnel is already
+      // encrypted). Passing tunnelPort:0 / a missing field to Rust trips
+      // its "port must be valid" check, hence the undefined fallback.
+      let tunnelPort: number | undefined;
+      if (conn.sshEnabled) {
+        const port = await openTunnel(conn);
+        if (!port) {
+          setActivityError("SSH tunnel failed");
+          setActivityRows([]);
+          return;
+        }
+        tunnelPort = port;
+      }
+      const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
+
+      const connectionString = await invoke<string>("build_connection_string", {
+        credentialRef: conn.credentialRef,
+        engine:        conn.engine,
+        host:          conn.host,
+        port:          conn.port,
+        database:      conn.database,
+        username:      conn.username,
+        sslMode:       effectiveSslMode,
+        sqlInstance:   conn.sqlInstance ?? "",
+        windowsAuth:   conn.windowsAuth ?? false,
+        tunnelPort:    tunnelPort,
+      });
+
+      const raw = await invoke<string>("get_activity", {
+        connectionString,
+        engine: conn.engine,
+      });
+
+      const parsed = JSON.parse(raw);
+      if (parsed.error) {
+        setActivityError(parsed.error);
+        setActivityRows([]);
+      } else {
+        setActivityError(null);
+        setActivityRows(parsed.rows ?? []);
+      }
+    } catch (e) {
+      setActivityError(String(e));
+      setActivityRows([]);
+    } finally {
+      if (!silent) setActivityLoading(false);
+    }
+  }
+
+  // Kill a session and immediately refresh the list. The DB enforces "you can
+  // only kill your own queries" via permission checks; we surface the error
+  // unchanged so the user sees the DB's own message.
+  async function killActivity(row: ActivityRow) {
+    const conn = activeTab.connection;
+    if (!conn || conn.engine === "sqlite") return;
+    try {
+      // Reuse the existing tunnel for this connection if one is open.
+      // openTunnel is idempotent via tunnelPortsRef cache, so this is cheap.
+      let tunnelPort: number | undefined;
+      if (conn.sshEnabled) {
+        const port = await openTunnel(conn);
+        if (!port) {
+          setActivityError("SSH tunnel failed");
+          return;
+        }
+        tunnelPort = port;
+      }
+      const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
+
+      const connectionString = await invoke<string>("build_connection_string", {
+        credentialRef: conn.credentialRef,
+        engine:        conn.engine,
+        host:          conn.host,
+        port:          conn.port,
+        database:      conn.database,
+        username:      conn.username,
+        sslMode:       effectiveSslMode,
+        sqlInstance:   conn.sqlInstance ?? "",
+        windowsAuth:   conn.windowsAuth ?? false,
+        tunnelPort:    tunnelPort,
+      });
+
+      const raw = await invoke<string>("kill_session", {
+        connectionString,
+        engine: conn.engine,
+        pid:    row.pid,
+      });
+      const parsed = JSON.parse(raw);
+      if (parsed.error) {
+        setActivityError(parsed.error);
+      } else {
+        setActivityError(null);
+        // Refresh silently so the user sees the kill take effect immediately
+        await loadActivity(conn, true);
+      }
+    } catch (e) {
+      setActivityError(String(e));
+    }
+  }
+
+  // 5-second poll: runs only when panel open, document visible, and there's
+  // a non-SQLite connection. setInterval is paused (cleared) when any of
+  // those conditions go false — no wasted DB connections in the background.
+  useEffect(() => {
+    if (!showActivity) return;
+    if (!activeTab.connection) return;
+    if (activeTab.connection.engine === "sqlite") return;
+
+    let active = true;
+    const tick = () => {
+      if (!active) return;
+      if (document.visibilityState !== "visible") return;
+      // Silent refresh — don't flash a spinner every 5s
+      loadActivity(activeTab.connection, true);
+    };
+    // Immediate load, then every 5s
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { active = false; clearInterval(id); };
+  }, [showActivity, activeTab.connection?.id]);
 
   async function exportResults(format: "csv" | "json") {
     const result = activeTab.results[activeTab.activeResult];
@@ -3707,6 +4062,90 @@ function handleCellCommit(
         </>
       )}
       {/* END Drop object confirmation */}
+      {/* Kill session confirmation — uses the same shell as Drop object.
+          Destructive action, must be confirmed; runs through killActivity()
+          which surfaces DB-level permission errors back to the user. */}
+      {killPending && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999,
+              background: "rgba(0,0,0,0.6)" }}
+            onClick={() => setKillPending(null)}
+          />
+          <div style={{
+            position: "fixed", top: "50%", left: "50%",
+            transform: "translate(-50%,-50%)",
+            zIndex: 1000, background: "var(--surface-2)",
+            border: "1px solid var(--border)", borderRadius: 12,
+            padding: "24px 28px", minWidth: 380, maxWidth: 520,
+            boxShadow: "var(--shadow-lg)",
+          }}>
+            <div style={{ display: "flex", alignItems: "center",
+              gap: 10, marginBottom: 12 }}>
+              <span style={{ fontSize: 20 }}>⚠️</span>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
+                Kill session
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-secondary)",
+              marginBottom: 16, lineHeight: 1.6 }}>
+              This will cancel session{" "}
+              <strong style={{ color: "var(--text)" }}>#{killPending.pid}</strong>
+              {killPending.user && <> running as <strong style={{ color: "var(--text)" }}>{killPending.user}</strong></>}.
+              {" "}The query in progress will be interrupted.
+            </div>
+            {killPending.query && (
+              <div style={{
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: "10px 14px",
+                marginBottom: 20,
+                fontFamily: "monospace",
+                fontSize: 11,
+                color: "var(--text)",
+                maxHeight: 120,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}>
+                {killPending.query}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={async () => {
+                  const target = killPending;
+                  setKillPending(null);
+                  if (target) await killActivity(target);
+                }}
+                style={{
+                  flex: 1, padding: "8px 0",
+                  background: "var(--error)", color: "white",
+                  border: "none", borderRadius: 6,
+                  cursor: "pointer", fontSize: 12,
+                  fontFamily: "monospace", fontWeight: 600,
+                }}
+              >
+                Kill session
+              </button>
+              <button
+                onClick={() => setKillPending(null)}
+                style={{
+                  flex: 1, padding: "8px 0",
+                  background: "transparent", color: "var(--text-secondary)",
+                  border: "1px solid var(--border)", borderRadius: 6,
+                  cursor: "pointer", fontSize: 12,
+                  fontFamily: "monospace",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      {/* END Kill session confirmation */}
       {/* Settings modal */}
       {showSettings && (
         <>
@@ -5522,8 +5961,9 @@ function handleCellCommit(
             </div>
           )}
 
-          {/* Result tab bar — only shown when multiple results */}
-          {activeTab.results.length > 1 &&  (
+          {/* Result tab bar — shown when multiple results OR Activity panel open.
+              Activity is a virtual "tab" at the right end with activeResult = -1. */}
+          {(activeTab.results.length > 1 || (showActivity && activeTab.connection?.engine !== "sqlite")) && (
             <div style={{
               display: "flex",
               alignItems: "center",
@@ -5572,11 +6012,87 @@ function handleCellCommit(
                   )}
                 </button>
               ))}
+              {/* Activity tab — virtual tab at the right end.
+                  Only when panel is open and connection supports activity. */}
+              {showActivity && activeTab.connection?.engine !== "sqlite" && (
+                <button
+                  onClick={() => updateActiveTab({ activeResult: -1 })}
+                  title="Active queries (Ctrl+Shift+A to toggle)"
+                  style={{
+                    padding: "6px 14px",
+                    marginLeft: "auto",  // push to right end
+                    background: "none",
+                    border: "none",
+                    borderBottom: `2px solid ${
+                      activeTab.activeResult === -1 ? "var(--accent)" : "transparent"
+                    }`,
+                    color: activeTab.activeResult === -1 ? "var(--text)" : "var(--text-tertiary)",
+                    cursor: "pointer",
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  <span>⚡ Activity</span>
+                  {activityRows.length > 0 && (
+                    <span style={{
+                      background: "var(--accent-bg)",
+                      color: "var(--accent)",
+                      borderRadius: 10,
+                      padding: "0 6px",
+                      fontSize: 10,
+                      fontFamily: "monospace",
+                    }}>
+                      {activityRows.length}
+                    </span>
+                  )}
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowActivity(false);
+                      // If user was viewing activity, drop them back on first result
+                      if (activeTab.activeResult === -1) {
+                        updateActiveTab({ activeResult: 0 });
+                      }
+                    }}
+                    style={{
+                      color: "var(--text-disabled)",
+                      fontSize: 12,
+                      marginLeft: 2,
+                      padding: "0 2px",
+                    }}
+                    title="Close Activity panel"
+                  >
+                    ✕
+                  </span>
+                </button>
+              )}
             </div>
           )}
 
           {/* Active result */}
           {(() => {
+            // Activity panel — virtual "result" at index -1.
+            // Bottom panel peer to result tabs. Renders even when there
+            // are no query results — that's the whole point: monitor
+            // server activity while writing the next query.
+            if (activeTab.activeResult === -1 && showActivity) {
+              return (
+                <ActivityPanelBody
+                  rows={activityRows}
+                  loading={activityLoading}
+                  error={activityError}
+                  engine={activeTab.connection?.engine ?? ""}
+                  onRefresh={() => loadActivity(activeTab.connection, false)}
+                  onKillRequest={(row) => setKillPending(row)}
+                />
+              );
+            }
+
             const result = activeTab.results[activeTab.activeResult];
             if (!result) {
               if (!activeTab.error && !activeTab.loading) {
