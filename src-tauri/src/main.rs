@@ -27,7 +27,7 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 // DLL integrity hashes — regenerate after every DLL rebuild
 const HASH_CONNECTIONMANAGER: &str = "618b21ff617d4d1f75b3c6b8c2946c3e0f22f4107423a239a68caa278123ded3";
 const HASH_FILEQUERYENGINE: &str = "e2afb7771c1c397ad298f997a697eb327f8db441e294d664835251bcbdeec4bb";
-const HASH_QUERYEXECUTOR: &str = "6861ca8534cac480639a88dfaf21709317d57cbfec4225f0b64c9de6188378a7";
+const HASH_QUERYEXECUTOR: &str = "b1ff3e41559888356e42bcb61f416963caebff71c83091c774af829504868582";
 const HASH_QUERYHISTORY: &str = "5bcf7fbce40ce737eb97c4a455161c947d04b841177091f670dfdf5f7bbda0ff";
 const HASH_SCHEMAEXPLORER: &str = "e13357811d16176b4faabbe987fab599650adfac5cc8f7db5ce2a65b0571909b";
 const HASH_SSHTUNNEL: &str = "fde39b1a8439f07de3c3edb7c9e6e4b136f363fb3bc5184b123de9e82f420aa5";

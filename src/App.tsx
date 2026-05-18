@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from "react";
 import Editor from "@monaco-editor/react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
 import { format as formatSql } from "sql-formatter";
+import Fuse from "fuse.js";
 import {
   useReactTable,
   getCoreRowModel,
@@ -53,7 +54,36 @@ interface QueryResult {
   error?:    string;
   isMessage?: boolean;
   sql?:      string;  
-  wasRewritten?: boolean; 
+  wasRewritten?: boolean;
+  // True when this result is the output of an EXPLAIN / SHOWPLAN_XML wrapper.
+  // The plan renderer detects this flag and replaces the data grid with the
+  // tree visualisation. Set by runQuery when includePlan is enabled.
+  isPlan?:   boolean;
+  // The engine that produced the plan — needed because each engine's parser
+  // expects a different format (Postgres JSON, SQL Server XML, MySQL JSON).
+  planEngine?: string;
+}
+
+// ── Execution plan tree ─────────────────────────────────────────────────────
+// Normalised across engines. Postgres JSON, SQL Server XML, and MySQL JSON
+// all parse into this same shape so the renderer code is engine-agnostic.
+//
+//   label    — short operator name shown in the tree (e.g. "Seq Scan", "Hash Join")
+//   detail   — secondary text shown in muted color (e.g. table name, index name)
+//   cost     — total cost or estimated cost. Used for hot-node ranking.
+//   rows     — estimated or actual rows produced by this node
+//   actualMs — present only when ANALYZE was used. Real execution time.
+//   children — sub-plans. Empty array (not undefined) for leaves.
+//   meta     — engine-specific extras (filters, sort keys, buffer reads, etc).
+//              Rendered as a key-value table beneath the node.
+interface PlanNode {
+  label:    string;
+  detail:   string;
+  cost:     number;
+  rows:     number;
+  actualMs?: number;
+  children: PlanNode[];
+  meta:     Record<string, string>;
 }
 
 interface FileSession {
@@ -144,6 +174,22 @@ interface ActivityRow {
   host:       string;
 }
 
+// ── Command palette ────────────────────────────────────────────────────────
+// Five categories, all rendered through one PaletteItem shape so fuse.js
+// has a single haystack to fuzzy-search. The category property drives
+// the icon + section header in the rendered list; the onSelect closure
+// captures everything needed to invoke the item — no global lookups at
+// click time, no stale-reference bugs.
+type PaletteCategory = "command" | "connection" | "table" | "tab" | "saved";
+
+interface PaletteItem {
+  id:        string;
+  category:  PaletteCategory;
+  label:     string;          // primary text — what fuse searches first
+  secondary: string;          // shown to the right, lower contrast (schema, db, tag)
+  onSelect:  () => void;
+}
+
 interface Tab {
   id:          string;
   title:       string;
@@ -158,6 +204,12 @@ interface Tab {
   joinTables:  string[];
   pendingEdits: PendingEdit[];
   editingCell:  { rowIndex: number; colIndex: number } | null;
+  // Per-tab toggle. When true, runQuery wraps the SQL with the engine's
+  // EXPLAIN / SHOWPLAN_XML / EXPLAIN FORMAT JSON equivalent and marks the
+  // resulting QueryResult as isPlan so the renderer shows the tree.
+  // Per-tab (not global) so a user can keep "plan mode" on for one tab
+  // while running normal queries in another.
+  includePlan?: boolean;
 }
 
 function createTab(id?: string): Tab {
@@ -175,7 +227,71 @@ function createTab(id?: string): Tab {
     joinTables:   [],
     pendingEdits: [],
     editingCell:  null,
+    includePlan:  false,
   };
+}
+
+// ── Execution plan: SQL wrapping ────────────────────────────────────────────
+// When the "Include Execution Plan" toggle is on, runQuery routes the user's
+// SQL through wrapPlanSql() first. Each engine has its own EXPLAIN dialect;
+// the wrapper returns the prefix that produces a single result row containing
+// the plan in its native serialised form (JSON for Postgres/MySQL, XML for
+// SQL Server, tabular for SQLite).
+//
+// The wrapper is conservative: only wraps SELECT statements. Wrapping a DDL
+// statement (CREATE TABLE, etc) or a non-data statement is either an error
+// (SHOWPLAN_XML doesn't work on most DDL) or actively dangerous (EXPLAIN
+// ANALYZE on an UPDATE actually mutates data). Easier and safer to require
+// the user to write SELECTs when plan mode is on.
+
+/** Returns true if the SQL looks like a SELECT-ish statement we can safely
+ *  wrap with an EXPLAIN/SHOWPLAN. Conservative — anything that isn't
+ *  obviously a read is rejected. */
+function isPlanSafeSql(sql: string): boolean {
+  // Strip leading comments and whitespace to find the first keyword
+  const stripped = sql
+    .replace(/^\s*--[^\n]*\n/g, "")  // line comments at start
+    .replace(/^\s*\/\*[\s\S]*?\*\//g, "")  // block comments at start
+    .trim();
+  const first = stripped.split(/\s+/)[0]?.toUpperCase() ?? "";
+  // CTEs (WITH ...) are SELECT-adjacent and safe to plan
+  return first === "SELECT" || first === "WITH";
+}
+
+/** Wraps user SQL with the engine-appropriate plan-capture statement.
+ *  Returns the wrapped SQL, or null if the statement isn't plan-safe. */
+function wrapPlanSql(sql: string, engine: string): string | null {
+  if (!isPlanSafeSql(sql)) return null;
+  // Strip a trailing semicolon — we add our own structure around it
+  const clean = sql.trim().replace(/;\s*$/, "");
+  switch (engine.toLowerCase()) {
+    case "postgres":
+    case "cockroachdb":
+      // ANALYZE actually executes the query. FORMAT JSON gives us a
+      // parse-friendly tree. BUFFERS reports cache hits/reads, useful
+      // for explaining slow queries.
+      return `EXPLAIN (ANALYZE, FORMAT JSON, BUFFERS) ${clean}`;
+    case "sqlserver":
+      // Wrap in BEGIN...END so the C# multi-statement splitter sees this
+      // as a single syntactic statement and SQL Server executes the whole
+      // thing as one batch. Without this wrapper, the splitter would break
+      // the SET/SELECT/SET into three separate calls — losing STATISTICS
+      // XML state between them and never producing the plan rowset.
+      return `BEGIN\nSET STATISTICS XML ON;\n${clean};\nSET STATISTICS XML OFF;\nEND`;
+    case "mysql":
+    case "mariadb":
+      // FORMAT=JSON works on MySQL 5.6+ and MariaDB 10.1+. ANALYZE (a
+      // separate command) is MySQL 8.0+; sticking with EXPLAIN keeps
+      // wider compatibility. The renderer falls back gracefully when
+      // actual-times columns are missing.
+      return `EXPLAIN FORMAT=JSON ${clean}`;
+    case "sqlite":
+      // SQLite's plan output is tabular, not a tree. The renderer
+      // handles it as a special case in session 2.
+      return `EXPLAIN QUERY PLAN ${clean}`;
+    default:
+      return null;
+  }
 }
 
 interface AppSettings {
@@ -1337,6 +1453,697 @@ function useDebounce<T>(value: T, delay: number): T {
 // Polling, loading-state management, and kill-execution all live in App();
 // this component just renders what it's handed and emits user intent
 // (refresh request, kill request) back up through callbacks.
+// ── Execution plan parsers ──────────────────────────────────────────────────
+// One parser per engine, all returning the normalised PlanNode shape so the
+// renderer doesn't need engine-specific branches. Session 1 ships Postgres;
+// session 2 adds SQL Server XML and MySQL JSON.
+
+/** Postgres EXPLAIN (FORMAT JSON, ANALYZE) returns an array with one element
+ *  per top-level statement. Each element has a "Plan" property which is the
+ *  root of the tree. Sub-plans are in "Plans" arrays. Field names use
+ *  Capital Case With Spaces (e.g. "Node Type", "Total Cost"). */
+function parsePostgresPlan(json: string): PlanNode | null {
+  try {
+    const parsed = JSON.parse(json);
+    // Postgres returns [{ Plan: {...}, ... }]. Take the first statement.
+    const root = Array.isArray(parsed) ? parsed[0]?.Plan : parsed?.Plan;
+    if (!root) return null;
+    return convertPostgresNode(root);
+  } catch (e) {
+    console.error("parsePostgresPlan failed:", e);
+    return null;
+  }
+}
+
+function convertPostgresNode(n: any): PlanNode {
+  // Build a "detail" line — for a Seq Scan that's the table name, for a
+  // Hash Join it's the join condition, etc. Keeping it short and readable
+  // is more useful than dumping every property.
+  const label = n["Node Type"] ?? "Unknown";
+  const detail = (() => {
+    const parts: string[] = [];
+    if (n["Relation Name"]) {
+      parts.push(`on ${n["Schema"] ? `${n["Schema"]}.` : ""}${n["Relation Name"]}`);
+      if (n["Alias"] && n["Alias"] !== n["Relation Name"]) parts.push(`as ${n["Alias"]}`);
+    }
+    if (n["Index Name"]) parts.push(`using ${n["Index Name"]}`);
+    if (n["Join Type"]) parts.push(`(${n["Join Type"]})`);
+    return parts.join(" ");
+  })();
+
+  // meta: secondary properties shown beneath the node in a small key-value list
+  const meta: Record<string, string> = {};
+  if (n["Index Cond"])    meta["Index Cond"]    = n["Index Cond"];
+  if (n["Filter"])        meta["Filter"]        = n["Filter"];
+  if (n["Hash Cond"])     meta["Hash Cond"]     = n["Hash Cond"];
+  if (n["Join Filter"])   meta["Join Filter"]   = n["Join Filter"];
+  if (n["Sort Key"])      meta["Sort Key"]      = Array.isArray(n["Sort Key"])
+    ? n["Sort Key"].join(", ") : String(n["Sort Key"]);
+  if (n["Rows Removed by Filter"] != null && n["Rows Removed by Filter"] > 0) {
+    meta["Rows Removed"] = String(n["Rows Removed by Filter"]);
+  }
+  if (n["Shared Hit Blocks"] != null || n["Shared Read Blocks"] != null) {
+    meta["Buffers"] = `${n["Shared Hit Blocks"] ?? 0} hit / ${n["Shared Read Blocks"] ?? 0} read`;
+  }
+
+  return {
+    label,
+    detail,
+    cost:    n["Total Cost"] ?? 0,
+    rows:    n["Actual Rows"] ?? n["Plan Rows"] ?? 0,
+    actualMs: n["Actual Total Time"] != null
+      ? Math.round(n["Actual Total Time"] * 100) / 100  // round to 0.01ms
+      : undefined,
+    children: Array.isArray(n["Plans"]) ? n["Plans"].map(convertPostgresNode) : [],
+    meta,
+  };
+}
+
+// ── SQL Server XML plan parser ──────────────────────────────────────────────
+// SET STATISTICS XML ON returns a single column containing a ShowPlanXML
+// document. The tree lives under <ShowPlanXML><BatchSequence><Batch>
+// <Statements><StmtSimple><QueryPlan><RelOp>. Each <RelOp> has:
+//   - LogicalOp attribute   ("Inner Join", "Index Seek", etc) — used as label
+//   - PhysicalOp attribute  ("Hash Match", "Clustered Index Seek", etc)
+//   - EstimateCPU, EstimateRows, EstimateIO attributes
+//   - Optional <RunTimeInformation> with actual stats (present with
+//     STATISTICS XML ON, absent with SHOWPLAN_XML ON)
+//   - One or more nested <RelOp> as children, typically wrapped in
+//     phase-specific elements like <Hash>, <NestedLoops>, <Compute Scalar>.
+//
+// We use the browser's DOMParser — available everywhere, no external dep.
+// XML traversal uses getElementsByTagName which returns live HTMLCollection;
+// we collect immediate <RelOp> descendants via a recursive scan that stops
+// at the first nested RelOp level.
+
+function parseSqlServerPlan(xml: string): PlanNode | null {
+  try {
+    // Quick sanity check: if the input doesn't start with `<` after
+    // trimming, it can't possibly be XML. Skip DOMParser entirely and
+    // log a clear diagnostic.
+    const head = xml.trimStart().slice(0, 100);
+    if (!head.startsWith("<")) {
+      console.error(
+        "parseSqlServerPlan: expected XML, got:",
+        head.length === 0 ? "(empty string)" : head.slice(0, 50)
+      );
+      return null;
+    }
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    // DOMParser returns a document with <parsererror> on failure rather
+    // than throwing. Detect that explicitly.
+    if (doc.querySelector("parsererror")) {
+      console.error("parseSqlServerPlan: XML parse error", doc.querySelector("parsererror")?.textContent);
+      return null;
+    }
+    // Find the first RelOp anywhere in the document — that's the root
+    // operator. We don't care about the wrapping batch/statement layers
+    // for tree rendering.
+    const firstRelOp = doc.querySelector("RelOp");
+    if (!firstRelOp) return null;
+    return convertSqlServerNode(firstRelOp);
+  } catch (e) {
+    console.error("parseSqlServerPlan failed:", e);
+    return null;
+  }
+}
+
+// Find all <RelOp> child operators of `el` at one level deep. SQL Server
+// nests RelOps inside operator-specific wrapper elements (<Hash>, <Sort>,
+// <NestedLoops>, etc), so a direct .children scan doesn't work. We
+// recursively walk children but stop descending whenever we hit a RelOp —
+// that's a child operator in the tree, not a grandchild.
+function findChildRelOps(el: Element): Element[] {
+  const out: Element[] = [];
+  const walk = (n: Element) => {
+    for (let i = 0; i < n.children.length; i++) {
+      const c = n.children[i];
+      if (c.tagName === "RelOp") {
+        out.push(c);
+      } else {
+        walk(c);
+      }
+    }
+  };
+  walk(el);
+  return out;
+}
+
+function convertSqlServerNode(el: Element): PlanNode {
+  // Prefer PhysicalOp for the label — it's what shows in SSMS's tree
+  // (Index Seek, Clustered Index Scan, Hash Match, etc). Fall back to
+  // LogicalOp if PhysicalOp is missing.
+  const physical = el.getAttribute("PhysicalOp") ?? "";
+  const logical  = el.getAttribute("LogicalOp") ?? "";
+  const label = physical || logical || "Unknown";
+
+  // Build detail line — most operator types nest the table/index reference
+  // inside a phase wrapper. We look for the first <Object> element which
+  // is where SQL Server records the target object.
+  const objectEl = el.querySelector(":scope > * > Object")
+                ?? el.querySelector(":scope > * > * > Object");
+  const detail = (() => {
+    if (!objectEl) {
+      // Some operators (Compute Scalar, Filter) have no object — fall
+      // back to the LogicalOp when label is the PhysicalOp.
+      return physical && logical && physical !== logical ? `(${logical})` : "";
+    }
+    const schema = (objectEl.getAttribute("Schema") ?? "").replace(/[\[\]]/g, "");
+    const table  = (objectEl.getAttribute("Table")  ?? "").replace(/[\[\]]/g, "");
+    const index  = (objectEl.getAttribute("Index")  ?? "").replace(/[\[\]]/g, "");
+    const parts: string[] = [];
+    if (table) parts.push(`on ${schema && schema !== "dbo" ? schema + "." : ""}${table}`);
+    if (index) parts.push(`using ${index}`);
+    return parts.join(" ");
+  })();
+
+  // EstimateRows and EstimatedTotalSubtreeCost give us numeric ranking.
+  // STATISTICS XML adds <RunTimeInformation> with actual stats — prefer
+  // those when present.
+  const estRows  = parseFloat(el.getAttribute("EstimateRows") ?? "0");
+  const subtree  = parseFloat(el.getAttribute("EstimatedTotalSubtreeCost") ?? "0");
+  const runtime  = el.querySelector(":scope > RunTimeInformation > RunTimeCountersPerThread");
+  const actualRows = runtime
+    ? parseFloat(runtime.getAttribute("ActualRows") ?? "0")
+    : null;
+  // SQL Server reports ActualCPUms and ActualElapsedms per thread; we sum
+  // them by summing all <RunTimeCountersPerThread> elements.
+  let actualMs: number | undefined;
+  const allRuntime = el.querySelectorAll(":scope > RunTimeInformation > RunTimeCountersPerThread");
+  if (allRuntime.length > 0) {
+    let total = 0;
+    allRuntime.forEach(rt => {
+      total += parseFloat(rt.getAttribute("ActualElapsedms") ?? "0");
+    });
+    actualMs = Math.round(total * 100) / 100;
+  }
+
+  // meta: surface useful per-operator details. Each operator type stores
+  // its specifics in a child element matching its name (<Hash>, <Sort>,
+  // <NestedLoops>, etc). We pick out the ones users care about.
+  const meta: Record<string, string> = {};
+  const predicates = el.querySelectorAll(":scope > * > Predicate ScalarOperator");
+  if (predicates.length > 0) {
+    const text = Array.from(predicates).map(p => p.getAttribute("ScalarString") ?? "").filter(Boolean);
+    if (text.length > 0) meta["Predicate"] = text.join(" AND ");
+  }
+  // Seek predicates — what an Index Seek is filtering on
+  const seekPreds = el.querySelectorAll(":scope > IndexScan SeekPredicates SeekPredicate ScalarOperator");
+  if (seekPreds.length > 0) {
+    const text = Array.from(seekPreds).map(p => p.getAttribute("ScalarString") ?? "").filter(Boolean);
+    if (text.length > 0) meta["Seek"] = text.join(", ");
+  }
+  if (actualRows != null && estRows > 0) {
+    const ratio = actualRows / estRows;
+    if (ratio > 10 || ratio < 0.1) {
+      // Estimate badly off — useful to surface
+      meta["Estimate"] = `${estRows.toFixed(0)} expected, ${actualRows.toFixed(0)} actual`;
+    }
+  }
+
+  return {
+    label,
+    detail,
+    cost: subtree,
+    rows: actualRows ?? estRows,
+    actualMs,
+    children: findChildRelOps(el).map(convertSqlServerNode),
+    meta,
+  };
+}
+
+// ── MySQL JSON plan parser ──────────────────────────────────────────────────
+// EXPLAIN FORMAT=JSON returns a single column "EXPLAIN" with a JSON document.
+// The shape is:
+//   { "query_block": { "select_id": 1, "cost_info": {...}, "table": {...},
+//                      "nested_loop": [{"table": {...}}, ...], ... } }
+//
+// MySQL's tree is irregular compared to Postgres — instead of a uniform
+// "Plans" children array, child operators appear under multiple possible
+// keys: nested_loop, ordering_operation, grouping_operation, materialized_
+// from_subquery, attached_subqueries, table. We probe for each shape.
+//
+// Where a node has "table", that's the table-access detail bundled into
+// the same node as the operator above it. We treat that as a single
+// PlanNode and record the table name as `detail`.
+
+function parseMysqlPlan(json: string): PlanNode | null {
+  try {
+    const parsed = JSON.parse(json);
+    const block = parsed?.query_block;
+    if (!block) return null;
+    return convertMysqlBlock(block);
+  } catch (e) {
+    console.error("parseMysqlPlan failed:", e);
+    return null;
+  }
+}
+
+function convertMysqlBlock(block: any): PlanNode {
+  // Try each wrapper key in priority order — these mirror MySQL's
+  // documented EXPLAIN JSON structure. The outermost wrapper becomes the
+  // operator label.
+  if (block.union_result) {
+    return {
+      label: "Union",
+      detail: block.union_result.using_temporary_table ? "(temp table)" : "",
+      cost: 0,
+      rows: 0,
+      children: (block.union_result.query_specifications ?? [])
+        .map((s: any) => convertMysqlBlock(s.query_block ?? s)),
+      meta: {},
+    };
+  }
+  if (block.ordering_operation) {
+    return {
+      label: "Sort",
+      detail: block.ordering_operation.using_filesort ? "(filesort)" : "",
+      cost: 0,
+      rows: 0,
+      children: [convertMysqlBlock(block.ordering_operation)],
+      meta: {},
+    };
+  }
+  if (block.grouping_operation) {
+    return {
+      label: "Group",
+      detail: block.grouping_operation.using_filesort ? "(filesort)" : "",
+      cost: 0,
+      rows: 0,
+      children: [convertMysqlBlock(block.grouping_operation)],
+      meta: {},
+    };
+  }
+  if (Array.isArray(block.nested_loop)) {
+    // Nested loop is the join structure. Each entry is { table: {...} }.
+    // We render as a Join node with each table as a child.
+    return {
+      label: "Nested Loop Join",
+      detail: `${block.nested_loop.length} tables`,
+      cost: parseFloat(block.cost_info?.query_cost ?? "0"),
+      rows: 0,
+      children: block.nested_loop.map((nl: any) => convertMysqlTable(nl.table ?? nl)),
+      meta: {},
+    };
+  }
+  if (block.table) {
+    return convertMysqlTable(block.table);
+  }
+  // Unknown shape — render as a placeholder with the raw block name
+  return {
+    label: "Query Block",
+    detail: "",
+    cost: parseFloat(block.cost_info?.query_cost ?? "0"),
+    rows: 0,
+    children: [],
+    meta: {},
+  };
+}
+
+function convertMysqlTable(t: any): PlanNode {
+  // Each table node has:
+  //   access_type: "ALL" | "index" | "ref" | "range" | "const" | "eq_ref" | ...
+  //   table_name, key (index name), rows_examined_per_scan, filtered (%)
+  //   cost_info: { read_cost, eval_cost, prefix_cost, data_read_per_join }
+  //   used_columns, attached_condition
+  //   materialized_from_subquery, attached_subqueries (for nested cases)
+  const accessType = t.access_type ?? "?";
+  // Map MySQL's access_type to a readable label
+  const label = ({
+    ALL:      "Full Table Scan",
+    index:    "Index Scan",
+    range:    "Index Range Scan",
+    ref:      "Ref Lookup",
+    eq_ref:   "Eq Ref Lookup",
+    const:    "Constant Lookup",
+    system:   "System Lookup",
+    fulltext: "Fulltext Search",
+  } as Record<string, string>)[accessType] ?? `Access (${accessType})`;
+
+  const parts: string[] = [];
+  if (t.table_name) parts.push(`on ${t.table_name}`);
+  if (t.key)        parts.push(`using ${t.key}`);
+  if (t.using_index === true) parts.push("(index only)");
+  const detail = parts.join(" ");
+
+  const meta: Record<string, string> = {};
+  if (t.possible_keys) meta["Possible Keys"] = (t.possible_keys as string[]).join(", ");
+  if (t.attached_condition) meta["Condition"] = t.attached_condition;
+  if (t.filtered != null && t.filtered < 100) meta["Filtered"] = `${t.filtered}%`;
+  if (t.cost_info?.read_cost != null) meta["Read Cost"] = String(t.cost_info.read_cost);
+  if (t.cost_info?.eval_cost != null) meta["Eval Cost"] = String(t.cost_info.eval_cost);
+
+  const children: PlanNode[] = [];
+  // Subqueries materialized in the FROM clause — render as a child node
+  if (t.materialized_from_subquery?.query_block) {
+    children.push(convertMysqlBlock(t.materialized_from_subquery.query_block));
+  }
+  // Attached subqueries — present in WHERE clauses
+  if (Array.isArray(t.attached_subqueries)) {
+    for (const sub of t.attached_subqueries) {
+      if (sub.query_block) children.push(convertMysqlBlock(sub.query_block));
+    }
+  }
+
+  return {
+    label,
+    detail,
+    cost: parseFloat(t.cost_info?.prefix_cost ?? t.cost_info?.read_cost ?? "0"),
+    rows: parseFloat(t.rows_examined_per_scan ?? t.rows ?? "0"),
+    children,
+    meta,
+  };
+}
+
+// ── SQLite EXPLAIN QUERY PLAN parser ────────────────────────────────────────
+// SQLite returns a *tabular* result rather than a JSON or XML tree:
+//   id | parent | notused | detail
+//   3  | 0      | 0       | SCAN TABLE foo
+//   5  | 0      | 0       | SEARCH TABLE bar USING INDEX bar_x_idx (x=?)
+//   8  | 5      | 0       | USE TEMP B-TREE FOR ORDER BY
+//
+// Each row is one access plan; parent is the id of the row's parent node
+// (0 = root). We reconstruct the tree by walking parent references.
+//
+// `detail` is free-form text like "SCAN TABLE foo" — we keep it as-is for
+// label since SQLite doesn't separate operator name from target.
+
+function parseSqlitePlan(result: QueryResult): PlanNode | null {
+  if (!result.rows || result.rows.length === 0) return null;
+  // SQLite EXPLAIN QUERY PLAN columns are: id, parent, notused, detail.
+  // Column index varies — find them by name first, fall back to position.
+  const cols = result.columns ?? [];
+  const idxId     = cols.findIndex(c => c.toLowerCase() === "id");
+  const idxParent = cols.findIndex(c => c.toLowerCase() === "parent");
+  const idxDetail = cols.findIndex(c => c.toLowerCase() === "detail");
+  const ID     = idxId     >= 0 ? idxId     : 0;
+  const PARENT = idxParent >= 0 ? idxParent : 1;
+  const DETAIL = idxDetail >= 0 ? idxDetail : 3;
+
+  // Build a map of id → PlanNode plus a parent-reference list
+  const nodes = new Map<string, PlanNode & { _parent: string }>();
+  for (const row of result.rows) {
+    const id     = row[ID]     ?? "";
+    const parent = row[PARENT] ?? "0";
+    const detail = row[DETAIL] ?? "";
+    if (!id) continue;
+    nodes.set(id, {
+      label: detail,
+      detail: "",
+      cost: 0,
+      rows: 0,
+      children: [],
+      meta: {},
+      _parent: parent,
+    });
+  }
+  if (nodes.size === 0) return null;
+
+  // Wire children to parents. parent="0" means top-level — those go under
+  // a synthetic root so the user sees a single tree even when there are
+  // multiple top-level access paths.
+  const rootChildren: PlanNode[] = [];
+  for (const node of nodes.values()) {
+    if (node._parent === "0" || !nodes.has(node._parent)) {
+      rootChildren.push(node);
+    } else {
+      nodes.get(node._parent)!.children.push(node);
+    }
+  }
+  if (rootChildren.length === 1) return rootChildren[0];
+  return {
+    label: "Query Plan",
+    detail: `${rootChildren.length} top-level paths`,
+    cost: 0,
+    rows: 0,
+    children: rootChildren,
+    meta: {},
+  };
+}
+
+// ── Hot node detection ──────────────────────────────────────────────────────
+// "Most expensive" is defined as: nodes whose cost (or actualMs if present)
+// is in the top 20% of all nodes in the tree. Minimum threshold of 1.0 so
+// trivial queries don't get spurious highlights on every node.
+
+function collectAllNodes(root: PlanNode): PlanNode[] {
+  const out: PlanNode[] = [];
+  const walk = (n: PlanNode) => { out.push(n); n.children.forEach(walk); };
+  walk(root);
+  return out;
+}
+
+function hotNodeThreshold(root: PlanNode): number {
+  const all = collectAllNodes(root);
+  // Prefer actualMs when present (more meaningful than cost estimate)
+  const useActual = all.some(n => n.actualMs != null);
+  const values = all
+    .map(n => useActual ? (n.actualMs ?? 0) : n.cost)
+    .filter(v => v > 0)
+    .sort((a, b) => b - a);   // descending
+  if (values.length === 0) return Infinity;
+  // 80th percentile — top 20% are hot
+  const idx = Math.floor(values.length * 0.2);
+  return Math.max(values[idx] ?? Infinity, 1.0);
+}
+
+function isHotNode(node: PlanNode, threshold: number, useActual: boolean): boolean {
+  const v = useActual ? (node.actualMs ?? 0) : node.cost;
+  return v >= threshold;
+}
+
+// ── Tree renderer ───────────────────────────────────────────────────────────
+// Vertical indented tree. Each node renders as:
+//   • Operator name (bold) + brief detail (muted)
+//   • Cost / rows / actualMs row (small, monospace)
+//   • Optional meta key-value table (filters, sort keys, etc)
+//   • Children indented and rendered recursively
+// Hot nodes get an amber left-border + amber operator name.
+
+function PlanTreeRenderer({
+  root, engine,
+}: { root: PlanNode; engine: string }) {
+  const allNodes = collectAllNodes(root);
+  const useActual = allNodes.some(n => n.actualMs != null);
+  const threshold = hotNodeThreshold(root);
+
+  return (
+    <div style={{
+      flex: 1,
+      overflow: "auto",
+      padding: "12px 16px",
+      fontFamily: "monospace",
+      fontSize: 12,
+    }}>
+      <div style={{
+        color: "var(--text-tertiary)",
+        fontSize: 11,
+        marginBottom: 12,
+      }}>
+        Execution plan ({engine}) — {allNodes.length} nodes
+        {useActual && " · actual times shown"}
+      </div>
+      <PlanNodeView
+        node={root}
+        depth={0}
+        threshold={threshold}
+        useActual={useActual}
+      />
+    </div>
+  );
+}
+
+function PlanNodeView({
+  node, depth, threshold, useActual,
+}: {
+  node: PlanNode;
+  depth: number;
+  threshold: number;
+  useActual: boolean;
+}) {
+  const hot = isHotNode(node, threshold, useActual);
+  return (
+    <div style={{
+      // Tree indentation via left margin grows with depth, but we cap at
+      // 8 levels so deeply-nested plans don't push content off-screen.
+      marginLeft: Math.min(depth, 8) * 18,
+      marginBottom: 8,
+    }}>
+      <div style={{
+        borderLeft: `3px solid ${hot ? "var(--warning)" : "var(--border)"}`,
+        background: hot ? "var(--warning-bg)" : "var(--surface)",
+        padding: "6px 10px",
+        borderRadius: 4,
+      }}>
+        {/* Header — operator + detail */}
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+          <span style={{
+            fontWeight: 600,
+            color: hot ? "var(--warning)" : "var(--text)",
+            fontSize: 13,
+          }}>
+            {node.label}
+          </span>
+          {node.detail && (
+            <span style={{ color: "var(--text-tertiary)", fontSize: 12 }}>
+              {node.detail}
+            </span>
+          )}
+        </div>
+
+        {/* Stats row — cost, rows, ms */}
+        <div style={{
+          display: "flex",
+          gap: 14,
+          marginTop: 3,
+          fontSize: 11,
+          color: "var(--text-tertiary)",
+        }}>
+          {node.cost > 0 && (
+            <span>
+              <span style={{ color: "var(--text-disabled)" }}>cost </span>
+              <span style={{ color: "var(--text-secondary)" }}>
+                {node.cost.toFixed(2)}
+              </span>
+            </span>
+          )}
+          {node.rows > 0 && (
+            <span>
+              <span style={{ color: "var(--text-disabled)" }}>rows </span>
+              <span style={{ color: "var(--text-secondary)" }}>
+                {node.rows.toLocaleString()}
+              </span>
+            </span>
+          )}
+          {node.actualMs != null && (
+            <span>
+              <span style={{ color: "var(--text-disabled)" }}>actual </span>
+              <span style={{ color: hot ? "var(--warning)" : "var(--text-secondary)" }}>
+                {node.actualMs}ms
+              </span>
+            </span>
+          )}
+        </div>
+
+        {/* Meta — key/value table when there are extras */}
+        {Object.keys(node.meta).length > 0 && (
+          <div style={{
+            marginTop: 6,
+            display: "grid",
+            gridTemplateColumns: "auto 1fr",
+            gap: "2px 10px",
+            fontSize: 11,
+          }}>
+            {Object.entries(node.meta).map(([k, v]) => (
+              <Fragment key={k}>
+                <span style={{ color: "var(--text-disabled)" }}>{k}</span>
+                <span style={{
+                  color: "var(--text-secondary)",
+                  wordBreak: "break-all",
+                  fontFamily: "monospace",
+                }}>
+                  {v}
+                </span>
+              </Fragment>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Children — recurse */}
+      {node.children.map((child, i) => (
+        <PlanNodeView
+          key={i}
+          node={child}
+          depth={depth + 1}
+          threshold={threshold}
+          useActual={useActual}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ── Top-level plan result renderer ──────────────────────────────────────────
+// Routed to from the results-tab branch when result.isPlan is true. Picks
+// the right parser by engine, falls back to raw text if parsing fails so
+// the user still has something to look at.
+
+function PlanResultRenderer({ result }: { result: QueryResult }) {
+  const engine = (result.planEngine ?? "").toLowerCase();
+  // Most engines return the plan as a single-cell document. SQLite is the
+  // exception — it returns a multi-row tabular result that the SQLite
+  // parser reconstructs into a tree.
+  const rawText = result.rows[0]?.[0] ?? "";
+
+  // Diagnostic: SQL Server plan should arrive as a single-column rowset
+  // whose first cell is XML. If it's empty, dump the full result so we
+  // can see what shape arrived — most often it's the data rowset instead
+  // of the plan rowset, meaning the C# multi-result walk didn't pick the
+  // right one.
+  if (engine === "sqlserver" && !rawText) {
+    console.warn(
+      "SQL Server plan: first cell empty. Result shape:",
+      {
+        columns: result.columns,
+        rowCount: result.rows.length,
+        firstRowFirstCells: result.rows[0]?.slice(0, 3),
+        allFirstCells: result.rows.slice(0, 5).map(r => r[0]),
+      }
+    );
+  }
+
+  let root: PlanNode | null = null;
+  if (engine === "postgres" || engine === "cockroachdb") {
+    root = parsePostgresPlan(rawText);
+  } else if (engine === "sqlserver") {
+    root = parseSqlServerPlan(rawText);
+  } else if (engine === "mysql" || engine === "mariadb") {
+    root = parseMysqlPlan(rawText);
+  } else if (engine === "sqlite") {
+    root = parseSqlitePlan(result);
+  }
+
+  if (root) {
+    return <PlanTreeRenderer root={root} engine={engine} />;
+  }
+
+  // Fallback: parser didn't return a tree (malformed plan, unexpected
+  // engine, etc). Show the raw text so the user isn't stuck.
+  // For SQLite the rawText is just the first cell — display the full
+  // tabular output instead.
+  const fallbackText = engine === "sqlite"
+    ? result.rows.map(r => r.join("\t")).join("\n")
+    : rawText;
+
+  return (
+    <div style={{
+      flex: 1,
+      overflow: "auto",
+      padding: "12px 16px",
+    }}>
+      <div style={{
+        color: "var(--text-tertiary)",
+        fontSize: 11,
+        marginBottom: 8,
+        fontFamily: "monospace",
+      }}>
+        Execution plan ({engine}) — tree rendering failed, raw output below.
+      </div>
+      <pre style={{
+        fontSize: 11,
+        fontFamily: "monospace",
+        color: "var(--text-secondary)",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        margin: 0,
+      }}>
+        {fallbackText}
+      </pre>
+    </div>
+  );
+}
+
 function ActivityPanelBody({
   rows, loading, error, engine, onRefresh, onKillRequest,
 }: {
@@ -1688,11 +2495,28 @@ function App() {
   const [activityError, setActivityError]   = useState<string | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [killPending, setKillPending]       = useState<ActivityRow | null>(null);
+
+  // ── Command palette state ───────────────────────────────────────────────
+  // showPalette gates the modal; paletteQuery is the search input;
+  // paletteIndex is the keyboard-cursor position into the filtered results.
+  // We deliberately do NOT memoize the assembled items list — assembly
+  // is O(connections + tables + tabs + saved + commands), tiny relative
+  // to the cost of fuse.js running over it. Recompute fresh on every
+  // render while the palette is open; closed → no work happens.
+  const [showPalette, setShowPalette]   = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const [paletteIndex, setPaletteIndex] = useState(0);
   const [locked, setLocked] = useState(false);
   const [saveQueryOpen, setSaveQueryOpen] = useState(false);
   const [saveQueryName, setSaveQueryName] = useState("");
   const [saveQueryTags, setSaveQueryTags] = useState("");
   const [saveQueryDesc, setSaveQueryDesc] = useState("");
+  // Saved-query library state — kept here with other saveQuery state so it's
+  // declared before any consumer (the command palette references savedQueries
+  // during its render-time item assembly).
+  const [savedQueries, setSavedQueries]         = useState<any[]>([]);
+  const [querySearch, setQuerySearch]           = useState("");
+  const [showQueryLibrary, setShowQueryLibrary] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTabRef = useRef<Tab>(activeTab);
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
@@ -2216,6 +3040,25 @@ function App() {
       console.log("setting saveQueryOpen to true");
       setSaveQueryOpen(true);
     }
+
+    // Block WebView reload shortcuts at the document level. A native app
+    // should never reload itself from a keystroke. Monaco's addCommand
+    // only intercepts these when the editor is focused, leaving the
+    // WebView's default (page reload) to run from any other focus state.
+    //   F5             — primary reload
+    //   Ctrl+R / Cmd+R — alternate reload
+    //   Ctrl+Shift+R / Cmd+Shift+R — hard reload (also blocked)
+    if (e.key === "F5"
+        || ((e.metaKey || e.ctrlKey) && (e.key === "r" || e.key === "R"))) {
+      e.preventDefault();
+
+      // F5 outside the editor still runs the active tab's query.
+      // SSMS users expect F5 to work from any focus state. Reload-blocking
+      // Ctrl+R / Cmd+R is a no-op — those aren't SSMS run shortcuts.
+      if (e.key === "F5") {
+        runQueryRef.current();
+      }
+    }
   }
   window.addEventListener("keydown", handleKeyDown);
   return () => window.removeEventListener("keydown", handleKeyDown);
@@ -2463,10 +3306,32 @@ function App() {
   //Run Query Function
   const runQuery = useCallback(async () => {
     if (locked) return;
-    const sql = editorRef.current?.getValue()?.trim() ?? "";
-    if (!sql) return;
+    const userSql = editorRef.current?.getValue()?.trim() ?? "";
+    if (!userSql) return;
 
     const tab = activeTabRef.current;
+
+    // ── Plan-mode wrapping ────────────────────────────────────────────────
+    // If the per-tab Include Plan toggle is on AND we're on a DB connection
+    // (plan mode is meaningless for flat-file DuckDB queries), wrap the SQL
+    // with the engine's EXPLAIN equivalent. wrapPlanSql() returns null when
+    // the statement isn't plan-safe (non-SELECT) — in that case we fall
+    // back to running the original SQL with a banner error to keep the
+    // user informed rather than silently dropping the toggle.
+    let sql = userSql;
+    let planMode = false;
+    if (tab.includePlan && tab.connection && !tab.file) {
+      const wrapped = wrapPlanSql(userSql, tab.connection.engine);
+      if (wrapped == null) {
+        updateActiveTab({
+          loading: false,
+          error: "Execution plan capture only works for SELECT statements. Disable 'Include Plan' to run this query.",
+        });
+        return;
+      }
+      sql = wrapped;
+      planMode = true;
+    }
 
     updateActiveTab({ loading: true, error: null, results: [], activeResult: 0 });
 
@@ -2559,6 +3424,94 @@ function App() {
         : parsed.error
         ? { results: [], error: parsed.error }
         : { results: [{ ...parsed, sql: "" }] }; // wrap single result
+
+    // Tag every result as a plan output when plan mode was on. The renderer
+    // checks isPlan and routes through PlanResultRenderer instead of the
+    // data grid. Engine is recorded so the right parser is selected.
+    if (planMode && tab.connection) {
+      const engine = tab.connection.engine;
+      // SQL Server with STATISTICS XML returns multiple result sets —
+      // first the query's actual data, then a separate single-row result
+      // whose column is named "Microsoft SQL Server 2005 XML Showplan".
+      // We discard the data rows and keep only the plan; otherwise the
+      // user would see the data tab first and have to click to find the
+      // plan, which is the opposite of what they asked for.
+      if (engine === "sqlserver") {
+        // Earlier approach matched a column named "Microsoft SQL Server 2005
+        // XML Showplan" — but driver / version variation means the column
+        // name isn't always predictable. Matching by content (cell starts
+        // with `<`) is more reliable: a SQL Server plan is always a
+        // ShowPlanXML document and starts with `<` in the first non-null
+        // cell. Walk all rows of all results to find it; the user's data
+        // might happen to share a single-column shape with the plan rowset.
+        let planResult: typeof normalised.results[0] | undefined;
+        let planCell = "";
+
+        // Always dump what came back from C# — this is our single source
+        // of truth for diagnosing plan extraction issues.
+        console.log(
+          "[plan] SQL Server response — %d result set(s)",
+          normalised.results.length
+        );
+        normalised.results.forEach((r, i) => {
+          const colShape = r.columns?.length === 1
+            ? `1 col: "${r.columns[0]}"`
+            : `${r.columns?.length ?? 0} cols`;
+          const firstCells = (r.rows ?? []).slice(0, 2).map(row => {
+            const c = row[0];
+            return c === null ? "null"
+              : typeof c === "string"
+              ? c.length === 0 ? "empty" : `"${c.slice(0, 60)}${c.length > 60 ? "..." : ""}"`
+              : String(c);
+          });
+          console.log(
+            `[plan]   Result ${i}: ${colShape} · ${r.rows?.length ?? 0} row(s) · samples: [${firstCells.join(", ")}]`
+          );
+        });
+
+        for (const r of normalised.results) {
+          for (const row of r.rows ?? []) {
+            for (const cell of row) {
+              if (typeof cell === "string" && cell.trimStart().startsWith("<")) {
+                // Sanity check — XML plan documents start with the XML
+                // declaration or the ShowPlanXML root. Either signature
+                // is fine; reject anything else (e.g. an XML column from
+                // the user's own query that happens to look XML-ish).
+                const head = cell.trimStart().slice(0, 200);
+                if (head.includes("ShowPlanXML") || head.includes("<?xml")) {
+                  planResult = r;
+                  planCell = cell;
+                  break;
+                }
+              }
+            }
+            if (planCell) break;
+          }
+          if (planCell) break;
+        }
+        if (planResult && planCell) {
+          console.log("[plan] ✓ Matched XML cell, reshaping result");
+          // Reshape: present the plan as a single-row, single-column result
+          // so the renderer's `result.rows[0]?.[0]` lookup always finds it
+          // regardless of the original columnar layout.
+          normalised.results = [{
+            ...planResult,
+            columns: ["plan"],
+            rows: [[planCell]],
+            rowCount: 1,
+          }];
+        } else {
+          console.warn(
+            "[plan] ✗ No XML cell found. Permission/driver issue, or plan not being returned by C#."
+          );
+        }
+      }
+      normalised.results = normalised.results.map(r => ({
+        ...r,
+        isPlan: true,
+        planEngine: engine,
+      }));
+    }
     const ms = Math.round(performance.now() - start);
 
     // Top-level error (connection failed etc)
@@ -2952,6 +3905,34 @@ function App() {
         () => { setShowActivity(prev => !prev); }
       );
 
+      // Ctrl+P / Cmd+P — open command palette
+      // No ref needed; setShowPalette is stable across renders.
+      editor.addCommand(
+        monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP,
+        () => { setShowPalette(true); }
+      );
+
+      // F5 — alias for Run (SSMS muscle memory).
+      // Handled at the document level (see global keydown handler) rather
+      // than via Monaco's addCommand, because we also need to block the
+      // WebView's default reload-on-F5 behavior — which Monaco can't see
+      // when the editor isn't focused. The document handler serves both
+      // purposes: prevent reload AND invoke runQueryRef. Registering F5
+      // here too would cause runQuery to fire twice when editor has focus.
+
+      // Ctrl+/ — toggle line comment.
+      // Monaco has this built-in via the editor.action.commentLine action,
+      // bound to Ctrl+/ on its own keymap. But Monaco's default binding
+      // doesn't fire reliably inside a Tauri WebView on Windows because
+      // the WebView intercepts some keys before Monaco sees them. Adding
+      // an explicit addCommand re-registers it through Monaco's pipeline.
+      editor.addCommand(
+        monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash,
+        () => {
+          editor.getAction("editor.action.commentLine")?.run();
+        }
+      );
+
     // Save SQL to tab on every change
     editor.onDidChangeModelContent(() => {
       const sql = editor.getValue();
@@ -3243,6 +4224,232 @@ function App() {
     return () => { active = false; clearInterval(id); };
   }, [showActivity, activeTab.connection?.id]);
 
+  // ── Command palette: item assembly + fuzzy search ──────────────────────
+  //
+  // Items are assembled fresh each render of the palette modal. Cheap (~1ms
+  // for a typical workspace) and avoids stale references to changed state.
+  //
+  // Categories:
+  //   command   — actions like "Format SQL", "Toggle theme", "Open settings"
+  //   connection— switch active connection (rebuilds tab.connection)
+  //   table     — schema entries; selecting inserts SELECT * FROM <name>
+  //   tab       — jump to any open editor tab
+  //   saved     — saved-query library entries; loads SQL into current tab
+  //
+  // The `onSelect` closure captures all state needed at click time, so
+  // closing the palette and invoking the item is one statement.
+  function assemblePaletteItems(): PaletteItem[] {
+    const items: PaletteItem[] = [];
+
+    // ── Commands (action verbs) ──────────────────────────────────────────
+    items.push({
+      id: "cmd:format",
+      category: "command",
+      label: "Format SQL",
+      secondary: "Ctrl+Shift+F",
+      onSelect: () => { formatSqlRef.current(); },
+    });
+    items.push({
+      id: "cmd:activity",
+      category: "command",
+      label: showActivity ? "Hide Activity panel" : "Show Activity panel",
+      secondary: "Ctrl+Shift+A",
+      onSelect: () => { setShowActivity(v => !v); },
+    });
+    items.push({
+      id: "cmd:settings",
+      category: "command",
+      label: "Open Settings",
+      secondary: "",
+      onSelect: () => { setShowSettings(true); },
+    });
+    items.push({
+      id: "cmd:history",
+      category: "command",
+      label: showHistory ? "Hide query history" : "Show query history",
+      secondary: "",
+      onSelect: () => { setShowHistory(v => !v); },
+    });
+    items.push({
+      id: "cmd:newtab",
+      category: "command",
+      label: "New query tab",
+      secondary: "Cmd+T",
+      onSelect: () => {
+        const newTab = createTab();
+        // Inherit current connection so new tab is immediately usable
+        if (activeTab.connection) newTab.connection = activeTab.connection;
+        setTabs(prev => [...prev, newTab]);
+        setActiveTabId(newTab.id);
+      },
+    });
+    items.push({
+      id: "cmd:theme-light",
+      category: "command",
+      label: "Switch to Light theme",
+      secondary: "",
+      onSelect: () => { setThemePreference("light"); },
+    });
+    items.push({
+      id: "cmd:theme-dark",
+      category: "command",
+      label: "Switch to Dark theme",
+      secondary: "",
+      onSelect: () => { setThemePreference("dark"); },
+    });
+    items.push({
+      id: "cmd:theme-system",
+      category: "command",
+      label: "Theme: follow system",
+      secondary: "",
+      onSelect: () => { setThemePreference("system"); },
+    });
+
+    // ── Connections ──────────────────────────────────────────────────────
+    // Selecting a connection swaps it into the active tab. This mirrors
+    // what clicking a connection in the sidebar does.
+    for (const c of connections) {
+      items.push({
+        id: `conn:${c.id}`,
+        category: "connection",
+        label: c.name,
+        secondary: `${c.engine} · ${c.host}`,
+        onSelect: () => {
+          updateActiveTab({ connection: c, title: c.name });
+        },
+      });
+    }
+
+    // ── Tables (from current connection's schema cache) ──────────────────
+    // We only enumerate tables for the active connection — listing tables
+    // from connections you'd have to switch to first would be misleading.
+    // The action inserts SELECT * FROM <name> at cursor, matching what
+    // clicking a table in the sidebar already does.
+    if (schema && activeTab.connection) {
+      for (const t of schema.tables) {
+        const qualified = t.schema && t.schema !== "public" && t.schema !== "dbo"
+          ? `${t.schema}.${t.name}`
+          : t.name;
+        items.push({
+          id: `tbl:${qualified}`,
+          category: "table",
+          label: t.name,
+          secondary: t.schema || "",
+          onSelect: () => {
+            const editor = editorRef.current;
+            if (!editor) return;
+            const sql = `SELECT * FROM ${qualified} LIMIT 100`;
+            // Use Monaco's edit API so it's a single undoable op
+            const sel = editor.getSelection();
+            editor.executeEdits("palette-insert-table", [{
+              range: sel ?? editor.getModel()!.getFullModelRange(),
+              text: sql,
+              forceMoveMarkers: true,
+            }]);
+            editor.focus();
+          },
+        });
+      }
+      // Views are first-class navigation targets too
+      for (const v of schema.views) {
+        const qualified = v.schema && v.schema !== "public" && v.schema !== "dbo"
+          ? `${v.schema}.${v.name}`
+          : v.name;
+        items.push({
+          id: `view:${qualified}`,
+          category: "table",
+          label: v.name,
+          secondary: `view · ${v.schema}`,
+          onSelect: () => {
+            const editor = editorRef.current;
+            if (!editor) return;
+            const sql = `SELECT * FROM ${qualified} LIMIT 100`;
+            const sel = editor.getSelection();
+            editor.executeEdits("palette-insert-view", [{
+              range: sel ?? editor.getModel()!.getFullModelRange(),
+              text: sql,
+              forceMoveMarkers: true,
+            }]);
+            editor.focus();
+          },
+        });
+      }
+    }
+
+    // ── Tabs (jump to any open editor tab) ──────────────────────────────
+    for (const t of tabs) {
+      if (t.id === activeTabId) continue; // skip current — pointless target
+      items.push({
+        id: `tab:${t.id}`,
+        category: "tab",
+        label: t.title || "Untitled",
+        secondary: t.connection?.name ?? "",
+        onSelect: () => { setActiveTabId(t.id); },
+      });
+    }
+
+    // ── Saved queries ────────────────────────────────────────────────────
+    // Mirrors the saved-query panel: clicking loads SQL into the active tab.
+    for (const q of savedQueries) {
+      items.push({
+        id: `saved:${q.id}`,
+        category: "saved",
+        label: q.meta?.name ?? "Untitled query",
+        secondary: (q.meta?.tags ?? []).join(", "),
+        onSelect: () => {
+          editorRef.current?.setValue(q.sql);
+          editorRef.current?.focus();
+        },
+      });
+    }
+
+    return items;
+  }
+
+  // Fuse instance is rebuilt on every render of the open palette — cheap,
+  // and keeps results in sync with state changes (new tab opens, schema
+  // arrives async, etc). Configured for:
+  //   - Search across label (primary) and secondary fields
+  //   - label weighted 2x because that's the human-readable name
+  //   - threshold 0.4: tolerant of typos like "usrs" → "users" but not
+  //     of unrelated words. Default 0.6 is too permissive and surfaces
+  //     too much noise for a command palette.
+  //   - ignoreLocation: don't penalise matches that aren't at the start;
+  //     "log" should match "audit_log" as readily as "logs"
+  const paletteItems = showPalette ? assemblePaletteItems() : [];
+  const filteredPalette = (() => {
+    if (!showPalette) return [];
+    if (!paletteQuery.trim()) return [];   // empty state: show nothing
+    const fuse = new Fuse(paletteItems, {
+      keys: [
+        { name: "label",     weight: 2 },
+        { name: "secondary", weight: 1 },
+      ],
+      threshold: 0.4,
+      ignoreLocation: true,
+      minMatchCharLength: 1,
+    });
+    return fuse.search(paletteQuery).slice(0, 50).map(r => r.item);
+  })();
+
+  // Clamp paletteIndex so it never points off the end of the result list.
+  // Without this, deleting characters can leave the cursor highlighted on
+  // a row that no longer exists.
+  useEffect(() => {
+    if (paletteIndex >= filteredPalette.length) {
+      setPaletteIndex(Math.max(0, filteredPalette.length - 1));
+    }
+  }, [filteredPalette.length, paletteIndex]);
+
+  // Reset query + cursor when the palette opens or closes — opening fresh
+  // should always start with an empty search, not whatever was there before.
+  useEffect(() => {
+    if (showPalette) {
+      setPaletteQuery("");
+      setPaletteIndex(0);
+    }
+  }, [showPalette]);
+
   async function exportResults(format: "csv" | "json") {
     const result = activeTab.results[activeTab.activeResult];
     if (!result || result.isMessage) return;
@@ -3492,10 +4699,6 @@ function handleCellCommit(
     setSaveQueryDesc("");
     loadSavedQueries(); // refresh the library panel
   }
-
-  const [savedQueries, setSavedQueries]     = useState<any[]>([]);
-  const [querySearch, setQuerySearch]       = useState("");
-  const [showQueryLibrary, setShowQueryLibrary] = useState(false);
 
   async function loadSavedQueries() {
     const raw = await invoke<string>("list_queries");
@@ -4146,6 +5349,180 @@ function handleCellCommit(
         </>
       )}
       {/* END Kill session confirmation */}
+
+      {/* Command palette — Ctrl+P / Cmd+P
+          Positioned ~120px from top (not center) so results stay visible
+          even as the list grows. 540px width matches VS Code's palette.
+          Escape closes. Up/Down navigates. Enter activates.
+          Click outside (overlay) closes. */}
+      {showPalette && (
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999,
+              background: "rgba(0,0,0,0.4)" }}
+            onClick={() => setShowPalette(false)}
+          />
+          <div style={{
+            position: "fixed", top: 120, left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1000, background: "var(--surface-2)",
+            border: "1px solid var(--border)", borderRadius: 10,
+            width: 540, maxHeight: "60vh",
+            boxShadow: "var(--shadow-lg)",
+            display: "flex", flexDirection: "column",
+            overflow: "hidden",
+          }}>
+            {/* Search input */}
+            <input
+              autoFocus
+              type="text"
+              value={paletteQuery}
+              onChange={e => { setPaletteQuery(e.target.value); setPaletteIndex(0); }}
+              onKeyDown={e => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setShowPalette(false);
+                } else if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setPaletteIndex(i => Math.min(i + 1, filteredPalette.length - 1));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setPaletteIndex(i => Math.max(i - 1, 0));
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  const item = filteredPalette[paletteIndex];
+                  if (item) {
+                    setShowPalette(false);
+                    // Defer the action to next tick so the modal can unmount
+                    // before the action mutates state that the modal touched
+                    // (e.g. setActiveTabId, which would otherwise re-render
+                    // the modal mid-close).
+                    setTimeout(() => item.onSelect(), 0);
+                  }
+                }
+              }}
+              placeholder="Type to search connections, tables, tabs, commands…"
+              style={{
+                background: "transparent",
+                border: "none",
+                borderBottom: filteredPalette.length > 0
+                  ? "1px solid var(--border)"
+                  : "1px solid transparent",
+                color: "var(--text)",
+                fontSize: 14,
+                fontFamily: "monospace",
+                padding: "14px 18px",
+                outline: "none",
+                width: "100%",
+                boxSizing: "border-box",
+              }}
+            />
+
+            {/* Results list — scrollable. Empty until user types something. */}
+            {filteredPalette.length > 0 && (
+              <div style={{
+                flex: 1,
+                overflow: "auto",
+                padding: "4px 0",
+              }}>
+                {filteredPalette.map((item, i) => (
+                  <div
+                    key={item.id}
+                    ref={el => {
+                      // Auto-scroll the highlighted row into view when
+                      // navigating with arrow keys past the visible region.
+                      if (i === paletteIndex && el) {
+                        el.scrollIntoView({ block: "nearest" });
+                      }
+                    }}
+                    onMouseEnter={() => setPaletteIndex(i)}
+                    onClick={() => {
+                      setShowPalette(false);
+                      setTimeout(() => item.onSelect(), 0);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      padding: "6px 18px",
+                      cursor: "pointer",
+                      background: i === paletteIndex
+                        ? "var(--accent-bg)"
+                        : "transparent",
+                      borderLeft: i === paletteIndex
+                        ? "2px solid var(--accent)"
+                        : "2px solid transparent",
+                    }}
+                  >
+                    {/* Category icon — small, monospace, low contrast */}
+                    <span style={{
+                      fontSize: 11,
+                      width: 14,
+                      textAlign: "center",
+                      color: "var(--text-tertiary)",
+                      flexShrink: 0,
+                    }}>
+                      {item.category === "command"    ? "▸" :
+                       item.category === "connection" ? "◉" :
+                       item.category === "table"      ? "⊞" :
+                       item.category === "tab"        ? "❏" :
+                                                        "★"}
+                    </span>
+                    {/* Primary label */}
+                    <span style={{
+                      flex: 1,
+                      fontSize: 13,
+                      fontFamily: "monospace",
+                      color: i === paletteIndex
+                        ? "var(--text)"
+                        : "var(--text-secondary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}>
+                      {item.label}
+                    </span>
+                    {/* Secondary — schema, host, keybinding hint, etc */}
+                    {item.secondary && (
+                      <span style={{
+                        fontSize: 11,
+                        fontFamily: "monospace",
+                        color: "var(--text-disabled)",
+                        flexShrink: 0,
+                        maxWidth: 200,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}>
+                        {item.secondary}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Footer hint line — only when results exist */}
+            {filteredPalette.length > 0 && (
+              <div style={{
+                padding: "6px 18px",
+                borderTop: "1px solid var(--border)",
+                fontSize: 10,
+                fontFamily: "monospace",
+                color: "var(--text-disabled)",
+                display: "flex",
+                gap: 16,
+                flexShrink: 0,
+              }}>
+                <span>↑↓ navigate</span>
+                <span>↵ select</span>
+                <span>esc close</span>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+      {/* END Command palette */}
       {/* Settings modal */}
       {showSettings && (
         <>
@@ -5680,6 +7057,35 @@ function handleCellCommit(
           >
             {activeTab.loading ? "Running..." : "▶ Run (Cmd+Enter)"}
           </button>
+          {/* Include Plan toggle — per tab. Hidden when there's no DB
+              connection (plans are meaningless for flat-file DuckDB queries).
+              All 6 engines are supported: Postgres + Cockroach use ANALYZE
+              FORMAT JSON, SQL Server uses STATISTICS XML ON, MySQL/MariaDB
+              use EXPLAIN FORMAT=JSON, SQLite uses EXPLAIN QUERY PLAN.
+              Persists in tab state, so a user can keep plan-mode on for
+              one tab while running normal queries elsewhere. */}
+          {activeTab.connection && !activeTab.file && (
+            <button
+              onClick={() => updateActiveTab({ includePlan: !activeTab.includePlan })}
+              title={activeTab.includePlan
+                ? "Plan capture on — Run will produce an execution plan instead of query results"
+                : "Wrap the next query with EXPLAIN to capture its execution plan"}
+              style={{
+                padding: "6px 12px",
+                background: activeTab.includePlan ? "var(--warning-bg)" : "transparent",
+                color: activeTab.includePlan ? "var(--warning)" : "var(--text-secondary)",
+                border: `1px solid ${activeTab.includePlan ? "var(--warning)" : "var(--border)"}`,
+                borderRadius: 6,
+                cursor: "pointer",
+                fontSize: 11,
+                fontFamily: "monospace",
+                flexShrink: 0,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {activeTab.includePlan ? "▸ Plan ON" : "▸ Plan"}
+            </button>
+          )}
           {wasRewritten && (
             <div style={{
               display: "flex", alignItems: "center", gap: 6,
@@ -6121,6 +7527,13 @@ function handleCellCommit(
                   ❌ {result.error}
                 </div>
               );
+            }
+
+            // Execution plan branch — replace the data grid with the tree.
+            // Checked before isMessage so plan results never get rendered
+            // as a single-row "command completed" message.
+            if (result.isPlan) {
+              return <PlanResultRenderer result={result} />;
             }
 
             if (result.isMessage) {

@@ -25,7 +25,11 @@ public static class SqlServerExecutor
     private const short SQL_C_WCHAR = -8;
     private const short SQL_WCHAR = -9;
     private const short SQL_WVARCHAR = -9;
-    private const int SQL_COLUMN_BUFFER_SIZE = 8192;
+    // 256 KB buffer. Covers ShowPlanXML for typical queries (usually under
+    // 50-100 KB), large NVARCHAR(MAX), JSON, and most "big" columns in a
+    // single call. Values larger than this are handled by the chunked
+    // fallback path in SerialiseResultsInternal.
+    private const int SQL_COLUMN_BUFFER_SIZE = 262_144;
 
     // ---- ODBC P/Invoke ------------------------------------
     private const string OdbcDll = "odbc32.dll";
@@ -43,6 +47,7 @@ public static class SqlServerExecutor
     [DllImport(OdbcDll)] private static extern short SQLDisconnect(IntPtr connHandle);
     [DllImport(OdbcDll)] private static extern short SQLSetStmtAttrW(IntPtr stmtHandle, int attribute, IntPtr valuePtr, int stringLength);
     [DllImport(OdbcDll)] private static extern short SQLRowCount(IntPtr stmtHandle, out int rowCount);
+    [DllImport(OdbcDll, CharSet = CharSet.Unicode)] private static extern short SQLMoreResults(IntPtr hStmt);
 
     // ---- Public entry point -------------------------------
     public static IntPtr Execute(string connectionString, string sql, bool readOnly)
@@ -324,7 +329,48 @@ public static class SqlServerExecutor
                     Error = GetDiagnostic(SQL_HANDLE_STMT, hStmt)
                 };
 
-            return SerialiseResultsInternal(hStmt);
+            QueryResult? firstNonEmpty = null;
+            QueryResult? planResult = null;
+
+            while (true)
+            {
+                short numCols;
+                SQLNumResultCols(hStmt, out numCols);
+
+                // numCols == 0 means this was a non-rowset statement (SET, etc).
+                // Skip to the next result set if any.
+                if (numCols > 0)
+                {
+                    var result = SerialiseResultsInternal(hStmt);
+                    if (result.Rows.Count > 0)
+                    {
+                        firstNonEmpty ??= result;
+                        // Detect a plan rowset: single column whose first
+                        // cell starts with `<`. SQL Server's plan column
+                        // is named "Microsoft SQL Server N XML Showplan"
+                        // but the exact version number varies, so we use
+                        // content detection rather than column name match.
+                        if (result.Columns.Count == 1
+                            && result.Rows.Count > 0
+                            && result.Rows[0].Count > 0
+                            && result.Rows[0][0] is string s
+                            && s.TrimStart().StartsWith("<"))
+                        {
+                            planResult = result;
+                        }
+                    }
+                }
+
+                short mrc = SQLMoreResults(hStmt);
+                if (mrc != SQL_SUCCESS && mrc != SQL_SUCCESS_WITH_INFO) break;
+            }
+
+            // Prefer the plan rowset (if STATISTICS XML was used), otherwise
+            // the first non-empty rowset (normal query path), otherwise an
+            // empty result so React doesn't get null.
+            return planResult
+                ?? firstNonEmpty
+                ?? new QueryResult { Columns = new List<string>(), Rows = new List<List<string?>>() };
         }
         catch (Exception ex)
         {
@@ -375,13 +421,92 @@ public static class SqlServerExecutor
                 {
                     short rc2 = SQLGetData(hStmt, i, SQL_C_WCHAR,
                         dataBuf, SQL_COLUMN_BUFFER_SIZE, out int indicator);
+
                     if (indicator == SQL_NULL_DATA)
+                    {
                         row.Add(null);
-                    else if (rc2 == SQL_SUCCESS || rc2 == SQL_SUCCESS_WITH_INFO)
-                        row.Add(Marshal.PtrToStringUni(
-                            dataBuf, Math.Max(0, indicator / 2)));
+                        continue;
+                    }
+                    if (rc2 != SQL_SUCCESS && rc2 != SQL_SUCCESS_WITH_INFO)
+                    {
+                        row.Add(null);
+                        continue;
+                    }
+
+                    if (rc2 == SQL_SUCCESS)
+                    {
+                        // Value fit in the buffer. indicator is bytes
+                        // copied, excluding null terminator.
+                        int safeBytes = Math.Min(
+                            Math.Max(0, indicator),
+                            SQL_COLUMN_BUFFER_SIZE);
+                        row.Add(Marshal.PtrToStringUni(dataBuf, safeBytes / 2));
+                        continue;
+                    }
+
+                    // rc == SQL_SUCCESS_WITH_INFO: value was larger than
+                    // our buffer. We have the first chunk in dataBuf.
+                    // If indicator is a real positive length, allocate a
+                    // larger buffer sized to exactly fit and re-read the
+                    // remainder. If indicator is SQL_NO_TOTAL (driver
+                    // doesn't know the total), fall back to keeping just
+                    // the buffer-sized prefix to avoid the heap-corruption
+                    // path; the value will be truncated but we don't crash.
+                    if (indicator > 0 && indicator > SQL_COLUMN_BUFFER_SIZE)
+                    {
+                        // Indicator gives total bytes needed (excluding
+                        // terminator). Allocate that plus 2 bytes for
+                        // safety.
+                        int totalBytes = indicator + 2;
+                        IntPtr bigBuf = Marshal.AllocHGlobal(totalBytes);
+                        try
+                        {
+                            // Copy the partial data we already read into
+                            // the start of the new buffer. We received
+                            // (SQL_COLUMN_BUFFER_SIZE - 2) usable bytes
+                            // before the null terminator.
+                            int alreadyRead = SQL_COLUMN_BUFFER_SIZE - 2;
+                            for (int b = 0; b < alreadyRead; b++)
+                            {
+                                Marshal.WriteByte(bigBuf, b,
+                                    Marshal.ReadByte(dataBuf, b));
+                            }
+
+                            // Read the remainder into the larger buffer
+                            // starting at the offset after what we copied.
+                            IntPtr remainderStart = IntPtr.Add(bigBuf, alreadyRead);
+                            int remainderCapacity = totalBytes - alreadyRead;
+                            short rc3 = SQLGetData(hStmt, i, SQL_C_WCHAR,
+                                remainderStart, remainderCapacity, out int ind2);
+
+                            if (rc3 == SQL_SUCCESS || rc3 == SQL_SUCCESS_WITH_INFO)
+                            {
+                                // Total chars in the assembled buffer.
+                                int validBytes = alreadyRead +
+                                    (ind2 > 0 ? Math.Min(ind2, remainderCapacity) : 0);
+                                row.Add(Marshal.PtrToStringUni(bigBuf, validBytes / 2));
+                            }
+                            else
+                            {
+                                // Couldn't finish reading — return what we
+                                // had from the first chunk only.
+                                row.Add(Marshal.PtrToStringUni(dataBuf, alreadyRead / 2));
+                            }
+                        }
+                        finally
+                        {
+                            Marshal.FreeHGlobal(bigBuf);
+                        }
+                    }
                     else
-                        row.Add(null);
+                    {
+                        // SQL_NO_TOTAL or unexpected value — driver can't
+                        // tell us the size. Keep the chunk we have and
+                        // mark as truncated. Better than risking corruption.
+                        int safePrefix = SQL_COLUMN_BUFFER_SIZE - 2;
+                        row.Add(Marshal.PtrToStringUni(dataBuf, safePrefix / 2));
+                        truncated = true;
+                    }
                 }
                 rows.Add(row);
                 rowCount++;

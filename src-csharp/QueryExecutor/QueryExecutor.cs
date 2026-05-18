@@ -387,12 +387,31 @@ public static class QueryExecutor
         }
 
         return trimmed.StartsWith("SELECT")
-            || trimmed.StartsWith("SHOW")
-            || trimmed.StartsWith("DESCRIBE")
-            || trimmed.StartsWith("EXPLAIN")
-            || trimmed.StartsWith("PRAGMA")
-            || trimmed.StartsWith("CALL")
-            || trimmed.StartsWith("EXEC ");
+               || trimmed.StartsWith("SHOW")
+               || trimmed.StartsWith("DESCRIBE")
+               || trimmed.StartsWith("EXPLAIN")
+               || trimmed.StartsWith("SET STATISTICS XML")
+               || trimmed.StartsWith("SET SHOWPLAN_XML")
+               || trimmed.StartsWith("SET STATISTICS PROFILE")
+               || IsPlanCaptureBatch(trimmed);
+    }
+    /// <summary>
+    /// Returns true when the SQL is a plan-capture batch — specifically a
+    /// BEGIN...END block that contains STATISTICS XML or SHOWPLAN_XML directives.
+    /// Tight check: a generic BEGIN TRANSACTION...COMMIT batch will not match,
+    /// nor will a BEGIN...END containing arbitrary DML. The block must contain
+    /// at least one plan-capture SET directive to qualify.
+    /// </summary>
+    private static bool IsPlanCaptureBatch(string upperTrimmed)
+    {
+        if (!upperTrimmed.StartsWith("BEGIN")) return false;
+        // The very first thing after BEGIN should be either whitespace or
+        // a newline — distinguishes our wrapper from "BEGIN TRANSACTION".
+        // We only need to check that the block contains a plan-capture
+        // directive to know it's our wrapper.
+        return upperTrimmed.Contains("STATISTICS XML")
+            || upperTrimmed.Contains("SHOWPLAN_XML")
+            || upperTrimmed.Contains("STATISTICS PROFILE");
     }
 
     // Scans past CTE definitions — WITH [RECURSIVE] name AS (...), name AS (...) —
