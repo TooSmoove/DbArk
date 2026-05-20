@@ -292,8 +292,8 @@ public static class SqlServerExecutor
             if (hEnv != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_ENV, hEnv);
         }
     }
-    public static QueryResult ExecuteInternal(
-    string connectionString, string sql)
+    public static List<QueryResult> ExecuteInternal(
+     string connectionString, string sql)
     {
         IntPtr hEnv = IntPtr.Zero;
         IntPtr hDbc = IntPtr.Zero;
@@ -313,10 +313,9 @@ public static class SqlServerExecutor
                 IntPtr.Zero, 0, out outLen, 0);
 
             if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
-                return new QueryResult
-                {
-                    Error = GetDiagnostic(SQL_HANDLE_DBC, hDbc)
-                };
+                return new List<QueryResult> {
+                new QueryResult { Error = GetDiagnostic(SQL_HANDLE_DBC, hDbc) }
+            };
 
             SQLAllocStmt(hDbc, out hStmt);
             SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT,
@@ -324,57 +323,47 @@ public static class SqlServerExecutor
 
             rc = SQLExecDirectW(hStmt, sql, SQL_NTS);
             if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
-                return new QueryResult
-                {
-                    Error = GetDiagnostic(SQL_HANDLE_STMT, hStmt)
-                };
+                return new List<QueryResult> {
+                new QueryResult { Error = GetDiagnostic(SQL_HANDLE_STMT, hStmt) }
+            };
 
-            QueryResult? firstNonEmpty = null;
-            QueryResult? planResult = null;
+            // Walk every result set the batch produced and keep them all.
+            // STATISTICS XML emits (data, plan) — the previous implementation
+            // collapsed these to one via `planResult ?? firstNonEmpty`,
+            // discarding the data. Plan-vs-data detection moves to the
+            // frontend, which already content-matches on "starts with <".
+            //
+            // Result sets where numCols == 0 are non-rowset statements (the
+            // SET STATISTICS XML ON/OFF inside the BEGIN…END wrapper).
+            // Skipping them keeps "command completed" noise out of the tab bar.
+            var allResults = new List<QueryResult>();
 
             while (true)
             {
                 short numCols;
                 SQLNumResultCols(hStmt, out numCols);
 
-                // numCols == 0 means this was a non-rowset statement (SET, etc).
-                // Skip to the next result set if any.
                 if (numCols > 0)
-                {
-                    var result = SerialiseResultsInternal(hStmt);
-                    if (result.Rows.Count > 0)
-                    {
-                        firstNonEmpty ??= result;
-                        // Detect a plan rowset: single column whose first
-                        // cell starts with `<`. SQL Server's plan column
-                        // is named "Microsoft SQL Server N XML Showplan"
-                        // but the exact version number varies, so we use
-                        // content detection rather than column name match.
-                        if (result.Columns.Count == 1
-                            && result.Rows.Count > 0
-                            && result.Rows[0].Count > 0
-                            && result.Rows[0][0] is string s
-                            && s.TrimStart().StartsWith("<"))
-                        {
-                            planResult = result;
-                        }
-                    }
-                }
+                    allResults.Add(SerialiseResultsInternal(hStmt));
 
                 short mrc = SQLMoreResults(hStmt);
                 if (mrc != SQL_SUCCESS && mrc != SQL_SUCCESS_WITH_INFO) break;
             }
 
-            // Prefer the plan rowset (if STATISTICS XML was used), otherwise
-            // the first non-empty rowset (normal query path), otherwise an
-            // empty result so React doesn't get null.
-            return planResult
-                ?? firstNonEmpty
-                ?? new QueryResult { Columns = new List<string>(), Rows = new List<List<string?>>() };
+            if (allResults.Count == 0)
+                allResults.Add(new QueryResult
+                {
+                    Columns = new List<string>(),
+                    Rows = new List<List<string?>>()
+                });
+
+            return allResults;
         }
         catch (Exception ex)
         {
-            return new QueryResult { Error = ex.Message };
+            return new List<QueryResult> {
+            new QueryResult { Error = ex.Message }
+        };
         }
         finally
         {

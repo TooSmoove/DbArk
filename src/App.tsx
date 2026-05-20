@@ -16,6 +16,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import "./theme.css";   // colors — must come first
 import "./index.css";   // typography & layout
+import { ErDiagram } from "./components/ErDiagram/ErDiagram";
 
 // ---- Types ------------------------------------------------
 interface ConnectionConfig {
@@ -140,14 +141,25 @@ interface IndexInfo {
   isPrimary: boolean;
 }
 
+interface ForeignKey {
+  constraintName: string;
+  sourceSchema:   string;
+  sourceTable:    string;
+  sourceColumn:   string;
+  targetSchema:   string;
+  targetTable:    string;
+  targetColumn:   string;
+}
+
 interface SchemaResult {
-  tables:     TableInfo[];
-  procedures: ProcedureInfo[];
-  functions:  FunctionInfo[];
-  views:      ViewInfo[];
-  triggers:   TriggerInfo[];
-  indexes:    IndexInfo[];
-  error?:     string;
+  tables:       TableInfo[];
+  procedures:   ProcedureInfo[];
+  functions:    FunctionInfo[];
+  views:        ViewInfo[];
+  triggers:     TriggerInfo[];
+  indexes:      IndexInfo[];
+  foreignKeys?: ForeignKey[];   // ← new, optional for backward compat
+  error?:       string;
 }
 interface HistoryEntry {
   id: number;
@@ -262,32 +274,25 @@ function isPlanSafeSql(sql: string): boolean {
  *  Returns the wrapped SQL, or null if the statement isn't plan-safe. */
 function wrapPlanSql(sql: string, engine: string): string | null {
   if (!isPlanSafeSql(sql)) return null;
-  // Strip a trailing semicolon — we add our own structure around it
   const clean = sql.trim().replace(/;\s*$/, "");
   switch (engine.toLowerCase()) {
     case "postgres":
-    case "cockroachdb":
       // ANALYZE actually executes the query. FORMAT JSON gives us a
-      // parse-friendly tree. BUFFERS reports cache hits/reads, useful
-      // for explaining slow queries.
+      // parse-friendly tree. BUFFERS reports cache hits/reads.
       return `EXPLAIN (ANALYZE, FORMAT JSON, BUFFERS) ${clean}`;
+    case "cockroachdb":
+      // CockroachDB doesn't accept Postgres's parenthesised option list
+      // and has no JSON output mode. Plain EXPLAIN returns a tabular
+      // plan — we render it like the SQLite EXPLAIN QUERY PLAN output.
+      // EXPLAIN ANALYZE exists too but emits prose, not a parseable
+      // structure, so we stick with the cheaper non-analyzing form.
+      return `EXPLAIN ${clean}`;
     case "sqlserver":
-      // Wrap in BEGIN...END so the C# multi-statement splitter sees this
-      // as a single syntactic statement and SQL Server executes the whole
-      // thing as one batch. Without this wrapper, the splitter would break
-      // the SET/SELECT/SET into three separate calls — losing STATISTICS
-      // XML state between them and never producing the plan rowset.
       return `BEGIN\nSET STATISTICS XML ON;\n${clean};\nSET STATISTICS XML OFF;\nEND`;
     case "mysql":
     case "mariadb":
-      // FORMAT=JSON works on MySQL 5.6+ and MariaDB 10.1+. ANALYZE (a
-      // separate command) is MySQL 8.0+; sticking with EXPLAIN keeps
-      // wider compatibility. The renderer falls back gracefully when
-      // actual-times columns are missing.
       return `EXPLAIN FORMAT=JSON ${clean}`;
     case "sqlite":
-      // SQLite's plan output is tabular, not a tree. The renderer
-      // handles it as a special case in session 2.
       return `EXPLAIN QUERY PLAN ${clean}`;
     default:
       return null;
@@ -1690,6 +1695,18 @@ function convertSqlServerNode(el: Element): PlanNode {
 function parseMysqlPlan(json: string): PlanNode | null {
   try {
     const parsed = JSON.parse(json);
+
+    // MySQL 8.4+ ships a new "v2.0" JSON plan schema with a fundamentally
+    // different shape: a top-level `query_plan` object instead of
+    // `query_block`, uniform `inputs[]` children instead of irregular
+    // nested_loop / ordering_operation wrappers, and renamed cost/rows
+    // fields. Detect by either the explicit version marker or the
+    // presence of `query_plan`, and route to the v2 parser.
+    if (parsed?.json_schema_version === "2.0" || parsed?.query_plan) {
+      return parsed.query_plan ? convertMysqlV2Node(parsed.query_plan) : null;
+    }
+
+    // Legacy schema (MySQL 5.7 through 8.3, MariaDB)
     const block = parsed?.query_block;
     if (!block) return null;
     return convertMysqlBlock(block);
@@ -1697,6 +1714,67 @@ function parseMysqlPlan(json: string): PlanNode | null {
     console.error("parseMysqlPlan failed:", e);
     return null;
   }
+}
+
+// MySQL 8.4+ "v2.0" plan schema. Every node has the same shape:
+//   { operation, access_type, inputs?, table_name?, schema_name?,
+//     used_columns?, estimated_rows?, estimated_total_cost?,
+//     limit?, limit_offset?, index_name?, condition?, ... }
+// `operation` is a human-readable label MySQL has already formatted
+// (e.g. "Table scan on db", "Limit: 100 row(s)", "Nested loop inner join").
+// Children are uniformly in `inputs[]` — no irregular wrappers to probe.
+function convertMysqlV2Node(n: any): PlanNode {
+  const op: string = n.operation ?? n.access_type ?? "Node";
+  const label = shortenMysqlV2Label(op);
+
+  const meta: Record<string, string> = {};
+  if (n.schema_name && n.table_name) {
+    meta["Table"] = `${n.schema_name}.${n.table_name}`;
+  } else if (n.table_name) {
+    meta["Table"] = n.table_name;
+  }
+  if (n.access_type)  meta["Access"]    = n.access_type;
+  if (n.index_name)   meta["Index"]     = n.index_name;
+  if (n.condition)    meta["Condition"] = n.condition;
+  if (n.limit != null) meta["Limit"]   = String(n.limit);
+  if (n.limit_offset)  meta["Offset"]  = String(n.limit_offset);
+  if (Array.isArray(n.used_columns) && n.used_columns.length > 0) {
+    // Truncate long column lists — a SELECT * on a wide table dumps
+    // dozens of names and crushes the meta panel.
+    const cols = n.used_columns as string[];
+    meta["Columns"] = cols.length > 8
+      ? `${cols.slice(0, 8).join(", ")}, … (+${cols.length - 8} more)`
+      : cols.join(", ");
+  }
+
+  return {
+    label,
+    // Only set detail when the shortened label dropped useful info.
+    detail: op === label ? "" : op,
+    cost: parseFloat(n.estimated_total_cost ?? "0"),
+    rows: parseFloat(n.estimated_rows ?? "0"),
+    children: Array.isArray(n.inputs) ? n.inputs.map(convertMysqlV2Node) : [],
+    meta,
+  };
+}
+
+// Pulls a compact tree-node label out of MySQL's verbose `operation` string.
+//   "Table scan on db"               → "Table Scan"
+//   "Limit: 100 row(s)"              → "Limit"
+//   "Nested loop inner join"         → "Nested Loop Inner Join"
+//   "Index lookup on t using PRIMARY" → "Index Lookup"
+// The full operation string is preserved in PlanNode.detail so nothing
+// is lost — just rearranged for the tree visualisation.
+function shortenMysqlV2Label(op: string): string {
+  let s = op;
+  const onIdx = s.search(/\s+on\s+/i);
+  if (onIdx > 0) s = s.slice(0, onIdx);
+  const colonIdx = s.indexOf(":");
+  if (colonIdx > 0) s = s.slice(0, colonIdx);
+  s = s.trim();
+  return s.split(/\s+/)
+    .map(w => w.length > 0 ? w[0].toUpperCase() + w.slice(1) : w)
+    .join(" ");
 }
 
 function convertMysqlBlock(block: any): PlanNode {
@@ -2094,7 +2172,7 @@ function PlanResultRenderer({ result }: { result: QueryResult }) {
   }
 
   let root: PlanNode | null = null;
-  if (engine === "postgres" || engine === "cockroachdb") {
+  if (engine === "postgres") {
     root = parsePostgresPlan(rawText);
   } else if (engine === "sqlserver") {
     root = parseSqlServerPlan(rawText);
@@ -2102,6 +2180,35 @@ function PlanResultRenderer({ result }: { result: QueryResult }) {
     root = parseMysqlPlan(rawText);
   } else if (engine === "sqlite") {
     root = parseSqlitePlan(result);
+  } 
+  // CockroachDB returns plain EXPLAIN as a multi-row tabular result.
+  // The server has already formatted it as a readable indented tree with
+  // • markers — building a parser on top of that text format doesn't
+  // add value, just fragility across versions. Render directly with a
+  // clear header so it reads as the intended output, not a failure path.
+  else if (engine === "cockroachdb") {
+    const text = result.rows.map(r => r[0] ?? "").join("\n");
+    return (
+      <div style={{ flex: 1, overflow: "auto", padding: "12px 16px" }}>
+        <div style={{
+          color: "var(--text-tertiary)",
+          fontSize: 11,
+          marginBottom: 8,
+          fontFamily: "monospace",
+        }}>
+          Execution plan (cockroachdb) — server-formatted text output.
+        </div>
+        <pre style={{
+          fontSize: 12,
+          fontFamily: "monospace",
+          color: "var(--text-secondary)",
+          whiteSpace: "pre",
+          margin: 0,
+        }}>
+          {text}
+        </pre>
+      </div>
+    );
   }
 
   if (root) {
@@ -2495,6 +2602,11 @@ function App() {
   const [activityError, setActivityError]   = useState<string | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [killPending, setKillPending]       = useState<ActivityRow | null>(null);
+
+  // Diagram panel — virtual result tab at activeResult = -2.
+  // Toggle from the schema sidebar header. Hidden when no connection
+  // has been loaded (the diagram has nothing to render without schema).
+  const [showDiagram, setShowDiagram] = useState(false);
 
   // ── Command palette state ───────────────────────────────────────────────
   // showPalette gates the modal; paletteQuery is the search input;
@@ -3319,6 +3431,7 @@ function App() {
     // back to running the original SQL with a banner error to keep the
     // user informed rather than silently dropping the toggle.
     let sql = userSql;
+    let wrappedPlanSql: string | null = null;
     let planMode = false;
     if (tab.includePlan && tab.connection && !tab.file) {
       const wrapped = wrapPlanSql(userSql, tab.connection.engine);
@@ -3329,8 +3442,19 @@ function App() {
         });
         return;
       }
-      sql = wrapped;
       planMode = true;
+      if (tab.connection.engine.toLowerCase() === "sqlserver") {
+        // SQL Server: SET STATISTICS XML returns data + plan in one execution.
+        // Swap sql for the wrapped form; the C# layer now returns both result
+        // sets and the post-parse reshape tags the plan tab.
+        sql = wrapped;
+      } else {
+        // Postgres / MySQL / MariaDB / SQLite / CockroachDB: EXPLAIN *replaces*
+        // the query rather than running alongside it. Keep `sql` as the user's
+        // original (for the data call) and stash the wrapped form for a second
+        // call we'll make right after the data call returns.
+        wrappedPlanSql = wrapped;
+      }
     }
 
     updateActiveTab({ loading: true, error: null, results: [], activeResult: 0 });
@@ -3340,6 +3464,7 @@ function App() {
 
     try {
       let raw: string;
+      let planRaw: string | null = null;
 
       if (tab.file) {
         if (tab.joinTables.length > 0 && tab.connection) {
@@ -3410,6 +3535,29 @@ function App() {
           engine:   conn.engine,
           readOnly: conn.readOnly ?? false,
         });
+
+        // Second call for non-SQL Server plan capture. Reuses the same
+        // connectionString — so the same SSH tunnel and same credentials —
+        // just with the EXPLAIN-wrapped form of the user's SQL.
+        //
+        // Failure here doesn't sink the whole runQuery; we stuff the error
+        // into a fake JSON envelope so the parsing branch below surfaces it
+        // as an errored plan tab and the user keeps their data result.
+        if (wrappedPlanSql) {
+          try {
+            planRaw = await invoke<string>("execute_query", {
+              connectionString,
+              sql: wrappedPlanSql,
+              engine: conn.engine,
+              readOnly: conn.readOnly ?? false,
+            });
+          } catch (e) {
+            planRaw = JSON.stringify({
+              error: `Plan capture failed: ${e instanceof Error ? e.message : String(e)}`,
+            });
+          }
+        }
+
       } else {
         updateActiveTab({ loading: false, error: "Select a connection or open a file first" });
         return;
@@ -3430,25 +3578,15 @@ function App() {
     // data grid. Engine is recorded so the right parser is selected.
     if (planMode && tab.connection) {
       const engine = tab.connection.engine;
-      // SQL Server with STATISTICS XML returns multiple result sets —
-      // first the query's actual data, then a separate single-row result
-      // whose column is named "Microsoft SQL Server 2005 XML Showplan".
-      // We discard the data rows and keep only the plan; otherwise the
-      // user would see the data tab first and have to click to find the
-      // plan, which is the opposite of what they asked for.
+
       if (engine === "sqlserver") {
-        // Earlier approach matched a column named "Microsoft SQL Server 2005
-        // XML Showplan" — but driver / version variation means the column
-        // name isn't always predictable. Matching by content (cell starts
-        // with `<`) is more reliable: a SQL Server plan is always a
-        // ShowPlanXML document and starts with `<` in the first non-null
-        // cell. Walk all rows of all results to find it; the user's data
-        // might happen to share a single-column shape with the plan rowset.
+        // SQL Server: STATISTICS XML returned data + plan in one call,
+        // and (after the C# fix) both arrive as separate entries in
+        // normalised.results. Find the XML cell, split data from plan,
+        // and tag the plan with isPlan.
         let planResult: typeof normalised.results[0] | undefined;
         let planCell = "";
 
-        // Always dump what came back from C# — this is our single source
-        // of truth for diagnosing plan extraction issues.
         console.log(
           "[plan] SQL Server response — %d result set(s)",
           normalised.results.length
@@ -3473,10 +3611,6 @@ function App() {
           for (const row of r.rows ?? []) {
             for (const cell of row) {
               if (typeof cell === "string" && cell.trimStart().startsWith("<")) {
-                // Sanity check — XML plan documents start with the XML
-                // declaration or the ShowPlanXML root. Either signature
-                // is fine; reject anything else (e.g. an XML column from
-                // the user's own query that happens to look XML-ish).
                 const head = cell.trimStart().slice(0, 200);
                 if (head.includes("ShowPlanXML") || head.includes("<?xml")) {
                   planResult = r;
@@ -3489,28 +3623,66 @@ function App() {
           }
           if (planCell) break;
         }
+
         if (planResult && planCell) {
           console.log("[plan] ✓ Matched XML cell, reshaping result");
-          // Reshape: present the plan as a single-row, single-column result
-          // so the renderer's `result.rows[0]?.[0]` lookup always finds it
-          // regardless of the original columnar layout.
-          normalised.results = [{
+          const dataResults = normalised.results.filter(
+            r => r !== planResult && !r.isMessage
+          );
+          const reshapedPlan: QueryResult = {
             ...planResult,
             columns: ["plan"],
             rows: [[planCell]],
             rowCount: 1,
-          }];
+            isPlan: true,
+            planEngine: engine,
+          };
+          normalised.results = [...dataResults, reshapedPlan];
         } else {
           console.warn(
             "[plan] ✗ No XML cell found. Permission/driver issue, or plan not being returned by C#."
           );
         }
+      } else if (planRaw != null) {
+        // Postgres / MySQL / SQLite / CockroachDB: data came back from the
+        // first call as normalised.results; the plan is in planRaw from the
+        // second call. Append it as an extra result tagged isPlan.
+        try {
+          const planParsed = JSON.parse(planRaw);
+          if (planParsed.error) {
+            normalised.results.push({
+              columns: [],
+              rows: [],
+              rowCount: 0,
+              error: planParsed.error,
+              isPlan: true,
+              planEngine: engine,
+            });
+          } else {
+            const planResults: QueryResult[] =
+              planParsed.results ?? [planParsed];
+            // EXPLAIN against any of these engines produces exactly one
+            // result set; take the first and ignore extras defensively.
+            if (planResults[0]) {
+              normalised.results.push({
+                ...planResults[0],
+                isPlan: true,
+                planEngine: engine,
+              });
+            }
+          }
+        } catch (e) {
+          console.error("[plan] Failed to parse planRaw:", e);
+          normalised.results.push({
+            columns: [],
+            rows: [],
+            rowCount: 0,
+            error: `Plan parse failed: ${e instanceof Error ? e.message : String(e)}`,
+            isPlan: true,
+            planEngine: engine,
+          });
+        }
       }
-      normalised.results = normalised.results.map(r => ({
-        ...r,
-        isPlan: true,
-        planEngine: engine,
-      }));
     }
     const ms = Math.round(performance.now() - start);
 
@@ -3889,6 +4061,19 @@ function App() {
           return newTabs;
         });
       });
+
+      // Ctrl+Shift+D / Cmd+Shift+D — toggle Diagram panel
+      editor.addCommand(
+        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyD,
+        () => {
+          setShowDiagram(prev => {
+            const next = !prev;
+            if (next) updateActiveTab({ activeResult: -2 });
+            else if (activeTab.activeResult === -2) updateActiveTab({ activeResult: 0 });
+            return next;
+          });
+        }
+      );
 
       // Ctrl+Shift+F / Cmd+Shift+F — dialect-aware SQL formatter
       // Uses the ref so it always picks up the latest formatActiveSql,
@@ -4303,6 +4488,20 @@ function App() {
       label: "Theme: follow system",
       secondary: "",
       onSelect: () => { setThemePreference("system"); },
+    });
+    items.push({
+      id: "cmd:theme-solarized",
+      category: "command",
+      label: showDiagram ? "Hide ER Diagram" : "Show ER Diagram",
+      secondary: "",
+      onSelect: () => {
+        setShowDiagram(prev => {
+          const next = !prev;
+          if (next) updateActiveTab({ activeResult: -2 });
+          else if (activeTab.activeResult === -2) updateActiveTab({ activeResult: 0 });
+          return next;
+        });
+      },
     });
 
     // ── Connections ──────────────────────────────────────────────────────
@@ -6263,8 +6462,42 @@ function handleCellCommit(
                         };
                         return (
                         <>
-                          {/* Refresh button */}
-                          <div style={{ padding: "5px 14px 3px", display: "flex", justifyContent: "flex-end" }}>
+                          {/* Schema toolbar — Refresh + Diagram */}
+                          <div style={{ padding: "5px 14px 3px", display: "flex", justifyContent: "flex-end", gap: 6 }}>
+                            {safeSchema.tables.length > 0 && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  // Only switch this connection's schema into view if it isn't already
+                                  if (activeTab.connection?.id !== conn.id) {
+                                    updateActiveTab({
+                                      connection: conn,
+                                      file:       null,
+                                      title:      conn.name,
+                                      joinTables: [],
+                                      results:    [],
+                                      activeResult: 0,
+                                      error:      null,
+                                    });
+                                  }
+                                  setShowDiagram(true);
+                                  updateActiveTab({ activeResult: -2 });
+                                }}
+                                style={{
+                                  background: "none",
+                                  border: "1px solid var(--border)",
+                                  borderRadius: 4,
+                                  color: showDiagram && activeTab.connection?.id === conn.id
+                                    ? "var(--accent)"
+                                    : "var(--text-disabled)",
+                                  cursor: "pointer", fontSize: 10, fontFamily: "monospace",
+                                  padding: "2px 8px",
+                                }}
+                                title="Show ER diagram"
+                              >
+                                ⊞ diagram
+                              </button>
+                            )}
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -6278,7 +6511,6 @@ function handleCellCommit(
                               ↻ refresh
                             </button>
                           </div>
-
                           {/* Tables section */}
                           <SchemaSection
                             label="Tables"
@@ -6335,6 +6567,47 @@ function handleCellCommit(
                                         {tables.length}
                                       </span>
                                     </div>
+
+                                    {/* Schema sidebar toolbar — Diagram toggle */}
+                                    {schema && schema.tables.length > 0 && (
+                                      <div style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "space-between",
+                                        padding: "6px 14px",
+                                        borderBottom: "1px solid var(--border)",
+                                        background: "var(--bg)",
+                                      }}>
+                                        <span style={{
+                                          fontSize: 10,
+                                          color: "var(--text-tertiary)",
+                                          fontFamily: "monospace",
+                                          textTransform: "uppercase",
+                                          letterSpacing: "0.05em",
+                                        }}>
+                                          Schema
+                                        </span>
+                                        <button
+                                          onClick={() => {
+                                            setShowDiagram(true);
+                                            updateActiveTab({ activeResult: -2 });
+                                          }}
+                                          title="Show ER diagram of this connection's tables"
+                                          style={{
+                                            fontSize: 10,
+                                            fontFamily: "monospace",
+                                            color: showDiagram ? "var(--accent)" : "var(--text-tertiary)",
+                                            background: "none",
+                                            border: "1px solid var(--border)",
+                                            borderRadius: 4,
+                                            padding: "3px 8px",
+                                            cursor: "pointer",
+                                          }}
+                                        >
+                                          ⊞ Diagram
+                                        </button>
+                                      </div>
+                                    )}
 
                                     {/* Tables under this schema */}
                                     {expandedSchemas.has(schemaName) && tables.map(table => (
@@ -7369,7 +7642,7 @@ function handleCellCommit(
 
           {/* Result tab bar — shown when multiple results OR Activity panel open.
               Activity is a virtual "tab" at the right end with activeResult = -1. */}
-          {(activeTab.results.length > 1 || (showActivity && activeTab.connection?.engine !== "sqlite")) && (
+          {(activeTab.results.length > 1 || (showActivity && activeTab.connection?.engine !== "sqlite") || showDiagram) && (
             <div style={{
               display: "flex",
               alignItems: "center",
@@ -7397,6 +7670,13 @@ function handleCellCommit(
                     flexShrink: 0,
                   }}
                 >
+                  {result.isPlan
+                    ? `▣ Execution Plan`
+                    : result.error
+                    ? `❌ Result ${i + 1}`
+                    : result.isMessage
+                    ? `✓ Result ${i + 1}`
+                    : `⊞ Result ${i + 1}`}
                   {result.error
                     ? `❌ Result ${i + 1}`
                     : result.isMessage
@@ -7477,6 +7757,54 @@ function handleCellCommit(
                   </span>
                 </button>
               )}
+              {/* Diagram tab — virtual tab at the right end.
+              Only when panel is open and schema is loaded. */}
+              {showDiagram && schema && (
+                <button
+                  onClick={() => updateActiveTab({ activeResult: -2 })}
+                  title="ER diagram of this connection's tables"
+                  style={{
+                    padding: "6px 14px",
+                    // marginLeft: "auto" only if Activity isn't also shown — otherwise
+                    // Activity already pushed to the right and Diagram sits next to it
+                    marginLeft: showActivity ? 0 : "auto",
+                    background: "none",
+                    border: "none",
+                    borderBottom: `2px solid ${
+                      activeTab.activeResult === -2 ? "var(--accent)" : "transparent"
+                    }`,
+                    color: activeTab.activeResult === -2 ? "var(--text)" : "var(--text-tertiary)",
+                    cursor: "pointer",
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  <span>⊞ Diagram</span>
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowDiagram(false);
+                      if (activeTab.activeResult === -2) {
+                        updateActiveTab({ activeResult: 0 });
+                      }
+                    }}
+                    style={{
+                      color: "var(--text-disabled)",
+                      fontSize: 12,
+                      marginLeft: 2,
+                      padding: "0 2px",
+                    }}
+                    title="Close Diagram panel"
+                  >
+                    ✕
+                  </span>
+                </button>
+              )}
             </div>
           )}
 
@@ -7486,6 +7814,14 @@ function handleCellCommit(
             // Bottom panel peer to result tabs. Renders even when there
             // are no query results — that's the whole point: monitor
             // server activity while writing the next query.
+            // Diagram panel — virtual "result" at index -2.
+            // Renders the ER diagram for the connection's schema.
+            if (activeTab.activeResult === -2 && showDiagram && schema) {
+              return (
+                <ErDiagram schema={schema as any} />
+              );
+            }
+
             if (activeTab.activeResult === -1 && showActivity) {
               return (
                 <ActivityPanelBody

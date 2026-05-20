@@ -8,6 +8,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using static SqlServerOdbc;
 
 public class TableInfo
 {
@@ -32,6 +33,7 @@ public class SchemaResult
     [JsonPropertyName("views")] public List<ViewInfo> Views { get; set; } = new();
     [JsonPropertyName("triggers")] public List<TriggerInfo> Triggers { get; set; } = new();
     [JsonPropertyName("indexes")] public List<IndexInfo> Indexes { get; set; } = new();
+    [JsonPropertyName("foreignKeys")] public List<ForeignKeyInfo> ForeignKeys { get; set; } = new();
     [JsonPropertyName("error")] public string? Error { get; set; }
 }
 public class ProcedureInfo
@@ -86,6 +88,7 @@ public class DefinitionResult
 [JsonSerializable(typeof(List<TriggerInfo>))]
 [JsonSerializable(typeof(List<IndexInfo>))]
 [JsonSerializable(typeof(DefinitionResult))]
+[JsonSerializable(typeof(List<ForeignKeyInfo>))]
 internal partial class AppJsonContext : JsonSerializerContext { }
 
 public static class SchemaExplorerLib
@@ -130,7 +133,42 @@ public static class SchemaExplorerLib
             Views = GetSqlServerViews(connectionString),
             Triggers = GetSqlServerTriggers(connectionString),
             Indexes = GetSqlServerIndexes(connectionString),
+            ForeignKeys = GetSqlServerForeignKeys(connectionString),
         };
+    }
+    private static List<ForeignKeyInfo> GetSqlServerForeignKeys(string connectionString)
+    {
+        var result = SqlServerOdbc.Query(connectionString, @"
+    SELECT
+        fk.name,
+        sch_src.name,
+        src.name,
+        col_src.name,
+        sch_tgt.name,
+        tgt.name,
+        col_tgt.name
+    FROM sys.foreign_keys fk
+    INNER JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+    INNER JOIN sys.tables src ON src.object_id = fk.parent_object_id
+    INNER JOIN sys.schemas sch_src ON sch_src.schema_id = src.schema_id
+    INNER JOIN sys.columns col_src ON col_src.object_id = src.object_id
+                                  AND col_src.column_id = fkc.parent_column_id
+    INNER JOIN sys.tables tgt ON tgt.object_id = fk.referenced_object_id
+    INNER JOIN sys.schemas sch_tgt ON sch_tgt.schema_id = tgt.schema_id
+    INNER JOIN sys.columns col_tgt ON col_tgt.object_id = tgt.object_id
+                                  AND col_tgt.column_id = fkc.referenced_column_id
+    ORDER BY fk.name, fkc.constraint_column_id");
+
+        return result.Select(r => new ForeignKeyInfo
+        {
+            ConstraintName = r[0] ?? "",
+            SourceSchema = r[1] ?? "",
+            SourceTable = r[2] ?? "",
+            SourceColumn = r[3] ?? "",
+            TargetSchema = r[4] ?? "",
+            TargetTable = r[5] ?? "",
+            TargetColumn = r[6] ?? ""
+        }).ToList();
     }
 
     private static SchemaResult GetMySqlFullSchema(string connectionString)
@@ -143,7 +181,47 @@ public static class SchemaExplorerLib
             Views = GetMySqlViews(connectionString),
             Triggers = GetMySqlTriggers(connectionString),
             Indexes = GetMySqlIndexes(connectionString),
+            ForeignKeys = GetMySqlForeignKeys(connectionString),
         };
+    }
+    private static List<ForeignKeyInfo> GetMySqlForeignKeys(string connectionString)
+    {
+        var fks = new List<ForeignKeyInfo>();
+
+        using var conn = new MySqlConnection(connectionString);
+        conn.Open();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+        SELECT
+            CONSTRAINT_NAME,
+            TABLE_SCHEMA,
+            TABLE_NAME,
+            COLUMN_NAME,
+            REFERENCED_TABLE_SCHEMA,
+            REFERENCED_TABLE_NAME,
+            REFERENCED_COLUMN_NAME
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND REFERENCED_TABLE_NAME IS NOT NULL
+        ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            fks.Add(new ForeignKeyInfo
+            {
+                ConstraintName = reader.GetString(0),
+                SourceSchema = reader.GetString(1),
+                SourceTable = reader.GetString(2),
+                SourceColumn = reader.GetString(3),
+                TargetSchema = reader.GetString(4),
+                TargetTable = reader.GetString(5),
+                TargetColumn = reader.GetString(6)
+            });
+        }
+
+        return fks;
     }
 
     private static SchemaResult GetPostgresFullSchema(string connectionString)
@@ -156,8 +234,56 @@ public static class SchemaExplorerLib
             Views = GetPostgresViews(connectionString),
             Triggers = GetPostgresTriggers(connectionString),
             Indexes = GetPostgresIndexes(connectionString),
+            ForeignKeys = GetPostgresForeignKeys(connectionString),
         };
     }
+    private static List<ForeignKeyInfo> GetPostgresForeignKeys(string connectionString)
+    {
+        var fks = new List<ForeignKeyInfo>();
+
+        using var conn = new NpgsqlConnection(connectionString);
+        conn.Open();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+        SELECT
+            c.conname AS constraint_name,
+            ns_src.nspname AS source_schema,
+            t_src.relname AS source_table,
+            a_src.attname AS source_column,
+            ns_tgt.nspname AS target_schema,
+            t_tgt.relname AS target_table,
+            a_tgt.attname AS target_column
+        FROM pg_constraint c
+        JOIN pg_class t_src ON t_src.oid = c.conrelid
+        JOIN pg_namespace ns_src ON ns_src.oid = t_src.relnamespace
+        JOIN pg_class t_tgt ON t_tgt.oid = c.confrelid
+        JOIN pg_namespace ns_tgt ON ns_tgt.oid = t_tgt.relnamespace
+        JOIN unnest(c.conkey, c.confkey) WITH ORDINALITY AS cols(src_attnum, tgt_attnum, ord) ON true
+        JOIN pg_attribute a_src ON a_src.attrelid = t_src.oid AND a_src.attnum = cols.src_attnum
+        JOIN pg_attribute a_tgt ON a_tgt.attrelid = t_tgt.oid AND a_tgt.attnum = cols.tgt_attnum
+        WHERE c.contype = 'f'
+          AND ns_src.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'crdb_internal')
+        ORDER BY c.conname, cols.ord";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            fks.Add(new ForeignKeyInfo
+            {
+                ConstraintName = reader.GetString(0),
+                SourceSchema = reader.GetString(1),
+                SourceTable = reader.GetString(2),
+                SourceColumn = reader.GetString(3),
+                TargetSchema = reader.GetString(4),
+                TargetTable = reader.GetString(5),
+                TargetColumn = reader.GetString(6)
+            });
+        }
+
+        return fks;
+    }
+
 
     private static SchemaResult GetSqliteFullSchema(string connectionString)
     {
@@ -169,7 +295,68 @@ public static class SchemaExplorerLib
             Procedures = new List<ProcedureInfo>(),
             Functions = new List<FunctionInfo>(),
             Indexes = new List<IndexInfo>(),     // ← fetched via Rust
+            ForeignKeys = GetSqliteForeignKeys(connectionString),
         };
+    }
+    private static List<ForeignKeyInfo> GetSqliteForeignKeys(string connectionString)
+    {
+        string path = connectionString;
+        if (connectionString.StartsWith("Data Source=",
+            StringComparison.OrdinalIgnoreCase))
+            path = connectionString["Data Source=".Length..].Trim();
+
+        var fks = new List<ForeignKeyInfo>();
+
+        IntPtr db = IntPtr.Zero;
+        SqliteOpen(path, ref db);
+
+        try
+        {
+            // Get all tables first
+            var tableNames = new List<string>();
+            IntPtr listStmt = IntPtr.Zero;
+            SqlitePrepareV2(db,
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+                -1, ref listStmt, IntPtr.Zero);
+            try
+            {
+                while (SqliteStep(listStmt) == 100)
+                    tableNames.Add(
+                        Marshal.PtrToStringUTF8(SqliteColumnText(listStmt, 0)) ?? "");
+            }
+            finally { SqliteFinalize(listStmt); }
+
+            // PRAGMA foreign_key_list returns columns:
+            //   0=id, 1=seq, 2=table (target), 3=from (source col), 4=to (target col),
+            //   5=on_update, 6=on_delete, 7=match
+            foreach (var tableName in tableNames)
+            {
+                IntPtr fkStmt = IntPtr.Zero;
+                SqlitePrepareV2(db, $"PRAGMA foreign_key_list(\"{tableName}\")",
+                    -1, ref fkStmt, IntPtr.Zero);
+                try
+                {
+                    while (SqliteStep(fkStmt) == 100)
+                    {
+                        var id = SqliteColumnInt(fkStmt, 0);
+                        fks.Add(new ForeignKeyInfo
+                        {
+                            ConstraintName = $"fk_{tableName}_{id}",
+                            SourceSchema = "main",
+                            SourceTable = tableName,
+                            SourceColumn = Marshal.PtrToStringUTF8(SqliteColumnText(fkStmt, 3)) ?? "",
+                            TargetSchema = "main",
+                            TargetTable = Marshal.PtrToStringUTF8(SqliteColumnText(fkStmt, 2)) ?? "",
+                            TargetColumn = Marshal.PtrToStringUTF8(SqliteColumnText(fkStmt, 4)) ?? ""
+                        });
+                    }
+                }
+                finally { SqliteFinalize(fkStmt); }
+            }
+        }
+        finally { SqliteClose(db); }
+
+        return fks;
     }
 
     // ---- MySQL ------------------------------------------------
@@ -1300,4 +1487,14 @@ internal static class SqlServerOdbc
 
         return results;
     }
+}
+public class ForeignKeyInfo
+{
+    [JsonPropertyName("constraintName")] public string ConstraintName { get; set; } = "";
+    [JsonPropertyName("sourceSchema")] public string SourceSchema { get; set; } = "";
+    [JsonPropertyName("sourceTable")] public string SourceTable { get; set; } = "";
+    [JsonPropertyName("sourceColumn")] public string SourceColumn { get; set; } = "";
+    [JsonPropertyName("targetSchema")] public string TargetSchema { get; set; } = "";
+    [JsonPropertyName("targetTable")] public string TargetTable { get; set; } = "";
+    [JsonPropertyName("targetColumn")] public string TargetColumn { get; set; } = "";
 }

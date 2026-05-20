@@ -1,0 +1,404 @@
+/* src/components/ErDiagram/erDiagram.css
+ *
+ * Styles for the ER diagram. Uses CSS variables that match the design tokens
+ * from the build checklist (--bg, --surface, --surface2, --border, --text,
+ * --muted, --accent, --green, --amber). If your app uses different token
+ * names, either remap them here or override in your global stylesheet.
+ *
+ * All class names are prefixed `er-` to avoid collisions with the rest of
+ * the schema panel.
+ */
+
+/* ── Container ─────────────────────────────────────────────────────────── */
+
+.er-diagram {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: var(--bg, #0e0f11);
+  color: var(--text, #e8e9ec);
+  font-family: 'Syne', system-ui, sans-serif;
+}
+
+.er-diagram-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.07));
+  background: var(--surface, #16181c);
+}
+
+.er-diagram-warning {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--amber, #f59e0b);
+}
+
+.er-diagram-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 16px;
+  padding: 32px;
+  text-align: center;
+  color: var(--muted, #6b7280);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px;
+}
+
+/* ── Canvas ────────────────────────────────────────────────────────────── */
+
+.er-diagram-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.025) 1px, transparent 1px) 0 0 / 24px 24px,
+    var(--bg, #0e0f11);
+}
+
+.er-diagram-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  background: var(--surface, #16181c);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.07));
+  border-radius: 8px;
+}
+
+.er-diagram-controls button {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--subtle, #9ca3af);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.er-diagram-controls button:hover {
+  color: var(--text, #e8e9ec);
+  border-color: var(--border2, rgba(255, 255, 255, 0.12));
+  background: var(--surface2, #1e2026);
+}
+
+.er-diagram-svg {
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+.er-diagram-svg:active {
+  cursor: grabbing;
+}
+
+/* ── Node styles ───────────────────────────────────────────────────────── */
+
+.er-node {
+  cursor: pointer;
+  transition: opacity 0.18s ease;
+}
+
+.er-table-rect {
+  fill: var(--surface2, #1e2026);
+  stroke: var(--border2, rgba(255, 255, 255, 0.12));
+  stroke-width: 1;
+}
+
+.er-table-header {
+  fill: var(--surface, #16181c);
+}
+
+.er-table-name {
+  fill: var(--text, #e8e9ec);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.er-table-schema {
+  fill: var(--muted, #6b7280);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.er-column-text {
+  fill: var(--text, #e8e9ec);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+}
+
+.er-column-type {
+  fill: var(--subtle, #9ca3af);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+}
+
+.er-row-divider {
+  stroke: var(--border, rgba(255, 255, 255, 0.05));
+  stroke-width: 1;
+}
+
+.er-pk-badge {
+  fill: var(--amber, #f59e0b);
+}
+
+.er-junction-badge {
+  fill: var(--green, #10b981);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+/* ── Edge styles ───────────────────────────────────────────────────────── */
+
+.er-edge {
+  color: var(--accent, #6c63ff);
+  transition: opacity 0.18s ease;
+}
+
+.er-edge-line {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  fill: none;
+  opacity: 0.7;
+}
+
+.er-edge-label {
+  fill: var(--subtle, #9ca3af);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  pointer-events: none;
+}
+
+/* ── Highlight / dim states ────────────────────────────────────────────── */
+
+.er-dim {
+  opacity: 0.18;
+}
+
+.er-highlight .er-table-rect {
+  stroke: var(--accent, #6c63ff);
+  stroke-width: 2;
+}
+
+.er-edge.er-highlight {
+  color: var(--accent, #6c63ff);
+}
+
+.er-edge.er-highlight .er-edge-line {
+  opacity: 1;
+  stroke-width: 2;
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────────── */
+
+.er-button-primary {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: white;
+  background: var(--accent, #6c63ff);
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.er-button-primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.er-button-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.er-button-secondary {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--subtle, #9ca3af);
+  background: var(--surface2, #1e2026);
+  border: 1px solid var(--border2, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.er-button-secondary:hover {
+  color: var(--text, #e8e9ec);
+  background: var(--border, rgba(255, 255, 255, 0.07));
+}
+
+.er-link-button {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  color: var(--accent, #6c63ff);
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.er-link-button:hover {
+  text-decoration: underline;
+}
+
+/* ── Modal ─────────────────────────────────────────────────────────────── */
+
+.er-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.er-modal {
+  width: 100%;
+  max-width: 560px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface, #16181c);
+  border: 1px solid var(--border2, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.er-modal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.07));
+}
+
+.er-modal-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #e8e9ec);
+}
+
+.er-modal-count {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  color: var(--muted, #6b7280);
+}
+
+.er-modal-search {
+  margin: 12px 20px;
+  padding: 8px 12px;
+  background: var(--bg, #0e0f11);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.07));
+  border-radius: 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: var(--text, #e8e9ec);
+}
+
+.er-modal-search:focus {
+  outline: none;
+  border-color: var(--accent, #6c63ff);
+}
+
+.er-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 20px;
+}
+
+.er-modal-empty {
+  padding: 24px;
+  text-align: center;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  color: var(--muted, #6b7280);
+}
+
+.er-modal-group {
+  margin-bottom: 12px;
+}
+
+.er-modal-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 6px;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.05));
+  margin-bottom: 4px;
+}
+
+.er-modal-group-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  color: var(--muted, #6b7280);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.er-modal-group-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.er-modal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.er-modal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  cursor: pointer;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+}
+
+.er-modal-row:hover {
+  color: var(--accent, #6c63ff);
+}
+
+.er-modal-table-name {
+  flex: 1;
+  color: var(--text, #e8e9ec);
+}
+
+.er-modal-table-meta {
+  font-size: 10px;
+  color: var(--muted, #6b7280);
+}
+
+.er-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.07));
+}

@@ -144,11 +144,11 @@ public static class QueryExecutor
 
             foreach (var stmt in statements)
             {
-                var result = ExecuteStatement(connectionString, stmt, engine);
-                results.Add(result);
+                var stmtResults = ExecuteStatement(connectionString, stmt, engine);
+                results.AddRange(stmtResults);
 
-                // Stop at first error
-                if (result.Error != null)
+                // Stop at first error in any result set this statement produced
+                if (stmtResults.Any(r => r.Error != null))
                     break;
             }
 
@@ -471,22 +471,20 @@ public static class QueryExecutor
 
     // ── Statement execution ─────────────────────────────────────────────────
 
-    private static QueryResult ExecuteStatement(
-        string connectionString, string sql, string engine)
+    private static List<QueryResult> ExecuteStatement(
+    string connectionString, string sql, string engine)
     {
         try
         {
-            // Strip comments once — reused for storage and error reporting.
             var strippedSql = StripLeadingComments(sql).TrimStart();
             var sqlForStorage = strippedSql.Length > 500 ? strippedSql[..500] + "…" : strippedSql;
 
-            // CockroachDB: CALL does not return result sets by design.
-            // Surface a clear, actionable message rather than silently returning
-            // 0 rows, which looks identical to a query that matched nothing.
+            // CockroachDB CALL guard
             if (engine.Equals("cockroachdb", StringComparison.OrdinalIgnoreCase)
                 && strippedSql.StartsWith("CALL", StringComparison.OrdinalIgnoreCase))
             {
-                return new QueryResult
+                return new List<QueryResult> {
+                new QueryResult
                 {
                     Columns = new List<string> { "Message" },
                     Rows = new List<List<string?>>
@@ -496,17 +494,18 @@ public static class QueryExecutor
                     },
                     IsMessage = true,
                     Sql = sqlForStorage,
-                };
+                }
+            };
             }
 
-            // Apply smart DDL rewrite before executing
             var rewrittenSql = RewriteDdlStatement(sql, engine);
             var isSelect = IsReadOnlyStatement(rewrittenSql);
 
             if (!isSelect)
             {
                 int rowsAffected = ExecuteNonQuery(connectionString, rewrittenSql, engine);
-                return new QueryResult
+                return new List<QueryResult> {
+                new QueryResult
                 {
                     Columns = new List<string> { "Message" },
                     Rows = new List<List<string?>>
@@ -522,29 +521,38 @@ public static class QueryExecutor
                     IsMessage = true,
                     Sql = sqlForStorage,
                     WasRewritten = rewrittenSql != sql,
-                };
+                }
+            };
             }
 
-            var result = engine.ToLowerInvariant() switch
+            // Engine dispatch. Only SQL Server can naturally return multiple
+            // result sets per statement (STATISTICS XML); every other engine
+            // wraps its single QueryResult in a one-element list.
+            List<QueryResult> dispatchResults = engine.ToLowerInvariant() switch
             {
-                "postgres" => ExecutePostgresInternal(connectionString, rewrittenSql),
-                "cockroachdb" => ExecuteCockroachDbInternal(connectionString, rewrittenSql),
-                "sqlite" => ExecuteSqliteCore(connectionString, rewrittenSql),
+                "postgres" => new List<QueryResult> { ExecutePostgresInternal(connectionString, rewrittenSql) },
+                "cockroachdb" => new List<QueryResult> { ExecuteCockroachDbInternal(connectionString, rewrittenSql) },
+                "sqlite" => new List<QueryResult> { ExecuteSqliteCore(connectionString, rewrittenSql) },
                 "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, rewrittenSql),
-                _ => ExecuteMySqlInternal(connectionString, rewrittenSql), // mysql + mariadb
+                _ => new List<QueryResult> { ExecuteMySqlInternal(connectionString, rewrittenSql) },
             };
 
-            result.Sql = sqlForStorage;
-            result.WasRewritten = rewrittenSql != sql;
-            return result;
+            foreach (var r in dispatchResults)
+            {
+                r.Sql = sqlForStorage;
+                r.WasRewritten = rewrittenSql != sql;
+            }
+            return dispatchResults;
         }
         catch (Exception ex)
         {
             var stripped = StripLeadingComments(sql).TrimStart();
-            return new QueryResult
-            {
-                Error = ex.Message,
-                Sql = stripped.Length > 500 ? stripped[..500] + "…" : stripped,
+            return new List<QueryResult> {
+                new QueryResult
+                {
+                    Error = ex.Message,
+                    Sql = stripped.Length > 500 ? stripped[..500] + "…" : stripped,
+                }
             };
         }
     }
