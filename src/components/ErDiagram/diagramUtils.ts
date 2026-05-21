@@ -10,7 +10,6 @@ import { toPng } from "html-to-image";
 import type {
   SchemaResult,
   TableInfo,
-  ColumnInfo,
   ForeignKey,
   DiagramNode,
   DiagramEdge,

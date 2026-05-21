@@ -18,7 +18,6 @@ import type { DiagramNode, DiagramEdge } from "./diagramTypes";
 import {
   HEADER_HEIGHT,
   ROW_HEIGHT,
-  TABLE_WIDTH,
   exportDiagramPNG,
   exportDiagramSVG,
 } from "./diagramUtils";
@@ -224,7 +223,7 @@ export function DiagramCanvas({ nodes, edges }: Props) {
             d.fx = event.x;
             d.fy = event.y;
           })
-          .on("end", (event, d) => {
+          .on("end", (event, _d) => {
             if (!event.active) simulation.alphaTarget(0);
             // Leave the node pinned where the user dropped it — feels right.
             // Use a Reset Layout click to re-run the simulation from scratch.
