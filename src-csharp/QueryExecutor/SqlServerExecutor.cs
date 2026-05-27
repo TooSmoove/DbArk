@@ -42,7 +42,8 @@ public static class SqlServerExecutor
     [DllImport(OdbcDll)] private static extern short SQLNumResultCols(IntPtr stmtHandle, out short columnCount);
     [DllImport(OdbcDll)] private static extern short SQLDescribeColW(IntPtr stmtHandle, short columnNumber, IntPtr columnName, short bufferLength, out short nameLengthPtr, out short dataTypePtr, out uint columnSizePtr, out short decimalDigitsPtr, out short nullablePtr);
     [DllImport(OdbcDll)] private static extern short SQLFetch(IntPtr stmtHandle);
-    [DllImport(OdbcDll)] private static extern short SQLGetData(IntPtr stmtHandle, short columnNumber, short targetType, IntPtr targetValuePtr, int bufferLength, out int strLenOrIndPtr);
+    [DllImport(OdbcDll)] private static extern short SQLGetData(IntPtr stmtHandle, short columnNumber, short targetType, IntPtr targetValuePtr, IntPtr bufferLength, out IntPtr strLenOrIndPtr);
+    //[DllImport(OdbcDll)] private static extern short SQLGetData(IntPtr stmtHandle, short columnNumber, short targetType, IntPtr targetValuePtr, int bufferLength, out int strLenOrIndPtr);
     [DllImport(OdbcDll)] private static extern short SQLFreeHandle(short handleType, IntPtr handle);
     [DllImport(OdbcDll)] private static extern short SQLDisconnect(IntPtr connHandle);
     [DllImport(OdbcDll)] private static extern short SQLSetStmtAttrW(IntPtr stmtHandle, int attribute, IntPtr valuePtr, int stringLength);
@@ -120,7 +121,8 @@ public static class SqlServerExecutor
             // Execute last statement and return results
             var lastSql = statements.Last();
             rc = SQLExecDirectW(hStmt, lastSql, SQL_NTS);
-            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+            // SQL_NO_DATA (100) = zero-row UPDATE/DELETE = success, not error.
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO && rc != SQL_NO_DATA)
                 return Error(GetDiagnostic(SQL_HANDLE_STMT, hStmt));
 
             return SerialiseResults(hStmt);
@@ -174,16 +176,20 @@ public static class SqlServerExecutor
                 for (short i = 1; i <= colCount; i++)
                 {
                     short rc2 = SQLGetData(hStmt, i, SQL_C_WCHAR,
-                        dataBuf, SQL_COLUMN_BUFFER_SIZE, out int indicator);
+                        dataBuf, (IntPtr)SQL_COLUMN_BUFFER_SIZE, out IntPtr indicator);
+                    long ind = indicator.ToInt64();
 
-                    if (indicator == SQL_NULL_DATA)
+                    if (ind == SQL_NULL_DATA)
                     {
                         row.Add(null);
                     }
                     else if (rc2 == SQL_SUCCESS || rc2 == SQL_SUCCESS_WITH_INFO)
                     {
-                        int charLen = indicator / 2; // bytes → chars
-                        row.Add(Marshal.PtrToStringUni(dataBuf, Math.Max(0, charLen)));
+                        // Clamp to the buffer — on SUCCESS_WITH_INFO the driver
+                        // reports the *total* size, which can exceed the buffer.
+                        long safeBytes = Math.Min(Math.Max(0, ind), SQL_COLUMN_BUFFER_SIZE - 2);
+                        int charLen = (int)(safeBytes / 2); // bytes → chars
+                        row.Add(Marshal.PtrToStringUni(dataBuf, charLen));
                     }
                     else
                     {
@@ -227,8 +233,14 @@ public static class SqlServerExecutor
             short rc = SQLGetDiagRecW(handleType, handle, 1,
                 state, out nativeError, buf, 512, out textLen);
             if (rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)
-                return Marshal.PtrToStringUni(buf, textLen) ?? "Unknown ODBC error";
-            return "Unknown ODBC error";
+            {
+                string sqlState = Marshal.PtrToStringUni(state, 5) ?? "?????";
+                string msg = Marshal.PtrToStringUni(buf, textLen) ?? "";
+                return $"[{sqlState}] (native {nativeError}) {msg}";
+            }
+            // No diagnostic record available — report WHY we got here.
+            return $"No ODBC diagnostic available (SQLGetDiagRec rc={rc}). " +
+                   "This usually means a non-error ODBC state was treated as a failure.";
         }
         finally
         {
@@ -276,7 +288,8 @@ public static class SqlServerExecutor
             SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT, new IntPtr(30), 0);
 
             rc = SQLExecDirectW(hStmt, sql, SQL_NTS);
-            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+            // SQL_NO_DATA (100) = zero-row UPDATE/DELETE = success, not error.
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO && rc != SQL_NO_DATA)
                 return -1;
 
             // Get row count
@@ -322,7 +335,9 @@ public static class SqlServerExecutor
                 new IntPtr(30), 0);
 
             rc = SQLExecDirectW(hStmt, sql, SQL_NTS);
-            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+            // SQL_NO_DATA (100) from a searched UPDATE/DELETE affecting ZERO
+            // rows is SUCCESS ("0 rows affected"), not an error.
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO && rc != SQL_NO_DATA)
                 return new List<QueryResult> {
                 new QueryResult { Error = GetDiagnostic(SQL_HANDLE_STMT, hStmt) }
             };
@@ -337,6 +352,8 @@ public static class SqlServerExecutor
             // SET STATISTICS XML ON/OFF inside the BEGIN…END wrapper).
             // Skipping them keeps "command completed" noise out of the tab bar.
             var allResults = new List<QueryResult>();
+            long affectedTotal = 0;
+            bool sawAnyRowCount = false;
 
             while (true)
             {
@@ -344,18 +361,44 @@ public static class SqlServerExecutor
                 SQLNumResultCols(hStmt, out numCols);
 
                 if (numCols > 0)
+                {
                     allResults.Add(SerialiseResultsInternal(hStmt));
+                }
+                else
+                {
+                    // Non-rowset statement (INSERT/UPDATE/DELETE/DDL within the
+                    // batch). Accumulate its affected-row count; only surfaced
+                    // if the WHOLE batch produced no result sets (D1).
+                    int rowCount;
+                    if (SQLRowCount(hStmt, out rowCount) == SQL_SUCCESS && rowCount >= 0)
+                    {
+                        affectedTotal += rowCount;
+                        sawAnyRowCount = true;
+                    }
+                }
 
                 short mrc = SQLMoreResults(hStmt);
                 if (mrc != SQL_SUCCESS && mrc != SQL_SUCCESS_WITH_INFO) break;
             }
 
             if (allResults.Count == 0)
+            {
+                // Pure-write batch — synthesize the affected-rows message (D1),
+                // matching the behaviour the old per-statement write path gave.
                 allResults.Add(new QueryResult
                 {
-                    Columns = new List<string>(),
-                    Rows = new List<List<string?>>()
+                    Columns = new List<string> { "Message" },
+                    Rows = new List<List<string?>> {
+                        new() {
+                            sawAnyRowCount
+                                ? $"({affectedTotal} row{(affectedTotal == 1 ? "" : "s")} affected)"
+                                : "Command completed successfully."
+                        }
+                    },
+                    RowCount = 0,
+                    IsMessage = true,
                 });
+            }
 
             return allResults;
         }
@@ -409,9 +452,10 @@ public static class SqlServerExecutor
                 for (short i = 1; i <= colCount; i++)
                 {
                     short rc2 = SQLGetData(hStmt, i, SQL_C_WCHAR,
-                        dataBuf, SQL_COLUMN_BUFFER_SIZE, out int indicator);
+                        dataBuf, (IntPtr)SQL_COLUMN_BUFFER_SIZE, out IntPtr indicator);
+                    long ind = indicator.ToInt64();
 
-                    if (indicator == SQL_NULL_DATA)
+                    if (ind == SQL_NULL_DATA)
                     {
                         row.Add(null);
                         continue;
@@ -426,10 +470,10 @@ public static class SqlServerExecutor
                     {
                         // Value fit in the buffer. indicator is bytes
                         // copied, excluding null terminator.
-                        int safeBytes = Math.Min(
-                            Math.Max(0, indicator),
+                        long safeBytes = Math.Min(
+                            Math.Max(0, ind),
                             SQL_COLUMN_BUFFER_SIZE);
-                        row.Add(Marshal.PtrToStringUni(dataBuf, safeBytes / 2));
+                        row.Add(Marshal.PtrToStringUni(dataBuf, (int)(safeBytes / 2)));
                         continue;
                     }
 
@@ -441,13 +485,13 @@ public static class SqlServerExecutor
                     // doesn't know the total), fall back to keeping just
                     // the buffer-sized prefix to avoid the heap-corruption
                     // path; the value will be truncated but we don't crash.
-                    if (indicator > 0 && indicator > SQL_COLUMN_BUFFER_SIZE)
+                    if (ind > 0 && ind > SQL_COLUMN_BUFFER_SIZE)
                     {
                         // Indicator gives total bytes needed (excluding
                         // terminator). Allocate that plus 2 bytes for
                         // safety.
-                        int totalBytes = indicator + 2;
-                        IntPtr bigBuf = Marshal.AllocHGlobal(totalBytes);
+                        long totalBytesLong = ind + 2;
+                        IntPtr bigBuf = Marshal.AllocHGlobal((IntPtr)totalBytesLong);
                         try
                         {
                             // Copy the partial data we already read into
@@ -464,16 +508,17 @@ public static class SqlServerExecutor
                             // Read the remainder into the larger buffer
                             // starting at the offset after what we copied.
                             IntPtr remainderStart = IntPtr.Add(bigBuf, alreadyRead);
-                            int remainderCapacity = totalBytes - alreadyRead;
+                            long remainderCapacity = totalBytesLong - alreadyRead;
                             short rc3 = SQLGetData(hStmt, i, SQL_C_WCHAR,
-                                remainderStart, remainderCapacity, out int ind2);
+                                remainderStart, (IntPtr)remainderCapacity, out IntPtr ind2Ptr);
+                            long ind2 = ind2Ptr.ToInt64();
 
                             if (rc3 == SQL_SUCCESS || rc3 == SQL_SUCCESS_WITH_INFO)
                             {
                                 // Total chars in the assembled buffer.
-                                int validBytes = alreadyRead +
+                                long validBytes = alreadyRead +
                                     (ind2 > 0 ? Math.Min(ind2, remainderCapacity) : 0);
-                                row.Add(Marshal.PtrToStringUni(bigBuf, validBytes / 2));
+                                row.Add(Marshal.PtrToStringUni(bigBuf, (int)(validBytes / 2)));
                             }
                             else
                             {

@@ -6,6 +6,21 @@ use std::sync::OnceLock;
 
 use sha2::{Sha256, Digest};
 
+use std::time::Instant;
+
+#[inline]
+fn timing_enabled() -> bool {
+    std::env::var("DBARK_TIMING").as_deref() == Ok("1")
+}
+
+#[inline]
+fn mark(t0: Instant, label: &str) {
+    if timing_enabled() {
+        // eprintln goes to stderr; the harness captures it.
+        eprintln!("[timing] {:>28}  +{:>7.1} ms", label, t0.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
 fn verify_dll(path: &str, expected_hex: &str) -> bool {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
@@ -25,9 +40,9 @@ fn verify_dll(path: &str, expected_hex: &str) -> bool {
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "618b21ff617d4d1f75b3c6b8c2946c3e0f22f4107423a239a68caa278123ded3";
+const HASH_CONNECTIONMANAGER: &str = "22c284266cbb0feee325f26602a473ce6915fc2e4abea61861d073fc7d719999";
 const HASH_FILEQUERYENGINE: &str = "e2afb7771c1c397ad298f997a697eb327f8db441e294d664835251bcbdeec4bb";
-const HASH_QUERYEXECUTOR: &str = "6d54c9621b8992c5a38d6ad81db1654f600e0df89484a71b8cdf7f3503d31bc9";
+const HASH_QUERYEXECUTOR: &str = "2e48256efa86898812a15cdf0fe6943756127fb244a9b933f13276e59ab5dbcc";
 const HASH_QUERYHISTORY: &str = "5bcf7fbce40ce737eb97c4a455161c947d04b841177091f670dfdf5f7bbda0ff";
 const HASH_SCHEMAEXPLORER: &str = "376c7c895c0c0942abb0059e61697e4e6c36b78e60d874ec80150f7ca4d04e8f";
 const HASH_SSHTUNNEL: &str = "fde39b1a8439f07de3c3edb7c9e6e4b136f363fb3bc5184b123de9e82f420aa5";
@@ -216,7 +231,11 @@ fn build_connection_string(
     let effective_host = if tunnel_port.is_some() { "127.0.0.1".to_string() } else { host };
     let effective_port = tunnel_port.unwrap_or(port);
 
-    let password = if !win_auth {
+    // SQLite is a file path with no password — skip the keychain fetch (it would
+    // fail with "credential not found" since SQLite connections store none).
+    let is_sqlite = engine.to_lowercase() == "sqlite";
+
+    let password = if !win_auth && !is_sqlite {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
         // For CockroachDB insecure clusters (ssl_mode = "none") the dbark user
@@ -245,7 +264,7 @@ fn build_connection_string(
                 "verify-full" => "SslMode=VerifyFull;",
                 _             => if tunnel_port.is_some() { "SslMode=None;" } else { "SslMode=Preferred;" },
             };
-            format!("Server={};Port={};Database={};Uid={};Pwd={};{}",
+            format!("Server={};Port={};Database={};Uid={};Pwd={};{};AllowUserVariables=true;",
                 effective_host, effective_port, database, username, password, ssl_param)
         },
         "postgres" => {
@@ -334,9 +353,14 @@ async fn list_db_tables(
     credential_ref: String, engine: String, host: String,
     port: u16, database: String, username: String,
 ) -> Result<String, String> {
-    let entry = keyring::Entry::new(&credential_ref, &username)
-        .map_err(|e| e.to_string())?;
-    let password = entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?;
+    // SQLite has no stored credential — skip the keychain fetch for it.
+    let password = if engine.to_lowercase() == "sqlite" {
+        String::new()
+    } else {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
+    };
     let mut connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
         "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
@@ -366,9 +390,16 @@ async fn query_file_with_db(
     engine: String, host: String, port: u16,
     database: String, username: String, table_names: String,
 ) -> Result<String, String> {
-    let entry = keyring::Entry::new(&credential_ref, &username)
-        .map_err(|e| e.to_string())?;
-    let password = entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?;
+    // SQLite has no stored credential — skip the keychain fetch for it. This
+    // path powers the flat-file-join feature; joining a CSV against a live
+    // SQLite DB must not require a (nonexistent) SQLite password.
+    let password = if engine.to_lowercase() == "sqlite" {
+        String::new()
+    } else {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
+    };
     let mut connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
         "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
@@ -418,7 +449,11 @@ async fn get_schema(
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
 
-    let password = if !win_auth {
+    // SQLite is a file path with no password — skip the keychain fetch (it would
+    // fail with "credential not found" since SQLite connections store none).
+    let is_sqlite = engine.to_lowercase() == "sqlite";
+
+    let password = if !win_auth && !is_sqlite {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
         // For CockroachDB insecure clusters (ssl_mode = "none") the dbark user
@@ -545,7 +580,7 @@ async fn test_connection(
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
 
-    let password = if !win_auth {
+    let password = if !win_auth && engine.to_lowercase() != "sqlite" {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
         match entry.get_password() {
@@ -1186,7 +1221,8 @@ async fn drop_object(
     let table      = table_name.unwrap_or_default();
     let _ssl       = ssl_mode.unwrap_or_else(|| "prefer".to_string());
 
-    let password = if !win_auth {
+    // SQLite has no stored credential — skip the keychain fetch for it.
+    let password = if !win_auth && engine.to_lowercase() != "sqlite" {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
         entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
@@ -1803,6 +1839,13 @@ async fn kill_session(mut connection_string: String, engine: String, pid: String
     result
 }
 
+#[tauri::command]
+fn log_ready_time(ms: u32) {
+    if std::env::var("DBARK_TIMING").as_deref() == Ok("1") {
+        eprintln!("[timing] {:>28}  ready at +{} ms (webview clock)", "FRONTEND READY", ms);
+    }
+}
+
 
 // ─── invoke_handler addition ────────────────────────────────────────────────
 //
@@ -1841,6 +1884,9 @@ async fn kill_session(mut connection_string: String, engine: String, pid: String
 
 fn main() {
 
+    let t0 = Instant::now();                        // <-- ADD: first line of main
+    mark(t0, "main() entered");                     // <-- ADD
+
      // Verify all native DLL integrity before loading
     let dlls = [
         ("natives/ConnectionManager.dll", HASH_CONNECTIONMANAGER),
@@ -1873,6 +1919,19 @@ fn main() {
         }
     };
 
+
+    mark(t0, "keychain read done");
+
+    //Verify all DLLs before loading any. If any fail, abort immediately to avoid partial load state.
+    for (path, expected) in &dlls {
+        if !verify_dll(path, expected) {
+            eprintln!("FATAL: DLL integrity check failed for {} — aborting", path);
+            std::process::exit(1);
+        }
+    }
+
+     mark(t0, "DLL hash verify done");  
+
     // Pass key to QueryHistory DLL
     unsafe {
         if let Ok(func) = get_query_history()
@@ -1883,12 +1942,7 @@ fn main() {
         }
     }
 
-    for (path, expected) in &dlls {
-        if !verify_dll(path, expected) {
-            eprintln!("FATAL: DLL integrity check failed for {} — aborting", path);
-            std::process::exit(1);
-        }
-    }
+    mark(t0, "history key init done");
 
     get_sqlcipher();
     get_query_executor();
@@ -1897,6 +1951,7 @@ fn main() {
     get_schema_explorer();
     get_query_history();
     get_ssh_tunnel();
+    mark(t0, "DLL preload done");   
 
     tauri::Builder::default()
     .plugin(tauri_plugin_clipboard_manager::init())
@@ -1936,7 +1991,8 @@ fn main() {
             load_query,
             import_dbeaver_connections,
             get_activity,
-            kill_session])
+            kill_session,
+            log_ready_time])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

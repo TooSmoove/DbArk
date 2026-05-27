@@ -143,7 +143,8 @@ public static class ConnectionManagerLib
                         $"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
             }
 
-            if (!request.WindowsAuth && !IsValidIdentifier(request.Username))
+            // SQLite has no username; only validate for engines that use one.
+            if (request.Engine != "sqlite" && !request.WindowsAuth && !IsValidIdentifier(request.Username))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid username '{request.Username}' — only alphanumeric characters, underscores, hyphens, dots allowed");
 
             if (!IsValidEngine(request.Engine))
@@ -185,11 +186,21 @@ public static class ConnectionManagerLib
                 File.Delete(request.ExistingFilePath);
             }
 
-            // Generate a unique credential ref key
-            string credentialRef = $"devsql:{safeName}:{request.Username}";
+            // SQLite is a file path — it has no username, password, or port,
+            // so it must NOT get a credential_ref (otherwise connecting triggers
+            // a keychain lookup that fails with "credential not found"). Other
+            // engines get a generated keychain key.
+            bool isSqlite = request.Engine == "sqlite";
+            string credentialRef = isSqlite
+                ? ""
+                : $"devsql:{safeName}:{request.Username}";
 
-            // Build the default port if not set
-            int port = request.Port > 0 ? request.Port : GetDefaultPort(request.Engine);
+            // SQLite has no port; other engines default by engine when unset.
+            int port = isSqlite ? 0 : (request.Port > 0 ? request.Port : GetDefaultPort(request.Engine));
+
+            // SQLite has no username — never write a stray value (e.g. "none")
+            // that would end up in the credential ref or confuse connection logic.
+            string username = isSqlite ? "" : request.Username;
 
             string toml = $"""
                     [connection]
@@ -198,7 +209,7 @@ public static class ConnectionManagerLib
                     host = "{request.Host}"
                     port = {port}
                     database = "{request.Database}"
-                    username = "{request.Username}"
+                    username = "{username}"
                     credential_ref = "{credentialRef}"
                     ssl_mode = "{request.SslMode}"
                     read_only = {(request.ReadOnly ? "true" : "false")}
@@ -319,16 +330,17 @@ public static class ConnectionManagerLib
         };
 
         // Validate all fields before returning
-        if (!IsValidHost(config.Host))
+        // SQLite is a file path — it has no host, port, or username to validate.
+        if (config.Engine != "sqlite" && !IsValidHost(config.Host))
             throw new Exception($"Invalid host value in {Path.GetFileName(filePath)}: '{config.Host}'");
 
-        if (!IsValidPort(config.Port))
+        if (config.Engine != "sqlite" && !IsValidPort(config.Port))
             throw new Exception($"Invalid port value in {Path.GetFileName(filePath)}: '{config.Port}'");
 
         if (config.Engine != "sqlite" && !string.IsNullOrEmpty(config.Database) && !IsValidIdentifier(config.Database))
             throw new Exception($"Invalid database value in {Path.GetFileName(filePath)}: '{config.Database}'");
 
-        if (!config.WindowsAuth && !IsValidIdentifier(config.Username))
+        if (config.Engine != "sqlite" && !config.WindowsAuth && !IsValidIdentifier(config.Username))
             throw new Exception($"Invalid username value in {Path.GetFileName(filePath)}: '{config.Username}'");
 
         if (!IsValidEngine(config.Engine))

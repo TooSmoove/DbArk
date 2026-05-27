@@ -11,6 +11,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("QueryExecutor.Tests")]
+
 public static class QueryExecutor
 {
     // ── NativeAOT entry points ──────────────────────────────────────────────
@@ -124,6 +126,29 @@ public static class QueryExecutor
             var engine = Marshal.PtrToStringUTF8(enginePtr) ?? "";
             var readOnly = Marshal.PtrToStringUTF8(readOnlyPtr) == "true";
 
+            var engineLower = engine.ToLowerInvariant();
+            bool useBatchPath =
+                engineLower is "sqlserver" or "postgres" or "cockroachdb" or "mysql" or "mariadb";
+
+            if (useBatchPath)
+            {
+                List<string> batches = engineLower == "sqlserver"
+                    ? SplitSqlServerBatches(sql)
+                    : new List<string> { sql };
+
+                if (batches.Count == 0)
+                    return Marshal.StringToCoTaskMemUTF8(
+                        JsonSerializer.Serialize(
+                            new MultiResult { Results = new List<QueryResult>() },
+                            AppJsonContext.Default.MultiResult));
+
+                var batchResults = RunBatches(connectionString, batches, engine, readOnly);
+                return Marshal.StringToCoTaskMemUTF8(
+                    JsonSerializer.Serialize(
+                        new MultiResult { Results = batchResults },
+                        AppJsonContext.Default.MultiResult));
+            }
+
             var statements = SplitStatements(sql);
 
             if (statements.Count == 0)
@@ -161,6 +186,166 @@ public static class QueryExecutor
         {
             return Marshal.StringToCoTaskMemUTF8(ex.Message);
         }
+    }
+
+    private static List<QueryResult> RunBatches(
+       string connectionString, List<string> batches, string engine, bool readOnly)
+    {
+        var results = new List<QueryResult>();
+
+        foreach (var batch in batches)
+        {
+            // D2: split THIS batch into statements for validation ONLY.
+            // Execution still sends the batch whole (preserving scope).
+            if (readOnly)
+            {
+                foreach (var stmt in SplitStatements(batch))
+                {
+                    if (!IsReadOnlyStatement(stmt))
+                    {
+                        results.Add(new QueryResult
+                        {
+                            Error = "Connection is read-only — statement not allowed: "
+                                    + stmt.Split('\n')[0].Trim(),
+                        });
+                        return results;   // stop the whole run on violation
+                    }
+                }
+            }
+
+            var batchResults = ExecuteBatch(connectionString, batch, engine);
+            results.AddRange(batchResults);
+
+            // Stop at the first batch that errored (matches prior behaviour).
+            if (batchResults.Any(r => r.Error != null))
+                break;
+        }
+
+        return results;
+    }
+
+    private static List<QueryResult> ExecuteBatch(
+      string connectionString, string batch, string engine)
+    {
+        try
+        {
+            var strippedSql = StripLeadingComments(batch).TrimStart();
+            var sqlForStorage = strippedSql.Length > 500 ? strippedSql[..500] + "…" : strippedSql;
+
+            // D3: DDL auto-rewrite applies to SINGLE-statement batches only.
+            // Multi-statement batches pass through unrewritten (documented).
+            var statementCount = SplitStatements(batch).Count;
+            string sqlToRun = batch;
+            bool wasRewritten = false;
+            if (statementCount == 1)
+            {
+                var rewritten = RewriteDdlStatement(batch, engine);
+                if (rewritten != batch)
+                {
+                    sqlToRun = rewritten;
+                    wasRewritten = true;
+                }
+            }
+
+            // Engine dispatch. Stage 2a: only sqlserver is routed here (others
+            // still use the legacy path in ExecuteMultiStatement). ExecuteInternal
+            // already sends the whole batch as one SQLExecDirectW and harvests
+            // every result set via its SQLMoreResults loop — including the
+            // "(N rows affected)" message for non-row statements.
+            List<QueryResult> dispatchResults = engine.ToLowerInvariant() switch
+            {
+                "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, sqlToRun),
+                "postgres" => ExecutePostgresMulti(connectionString, sqlToRun),
+                "cockroachdb" => ExecuteCockroachDbMulti(connectionString, sqlToRun),
+                "mysql" => ExecuteMySqlMulti(connectionString, sqlToRun),
+                "mariadb" => ExecuteMySqlMulti(connectionString, sqlToRun),
+                _ => throw new InvalidOperationException(
+                        $"ExecuteBatch reached for engine '{engine}' before its stage-2 migration."),
+            };
+
+            foreach (var r in dispatchResults)
+            {
+                r.Sql = sqlForStorage;
+                r.WasRewritten = wasRewritten;
+            }
+            return dispatchResults;
+        }
+        catch (Exception ex)
+        {
+            var stripped = StripLeadingComments(batch).TrimStart();
+            return new List<QueryResult> {
+                new QueryResult {
+                    Error = ex.Message,
+                    Sql = stripped.Length > 500 ? stripped[..500] + "…" : stripped,
+                }
+            };
+        }
+    }
+    private static List<QueryResult> ExecutePostgresMulti(string connectionString, string sql)
+    {
+        using var conn = new Npgsql.NpgsqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = 30;
+        using var reader = cmd.ExecuteReader();
+        return HarvestReader(reader);
+    }
+
+    private static List<QueryResult> ExecuteMySqlMulti(string connectionString, string sql)
+    {
+        using var conn = new MySqlConnector.MySqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = 30;
+        using var reader = cmd.ExecuteReader();
+        return HarvestReader(reader);
+    }
+
+    private static List<QueryResult> ExecuteCockroachDbMulti(string connectionString, string sql)
+    {
+        using var conn = OpenCockroachDbConnection(connectionString); // already open
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.CommandTimeout = 30;
+        using var reader = cmd.ExecuteReader();
+        return HarvestReader(reader);
+    }
+    private static List<QueryResult> HarvestReader(System.Data.IDataReader reader)
+    {
+        var results = new List<QueryResult>();
+        bool anyResultSet = false;
+
+        do
+        {
+            if (reader.FieldCount > 0)
+            {
+                anyResultSet = true;
+                results.Add(ReaderToQueryResult(reader));
+            }
+        }
+        while (reader.NextResult());
+
+        if (!anyResultSet)
+        {
+            int affected = reader.RecordsAffected; // cumulative; -1 if N/A
+            results.Add(new QueryResult
+            {
+                Columns = new List<string> { "Message" },
+                Rows = new List<List<string?>> {
+                    new() {
+                        affected >= 0
+                            ? $"({affected} row{(affected == 1 ? "" : "s")} affected)"
+                            : "Command completed successfully."
+                    }
+                },
+                RowCount = 0,
+                IsMessage = true,
+            });
+        }
+
+        return results;
     }
 
     // ── Non-query dispatch ──────────────────────────────────────────────────
@@ -217,13 +402,20 @@ public static class QueryExecutor
     [DllImport(SqliteDll, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_close(IntPtr db);
 
+    [DllImport(SqliteDll, CallingConvention = CallingConvention.Cdecl,
+             EntryPoint = "sqlite3_prepare_v2")]
+    private static extern int sqlite3_prepare_v2_ptr(
+      IntPtr db,
+      IntPtr sqlUtf8,        // pointer INTO our persistent UTF-8 buffer
+      int nByte,             // -1 = read up to the NUL terminator
+      out IntPtr stmt,
+      out IntPtr pzTail);    // receives pointer to the unconsumed remainder
+
     [DllImport(SqliteDll, CallingConvention = CallingConvention.Cdecl)]
-    private static extern int sqlite3_prepare_v2(
-        IntPtr db,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string sql,
-        int nByte,
-        out IntPtr stmt,
-        IntPtr pzTail);
+    private static extern int sqlite3_changes(IntPtr db);
+
+    [DllImport(SqliteDll, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr sqlite3_errmsg(IntPtr db);
 
     [DllImport(SqliteDll, CallingConvention = CallingConvention.Cdecl)]
     private static extern int sqlite3_step(IntPtr stmt);
@@ -243,6 +435,8 @@ public static class QueryExecutor
     [DllImport(SqliteDll, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr sqlite3_column_text(IntPtr stmt, int col);
 
+    private const int SQLITE_OK = 0;
+    private const int SQLITE_DONE = 101;
     private const int SQLITE_ROW = 100;
     private const int SQLITE_NULL = 5;
 
@@ -264,7 +458,16 @@ public static class QueryExecutor
 
             try
             {
-                sqlite3_prepare_v2(db, "SELECT sqlite_version()", -1, out IntPtr stmt, IntPtr.Zero);
+                IntPtr sqlBuf = Marshal.StringToCoTaskMemUTF8("SELECT sqlite_version()");
+                IntPtr stmt;
+                try
+                {
+                    sqlite3_prepare_v2_ptr(db, sqlBuf, -1, out stmt, out IntPtr _tail);
+                }
+                finally
+                {
+                    Marshal.FreeCoTaskMem(sqlBuf);
+                }
                 string version = "unknown";
                 if (sqlite3_step(stmt) == SQLITE_ROW)
                 {
@@ -309,7 +512,16 @@ public static class QueryExecutor
             int rowCount = 0;
             const int rowLimit = 10_000;
 
-            sqlite3_prepare_v2(db, sql, -1, out IntPtr stmt, IntPtr.Zero);
+            IntPtr sqlBuf = Marshal.StringToCoTaskMemUTF8(sql);
+            IntPtr stmt;
+            try
+            {
+                sqlite3_prepare_v2_ptr(db, sqlBuf, -1, out stmt, out IntPtr _tail);
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(sqlBuf);
+            }
 
             try
             {
@@ -363,6 +575,150 @@ public static class QueryExecutor
         {
             sqlite3_close(db);
         }
+    }
+    private static List<QueryResult> ExecuteSqliteMulti(string connectionString, string sql)
+    {
+        string path = ExtractSqlitePath(connectionString);
+
+        int rc = sqlite3_open(path, out IntPtr db);
+        if (rc != 0)
+            return new List<QueryResult> {
+                new QueryResult { Error = $"Cannot open SQLite database (code {rc}): {path}" }
+            };
+
+        var results = new List<QueryResult>();
+        bool anyResultSet = false;
+        int totalChanges = 0;
+        const int rowLimit = 10_000;
+
+        // Persistent UTF-8 buffer so the tail pointer stays valid across the walk.
+        IntPtr sqlBuf = Marshal.StringToCoTaskMemUTF8(sql);
+        try
+        {
+            IntPtr cursor = sqlBuf;
+
+            while (true)
+            {
+                // Stop at the terminating NUL (no more statements).
+                if (Marshal.ReadByte(cursor) == 0) break;
+
+                rc = sqlite3_prepare_v2_ptr(db, cursor, -1, out IntPtr stmt, out IntPtr tail);
+                if (rc != SQLITE_OK)
+                {
+                    results.Add(new QueryResult { Error = SqliteErrMsg(db) });
+                    break;
+                }
+
+                // A null stmt with no error means this chunk was only whitespace
+                // or a comment (e.g. a trailing comment after the last ;). Skip
+                // it by advancing to the tail.
+                if (stmt == IntPtr.Zero)
+                {
+                    if (tail == cursor) break;   // no forward progress — safety
+                    cursor = tail;
+                    continue;
+                }
+
+                try
+                {
+                    var columns = new List<string>();
+                    var rows = new List<List<string?>>();
+                    int rowCount = 0;
+                    bool truncated = false;
+                    bool firstRow = true;
+                    int colCount = sqlite3_column_count(stmt);
+
+                    int stepRc;
+                    while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW)
+                    {
+                        if (rowCount >= rowLimit) { truncated = true; break; }
+
+                        if (firstRow)
+                        {
+                            for (int i = 0; i < colCount; i++)
+                            {
+                                IntPtr namePtr = sqlite3_column_name(stmt, i);
+                                columns.Add(namePtr != IntPtr.Zero
+                                    ? Marshal.PtrToStringUTF8(namePtr) ?? $"col{i}"
+                                    : $"col{i}");
+                            }
+                            firstRow = false;
+                        }
+
+                        var row = new List<string?>();
+                        for (int i = 0; i < colCount; i++)
+                        {
+                            if (sqlite3_column_type(stmt, i) == SQLITE_NULL)
+                                row.Add(null);
+                            else
+                            {
+                                IntPtr textPtr = sqlite3_column_text(stmt, i);
+                                row.Add(textPtr != IntPtr.Zero
+                                    ? Marshal.PtrToStringUTF8(textPtr) : null);
+                            }
+                        }
+                        rows.Add(row);
+                        rowCount++;
+                    }
+
+                    // colCount > 0 → a row-returning statement (SELECT, PRAGMA
+                    // that returns rows, etc.) → its own result tab. Even if it
+                    // returned zero rows, the column header is meaningful.
+                    if (colCount > 0)
+                    {
+                        anyResultSet = true;
+                        results.Add(new QueryResult
+                        {
+                            Columns = columns,
+                            Rows = rows,
+                            RowCount = rowCount,
+                            Truncated = truncated,
+                        });
+                    }
+                    else
+                    {
+                        // Non-row statement (INSERT/UPDATE/DELETE/CREATE). Tally
+                        // changes; only surfaced if NO result sets at all (D1).
+                        totalChanges += sqlite3_changes(db);
+                    }
+                }
+                finally
+                {
+                    sqlite3_finalize(stmt);
+                }
+
+                if (tail == cursor) break;   // safety: guarantee forward progress
+                cursor = tail;
+            }
+
+            if (!anyResultSet && results.All(r => r.Error == null))
+            {
+                results.Add(new QueryResult
+                {
+                    Columns = new List<string> { "Message" },
+                    Rows = new List<List<string?>> {
+                        new() { $"({totalChanges} row{(totalChanges == 1 ? "" : "s")} affected)" }
+                    },
+                    RowCount = 0,
+                    IsMessage = true,
+                });
+            }
+
+            return results;
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(sqlBuf);
+            sqlite3_close(db);
+        }
+    }
+
+    private static string SqliteErrMsg(IntPtr db)
+    {
+        IntPtr p = sqlite3_errmsg(db);
+        return p != IntPtr.Zero
+            ? (Marshal.PtrToStringUTF8(p) ?? "SQLite error")
+            : "SQLite error";
     }
 
     private static string ExtractSqlitePath(string connectionString)
@@ -915,6 +1271,237 @@ public static class QueryExecutor
         }
         return sb.ToString();
     }
+    // ── Stage 1: GO-aware batch splitter (SQL Server only) ───────────────────────
+    //
+    // Splits a T-SQL script into BATCHES on the `GO` separator — NOT on `;`.
+    // `GO` is the sqlcmd/SSMS batch terminator; it is not T-SQL and must never be
+    // sent to the server. Each returned batch is one coherent unit that the server
+    // executes as a single command, so variable scope (DECLARE @x), temp tables,
+    // and SET options survive across the `;`-separated statements WITHIN a batch.
+    //
+    // GO recognition rule (matches sqlcmd/SSMS):
+    //   - `GO` must be ALONE on its own line (only whitespace around it),
+    //   - optionally followed by an integer repeat count (e.g. `GO 5`),
+    //   - case-insensitive,
+    //   - NOT inside a string literal, comment, or dollar-quote.
+    // So "SELECT * FROM GOods", "x GO y", and "'GO'" are never separators.
+    //
+    // This reuses the same string/comment/dollar-quote scanning as SplitStatements
+    // so a `GO` appearing inside any of those is treated as literal text.
+    //
+    // NOTE: a repeat count (`GO 5`) is recognised so it is not mistaken for a
+    // non-separator line, but the batch is returned ONCE. Honouring the repeat
+    // count (running the batch N times) is intentionally NOT done here — it is a
+    // rare sqlcmd feature and out of scope for stage 1. If desired later, the
+    // parsed count is available at the split point.
+
+    internal static List<string> SplitSqlServerBatches(string sql)
+    {
+        var batches = new List<string>();
+        var current = new StringBuilder();
+
+        bool inString = false;
+        bool inDollarQuote = false;
+        bool inLineComment = false;
+        bool inBlockComment = false;
+        char stringChar = '\0';
+        string dollarTag = "";
+        int i = 0;
+
+        // Tracks whether, since the last newline, we have seen only whitespace
+        // (so far) — i.e. we are still at "line start" position. A GO can only
+        // begin a separator when atLineStart is true.
+        bool atLineStart = true;
+
+        while (i < sql.Length)
+        {
+            char c = sql[i];
+
+            // ── Single-line comment ─────────────────────────────────────────────
+            if (inLineComment)
+            {
+                current.Append(c);
+                if (c == '\n') { inLineComment = false; atLineStart = true; }
+                i++;
+                continue;
+            }
+
+            // ── Block comment ───────────────────────────────────────────────────
+            if (inBlockComment)
+            {
+                current.Append(c);
+                if (c == '*' && i + 1 < sql.Length && sql[i + 1] == '/')
+                {
+                    current.Append('/');
+                    i += 2;
+                    inBlockComment = false;
+                }
+                else i++;
+                atLineStart = false;
+                continue;
+            }
+
+            // Detect start of -- comment
+            if (!inString && !inDollarQuote
+                && c == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
+            {
+                inLineComment = true;
+                current.Append("--");
+                i += 2;
+                atLineStart = false;
+                continue;
+            }
+
+            // Detect start of /* comment
+            if (!inString && !inDollarQuote
+                && c == '/' && i + 1 < sql.Length && sql[i + 1] == '*')
+            {
+                inBlockComment = true;
+                current.Append("/*");
+                i += 2;
+                atLineStart = false;
+                continue;
+            }
+
+            // ── Dollar-quoted strings (kept for parity with the ; splitter; T-SQL
+            //    doesn't use them, but harmless and keeps behaviour identical) ────
+            if (!inString && !inDollarQuote && c == '$')
+            {
+                int tagEnd = i + 1;
+                while (tagEnd < sql.Length && sql[tagEnd] != '$'
+                    && (char.IsLetterOrDigit(sql[tagEnd]) || sql[tagEnd] == '_'))
+                    tagEnd++;
+
+                if (tagEnd < sql.Length && sql[tagEnd] == '$')
+                {
+                    dollarTag = sql.Substring(i, tagEnd - i + 1);
+                    inDollarQuote = true;
+                    current.Append(dollarTag);
+                    i = tagEnd + 1;
+                    atLineStart = false;
+                    continue;
+                }
+            }
+
+            if (inDollarQuote && c == '$'
+                && i + dollarTag.Length <= sql.Length
+                && sql.Substring(i, dollarTag.Length) == dollarTag)
+            {
+                inDollarQuote = false;
+                current.Append(dollarTag);
+                i += dollarTag.Length;
+                atLineStart = false;
+                continue;
+            }
+
+            if (inDollarQuote)
+            {
+                current.Append(c);
+                i++;
+                atLineStart = false;
+                continue;
+            }
+
+            // ── Regular string literals ─────────────────────────────────────────
+            if (inString)
+            {
+                current.Append(c);
+                if (c == stringChar && (i == 0 || sql[i - 1] != '\\'))
+                    inString = false;
+                i++;
+                atLineStart = false;
+                continue;
+            }
+
+            if (c == '\'' || c == '"' || c == '`')
+            {
+                inString = true;
+                stringChar = c;
+                current.Append(c);
+                i++;
+                atLineStart = false;
+                continue;
+            }
+
+            // ── Whitespace handling: track line-start position ──────────────────
+            if (c == '\n')
+            {
+                current.Append(c);
+                atLineStart = true;
+                i++;
+                continue;
+            }
+            if (c == '\r' || c == ' ' || c == '\t')
+            {
+                current.Append(c);
+                // whitespace does NOT clear atLineStart — leading whitespace before
+                // GO is allowed
+                i++;
+                continue;
+            }
+
+            // ── GO batch separator ───────────────────────────────────────────────
+            // Only at line start, outside all quoted/comment contexts. Match a
+            // standalone GO (case-insensitive), optionally followed by an integer
+            // repeat count, with nothing else of substance on the line.
+            if (atLineStart
+                && (c == 'G' || c == 'g')
+                && i + 1 < sql.Length && (sql[i + 1] == 'O' || sql[i + 1] == 'o')
+                // char before GO must be a line boundary or start (we know we're at
+                // line start, but guard the 'GOods' case: next char after GO must
+                // not be an identifier char)
+                && (i + 2 >= sql.Length || !IsIdentChar(sql[i + 2])))
+            {
+                // Confirm the REST of the line is only whitespace or an optional
+                // integer repeat count, then a newline / EOF / comment.
+                int j = i + 2;
+                // skip spaces/tabs
+                while (j < sql.Length && (sql[j] == ' ' || sql[j] == '\t')) j++;
+                // optional integer repeat count
+                while (j < sql.Length && char.IsDigit(sql[j])) j++;
+                // skip trailing spaces/tabs
+                while (j < sql.Length && (sql[j] == ' ' || sql[j] == '\t')) j++;
+                // the line must now end: \r, \n, EOF, or a -- comment start
+                bool lineEnds =
+                    j >= sql.Length
+                    || sql[j] == '\n' || sql[j] == '\r'
+                    || (sql[j] == '-' && j + 1 < sql.Length && sql[j + 1] == '-');
+
+                if (lineEnds)
+                {
+                    // Close the current batch (do not include the GO line).
+                    var batch = current.ToString().Trim();
+                    if (!string.IsNullOrWhiteSpace(batch))
+                        batches.Add(batch);
+                    current.Clear();
+
+                    // Advance past the GO line up to and including the newline, so
+                    // the GO text itself is discarded. Leave any trailing -- comment
+                    // on the GO line out of the next batch too.
+                    while (i < sql.Length && sql[i] != '\n') i++;
+                    if (i < sql.Length) i++; // consume the newline
+                    atLineStart = true;
+                    continue;
+                }
+                // Not a real GO separator (e.g. "GO" followed by more code) — fall
+                // through and treat as ordinary text.
+            }
+
+            // ── Ordinary character ──────────────────────────────────────────────
+            current.Append(c);
+            atLineStart = false;
+            i++;
+        }
+
+        var lastBatch = current.ToString().Trim();
+        if (!string.IsNullOrWhiteSpace(lastBatch))
+            batches.Add(lastBatch);
+
+        return batches;
+    }
+
+    private static bool IsIdentChar(char c) =>
+        char.IsLetterOrDigit(c) || c == '_';
 }
 
 // ── Result types ────────────────────────────────────────────────────────────

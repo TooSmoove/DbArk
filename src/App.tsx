@@ -1,8 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useCallback, useRef, useEffect, useMemo, Fragment } from "react";
-import Editor from "@monaco-editor/react";
+import { useState, useCallback, useRef, useEffect, useMemo, Fragment, lazy, Suspense } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
+
+// Monaco is code-split into SqlEditor.tsx and loaded lazily AFTER first paint,
+// so the large Monaco bundle no longer blocks initial render. Do NOT statically
+// import "monaco-editor" or "@monaco-editor/react" (value) anywhere in this file
+// or Monaco gets pulled back into the main bundle.
+const SqlEditor = lazy(() => import("./components/SqlEditor/SqlEditor"));
 import { format as formatSql } from "sql-formatter";
 import Fuse from "fuse.js";
 import {
@@ -3148,8 +3153,6 @@ function App() {
     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
       e.preventDefault();
       const sql = editorRef.current?.getValue()?.trim() ?? "";
-      console.log("Ctrl+S caught, sql:", sql, "editorRef:", editorRef.current);
-      console.log("setting saveQueryOpen to true");
       setSaveQueryOpen(true);
     }
 
@@ -3422,6 +3425,14 @@ function App() {
     if (!userSql) return;
 
     const tab = activeTabRef.current;
+    // Pin the launching tab's id for the entire async lifetime of this query.
+    // Reads use `tab` (captured above); every write below must target this id,
+    // NOT the live activeTabId — otherwise a result that arrives after the user
+    // switches tabs lands in the wrong tab. updateActiveTab() resolves
+    // activeTabId at call time and must not be used for post-await writes here.
+    const launchTabId = tab.id;
+    const writeTab = (updates: Partial<Tab>) =>
+      setTabs(prev => prev.map(t => (t.id === launchTabId ? { ...t, ...updates } : t)));
 
     // ── Plan-mode wrapping ────────────────────────────────────────────────
     // If the per-tab Include Plan toggle is on AND we're on a DB connection
@@ -3436,7 +3447,7 @@ function App() {
     if (tab.includePlan && tab.connection && !tab.file) {
       const wrapped = wrapPlanSql(userSql, tab.connection.engine);
       if (wrapped == null) {
-        updateActiveTab({
+        writeTab({
           loading: false,
           error: "Execution plan capture only works for SELECT statements. Disable 'Include Plan' to run this query.",
         });
@@ -3457,7 +3468,7 @@ function App() {
       }
     }
 
-    updateActiveTab({ loading: true, error: null, results: [], activeResult: 0 });
+    writeTab({ loading: true, error: null, results: [], activeResult: 0 });
 
     const start = performance.now();
     let historyConn: ConnectionConfig | null = null;
@@ -3559,7 +3570,7 @@ function App() {
         }
 
       } else {
-        updateActiveTab({ loading: false, error: "Select a connection or open a file first" });
+        writeTab({ loading: false, error: "Select a connection or open a file first" });
         return;
       }
 
@@ -3688,42 +3699,23 @@ function App() {
 
     // Top-level error (connection failed etc)
     if (normalised.error) {
-      const tabId = activeTabRef.current.id;
-      setTabs(prev => prev.map(t =>
-        t.id === tabId
-          ? { ...t, loading: false, duration: ms, results: [], error: normalised.error! }
-          : t
-      ));
+      writeTab({ loading: false, duration: ms, results: [], error: normalised.error! });
       return;
     }
 
     const results = normalised.results ?? [];
     const firstError = results.find(r => r.error);
-    const tabId = activeTabRef.current.id; // ← capture the ref, not the closure
 
-    // Result auto-clear — in runQuery after setting results:
+    // Result auto-clear — targets the launching tab, not the active one.
     if (settings.resultClearMins > 0) {
       setTimeout(() => {
         setTabs(prev => prev.map(t =>
-          t.id === tabId ? { ...t, results: [], error: null } : t
+          t.id === launchTabId ? { ...t, results: [], error: null } : t
         ));
       }, settings.resultClearMins * 60 * 1000);
     }
 
-    setTabs(prev => prev.map(t =>
-      t.id === tabId
-        ? {
-            ...t,
-            loading:      false,
-            duration:     ms,
-            results:      results,
-            activeResult: 0,
-            error:        firstError?.error ?? null,
-          }
-        : t
-    ));
-
-    updateActiveTab({
+    writeTab({
       loading:      false,
       duration:     ms,
       results:      results,
@@ -3748,12 +3740,7 @@ function App() {
     }
 
    } catch (e) {
-      const tabId = activeTabRef.current.id;
-      setTabs(prev => prev.map(t =>
-        t.id === tabId
-          ? { ...t, loading: false, error: String(e) }
-          : t
-      ));
+      writeTab({ loading: false, error: String(e) });
     }
   }, [locked, showHistory, activeTabId, auditLogEnabled]);
 
@@ -7599,22 +7586,19 @@ function handleCellCommit(
           />
         )}
 
-        {/* Editor */}
+        {/* Editor — lazy-loaded so Monaco doesn't block first paint */}
         <div style={{ height: editorHeight, minHeight: editorHeight, maxHeight: editorHeight, borderBottom: "1px solid var(--border)", flexShrink: 0, overflow: "hidden" }}>
-          <Editor
-            beforeMount={handleBeforeMount}
-            height="100%"
-            defaultLanguage="sql"
-            theme={resolvedTheme === "dark" ? "vs-dark" : "vs"}
-            defaultValue="-- Write your query here&#10;SELECT 1"
-            onMount={handleEditorMount}
-            options={{
-              fontSize: 14, minimap: { enabled: false },
-              scrollBeyondLastLine: false, lineNumbers: "on",
-              renderLineHighlight: "line", fontFamily: "monospace",
-              padding: { top: 12 }, wordWrap: "on",
-            }}
-          />
+          <Suspense fallback={
+            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontFamily: "monospace", fontSize: 13 }}>
+              Loading editor…
+            </div>
+          }>
+            <SqlEditor
+              beforeMount={handleBeforeMount}
+              onMount={handleEditorMount}
+              theme={resolvedTheme === "dark" ? "vs-dark" : "vs"}
+            />
+          </Suspense>
         </div>
 
         {/* Drag handle */}

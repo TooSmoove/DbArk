@@ -21,6 +21,32 @@ using System.Text.Json.Serialization;
 
 public static class ActivityExecutor
 {
+    private const short SQL_SUCCESS = 0;
+    private const short SQL_SUCCESS_WITH_INFO = 1;
+    private const short SQL_NULL_DATA = -1;
+    private const short SQL_HANDLE_ENV = 1;
+    private const short SQL_HANDLE_DBC = 2;
+    private const short SQL_HANDLE_STMT = 3;
+    private const int SQL_ATTR_ODBC_VERSION = 200;
+    private const int SQL_OV_ODBC3 = 3;
+    private const int SQL_ATTR_LOGIN_TIMEOUT = 103;
+    private const int SQL_ATTR_QUERY_TIMEOUT = 0;
+    private const short SQL_NTS = -3;
+    private const short SQL_C_WCHAR = -8;
+    private const int SQL_BUF = 8192;
+
+    [DllImport("odbc32.dll")] private static extern short SQLAllocHandle(short t, IntPtr h, out IntPtr o);
+    [DllImport("odbc32.dll")] private static extern short SQLSetEnvAttr(IntPtr e, int a, IntPtr v, int l);
+    [DllImport("odbc32.dll")] private static extern short SQLDriverConnectW(IntPtr c, IntPtr w, [MarshalAs(UnmanagedType.LPWStr)] string s, short sl, IntPtr o, short ol, out short oa, short dc);
+    [DllImport("odbc32.dll")] private static extern short SQLAllocStmt(IntPtr c, out IntPtr s);
+    [DllImport("odbc32.dll")] private static extern short SQLExecDirectW(IntPtr s, [MarshalAs(UnmanagedType.LPWStr)] string q, int ql);
+    [DllImport("odbc32.dll")] private static extern short SQLFetch(IntPtr s);
+    [DllImport("odbc32.dll")] private static extern short SQLGetData(IntPtr s, short c, short t, IntPtr v, IntPtr l, out IntPtr ind);
+    [DllImport("odbc32.dll")] private static extern short SQLFreeHandle(short t, IntPtr h);
+    [DllImport("odbc32.dll")] private static extern short SQLDisconnect(IntPtr c);
+    [DllImport("odbc32.dll")] private static extern short SQLSetStmtAttrW(IntPtr s, int a, IntPtr v, int l);
+
+
     // ── Per-engine SQL for listing active queries ───────────────────────────
     //
     // Each query is chosen to expose the same set of columns so the C# side
@@ -35,25 +61,25 @@ public static class ActivityExecutor
     //   - Postgres: excludes 'idle' state for the same reason.
 
     private const string SQL_SQLSERVER = @"
-        SELECT
-            CAST(r.session_id AS NVARCHAR(50))     AS pid,
-            ISNULL(s.login_name, '')               AS [user],
-            ISNULL(DB_NAME(r.database_id), '')     AS [database],
-            ISNULL(r.status, '')                   AS state,
-            DATEDIFF(MILLISECOND, r.start_time, GETDATE()) AS duration_ms,
-            ISNULL(SUBSTRING(t.text,
-                (r.statement_start_offset / 2) + 1,
-                ((CASE r.statement_end_offset
-                    WHEN -1 THEN DATALENGTH(t.text)
-                    ELSE r.statement_end_offset
-                  END - r.statement_start_offset) / 2) + 1), '') AS query,
-            ISNULL(s.host_name, '')                AS host
-        FROM sys.dm_exec_requests r
-        JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id
-        CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
-        WHERE s.is_user_process = 1
-          AND r.session_id <> @@SPID
-        ORDER BY r.start_time";
+    SELECT
+        CAST(r.session_id AS NVARCHAR(50))     AS pid,
+        ISNULL(s.login_name, '')               AS [user],
+        ISNULL(DB_NAME(r.database_id), '')     AS [database],
+        ISNULL(r.status, '')                   AS state,
+        CAST(DATEDIFF(MILLISECOND, r.start_time, GETDATE()) AS NVARCHAR(20)) AS duration_ms,
+        ISNULL(SUBSTRING(t.text,
+            (r.statement_start_offset / 2) + 1,
+            ((CASE r.statement_end_offset
+                WHEN -1 THEN DATALENGTH(t.text)
+                ELSE r.statement_end_offset
+              END - r.statement_start_offset) / 2) + 1), '') AS query,
+        ISNULL(s.host_name, '')                AS host
+    FROM sys.dm_exec_requests r
+    JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id
+    CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+    WHERE s.is_user_process = 1
+      AND r.session_id <> @@SPID
+    ORDER BY r.start_time";
 
     // Note: pg_stat_activity columns vary slightly between Postgres versions
     // and CockroachDB. The columns used here (pid, usename, datname, state,
@@ -193,13 +219,68 @@ public static class ActivityExecutor
 
     private static List<ActivityRow> ReadSqlServer(string connectionString)
     {
-        using var conn = new SqlConnection(connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = SQL_SQLSERVER;
-        cmd.CommandTimeout = 10;
-        using var reader = cmd.ExecuteReader();
-        return ReadRows(reader);
+        IntPtr hEnv = IntPtr.Zero, hDbc = IntPtr.Zero, hStmt = IntPtr.Zero;
+        var rows = new List<ActivityRow>();
+        const int rowLimit = 500;
+        IntPtr buf = IntPtr.Zero;
+
+        try
+        {
+            if (SQLAllocHandle(SQL_HANDLE_ENV, IntPtr.Zero, out hEnv) != SQL_SUCCESS)
+                throw new Exception("Failed to allocate ODBC environment");
+            SQLSetEnvAttr(hEnv, SQL_ATTR_ODBC_VERSION, new IntPtr(SQL_OV_ODBC3), 0);
+
+            if (SQLAllocHandle(SQL_HANDLE_DBC, hEnv, out hDbc) != SQL_SUCCESS)
+                throw new Exception("Failed to allocate ODBC connection");
+            SQLSetEnvAttr(hDbc, SQL_ATTR_LOGIN_TIMEOUT, new IntPtr(10), 0);
+
+            var rc = SQLDriverConnectW(hDbc, IntPtr.Zero, connectionString, SQL_NTS,
+                                       IntPtr.Zero, 0, out _, 0);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                throw new Exception("ODBC connect failed for activity panel");
+
+            if (SQLAllocStmt(hDbc, out hStmt) != SQL_SUCCESS)
+                throw new Exception("Failed to allocate ODBC statement");
+            SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT, new IntPtr(10), 0);
+
+            rc = SQLExecDirectW(hStmt, SQL_SQLSERVER, SQL_NTS);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                throw new Exception("Activity query failed");
+
+            buf = Marshal.AllocHGlobal(SQL_BUF);
+            while (SQLFetch(hStmt) == SQL_SUCCESS && rows.Count < rowLimit)
+            {
+                rows.Add(new ActivityRow
+                {
+                    Pid = ReadCol(hStmt, 1, buf),
+                    User = ReadCol(hStmt, 2, buf),
+                    Database = ReadCol(hStmt, 3, buf),
+                    State = ReadCol(hStmt, 4, buf),
+                    DurationMs = long.TryParse(ReadCol(hStmt, 5, buf), out var d) ? d : 0,
+                    Query = ReadCol(hStmt, 6, buf),
+                    Host = ReadCol(hStmt, 7, buf),
+                });
+            }
+            return rows;
+        }
+        finally
+        {
+            if (buf != IntPtr.Zero) Marshal.FreeHGlobal(buf);
+            if (hStmt != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+            if (hDbc != IntPtr.Zero) { SQLDisconnect(hDbc); SQLFreeHandle(SQL_HANDLE_DBC, hDbc); }
+            if (hEnv != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_ENV, hEnv);
+        }
+    }
+
+    private static string ReadCol(IntPtr hStmt, short col, IntPtr buf)
+    {
+        var rc = SQLGetData(hStmt, col, SQL_C_WCHAR, buf, (IntPtr)SQL_BUF, out IntPtr indPtr);
+        long ind = indPtr.ToInt64();
+        
+        if (ind == SQL_NULL_DATA) return "";
+        if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) return "";
+        int chars = (int)(Math.Max(0, Math.Min(ind, SQL_BUF - 2)) / 2);
+        return Marshal.PtrToStringUni(buf, chars) ?? "";
     }
 
     private static List<ActivityRow> ReadPostgres(string connectionString)
@@ -251,12 +332,33 @@ public static class ActivityExecutor
 
     private static void KillSqlServer(string connectionString, string pid)
     {
-        using var conn = new SqlConnection(connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"KILL {pid}";
-        cmd.CommandTimeout = 10;
-        cmd.ExecuteNonQuery();
+        IntPtr hEnv = IntPtr.Zero, hDbc = IntPtr.Zero, hStmt = IntPtr.Zero;
+        try
+        {
+            if (SQLAllocHandle(SQL_HANDLE_ENV, IntPtr.Zero, out hEnv) != SQL_SUCCESS)
+                throw new Exception("Failed to allocate ODBC environment");
+            SQLSetEnvAttr(hEnv, SQL_ATTR_ODBC_VERSION, new IntPtr(SQL_OV_ODBC3), 0);
+            if (SQLAllocHandle(SQL_HANDLE_DBC, hEnv, out hDbc) != SQL_SUCCESS)
+                throw new Exception("Failed to allocate ODBC connection");
+            SQLSetEnvAttr(hDbc, SQL_ATTR_LOGIN_TIMEOUT, new IntPtr(10), 0);
+            var rc = SQLDriverConnectW(hDbc, IntPtr.Zero, connectionString, SQL_NTS,
+                                       IntPtr.Zero, 0, out _, 0);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                throw new Exception("ODBC connect failed for kill_session");
+            if (SQLAllocStmt(hDbc, out hStmt) != SQL_SUCCESS)
+                throw new Exception("Failed to allocate ODBC statement");
+            SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT, new IntPtr(10), 0);
+            // pid is already validated as numeric in KillSession before we get here
+            rc = SQLExecDirectW(hStmt, $"KILL {pid}", SQL_NTS);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
+                throw new Exception($"KILL {pid} failed");
+        }
+        finally
+        {
+            if (hStmt != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+            if (hDbc != IntPtr.Zero) { SQLDisconnect(hDbc); SQLFreeHandle(SQL_HANDLE_DBC, hDbc); }
+            if (hEnv != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_ENV, hEnv);
+        }
     }
 
     // Postgres: pg_cancel_backend is a *cooperative* cancel — preferred over

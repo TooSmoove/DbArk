@@ -373,8 +373,10 @@ export function DiagramCanvas({ nodes, edges }: Props) {
         <button type="button" onClick={handleReset} title="Re-run force layout">
           Reset layout
         </button>
+        {/* Removing export buttons for now — will add back in a future update with a more complete export UI (e.g. filename input, format options, etc.)
         <button type="button" onClick={handleExportPNG}>Export PNG</button>
         <button type="button" onClick={handleExportSVG}>Export SVG</button>
+        */}
       </div>
       <svg ref={svgRef} className="er-diagram-svg">
         <defs>
