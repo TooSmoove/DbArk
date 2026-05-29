@@ -18,8 +18,8 @@ import type { DiagramNode, DiagramEdge } from "./diagramTypes";
 import {
   HEADER_HEIGHT,
   ROW_HEIGHT,
-  exportDiagramPNG,
-  exportDiagramSVG,
+  //exportDiagramPNG,
+  //exportDiagramSVG,
 } from "./diagramUtils";
 
 interface Props {
