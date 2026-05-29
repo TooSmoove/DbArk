@@ -42,9 +42,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Install frontend deps
-        run: npm install
+        run: npm ci
 
       - name: Build C# NativeAOT projects
         run: |
@@ -63,6 +64,9 @@ jobs:
           copy src-csharp\QueryHistory\bin\Release\net10.0\win-x64\publish\*.dll      src-tauri\natives\
           copy src-csharp\SshTunnel\bin\Release\net10.0\win-x64\publish\*.dll         src-tauri\natives\
           copy src-csharp\SchemaExplorer\bin\Release\net10.0\win-x64\publish\*.dll    src-tauri\natives\
+
+      - name: Check Tauri version alignment
+        run: cargo tauri info
 
       - name: Build Tauri app
         run: cargo tauri build

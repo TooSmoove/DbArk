@@ -3152,7 +3152,7 @@ function App() {
   function handleKeyDown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
       e.preventDefault();
-      const sql = editorRef.current?.getValue()?.trim() ?? "";
+      //const sql = editorRef.current?.getValue()?.trim() ?? "";
       setSaveQueryOpen(true);
     }
 

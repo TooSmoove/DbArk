@@ -359,13 +359,14 @@ export function DiagramCanvas({ nodes, edges }: Props) {
     setHighlightedId(null);
   }, []);
 
-  const handleExportPNG = useCallback(() => {
+/*  const _handleExportPNG = useCallback(() => {
     if (svgRef.current) void exportDiagramPNG(svgRef.current);
   }, []);
 
-  const handleExportSVG = useCallback(() => {
+  const _handleExportSVG = useCallback(() => {
     if (svgRef.current) exportDiagramSVG(svgRef.current);
   }, []);
+*/
 
   return (
     <div className="er-diagram-canvas">
