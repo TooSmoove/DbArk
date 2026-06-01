@@ -8,6 +8,17 @@ use sha2::{Sha256, Digest};
 
 use std::time::Instant;
 
+use std::path::PathBuf;
+
+fn natives_dir() -> PathBuf {
+    let exe = std::env::current_exe().expect("current_exe");
+    exe.parent().expect("exe parent").join("natives")
+}
+
+fn native_path(dll: &str) -> String {
+    natives_dir().join(dll).to_string_lossy().into_owned()
+}
+
 #[inline]
 fn timing_enabled() -> bool {
     std::env::var("DBARK_TIMING").as_deref() == Ok("1")
@@ -21,22 +32,16 @@ fn mark(t0: Instant, label: &str) {
     }
 }
 
-fn verify_dll(path: &str, expected_hex: &str) -> bool {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("FATAL: Could not read {}: {}", path, e);
-            return false;
-        }
-    };
+fn verify_dll(path: &str, expected_hex: &str) -> Result<(), String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("Could not read {path}: {e}"))?;
     let hash = hex::encode(Sha256::digest(&bytes));
     if hash != expected_hex {
-        eprintln!("FATAL: Hash mismatch for {}", path);
-        eprintln!("  Expected: {}", expected_hex);
-        eprintln!("  Got:      {}", hash);
-        return false;
+        return Err(format!(
+            "Hash mismatch for {path}\n  expected: {expected_hex}\n  got:      {hash}"
+        ));
     }
-    true
+    Ok(())
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
@@ -58,42 +63,42 @@ static QUERY_HISTORY:      OnceLock<libloading::Library> = OnceLock::new();
 
 fn get_query_executor() -> &'static libloading::Library {
     QUERY_EXECUTOR.get_or_init(|| unsafe {
-        libloading::Library::new("natives/QueryExecutor.dll")
+        libloading::Library::new(native_path("QueryExecutor.dll"))
             .expect("Failed to load QueryExecutor.dll")
     })
 }
 
 fn get_connection_manager() -> &'static libloading::Library {
     CONNECTION_MANAGER.get_or_init(|| unsafe {
-        libloading::Library::new("natives/ConnectionManager.dll")
+        libloading::Library::new(native_path("ConnectionManager.dll"))
             .expect("Failed to load ConnectionManager.dll")
     })
 }
 
 fn get_file_query_engine() -> &'static libloading::Library {
     FILE_QUERY_ENGINE.get_or_init(|| unsafe {
-        libloading::Library::new("natives/FileQueryEngine.dll")
+        libloading::Library::new(native_path("FileQueryEngine.dll"))
             .expect("Failed to load FileQueryEngine.dll")
     })
 }
 
 fn get_schema_explorer() -> &'static libloading::Library {
     SCHEMA_EXPLORER.get_or_init(|| unsafe {
-        libloading::Library::new("natives/SchemaExplorer.dll")
+        libloading::Library::new(native_path("SchemaExplorer.dll"))
             .expect("Failed to load SchemaExplorer.dll")
     })
 }
 
 fn get_query_history() -> &'static libloading::Library {
     QUERY_HISTORY.get_or_init(|| unsafe {
-        libloading::Library::new("natives/QueryHistory.dll")
+        libloading::Library::new(native_path("QueryHistory.dll"))
             .expect("Failed to load QueryHistory.dll")
     })
 }
 
 fn get_ssh_tunnel() -> &'static libloading::Library {
     SSH_TUNNEL.get_or_init(|| unsafe {
-        libloading::Library::new("natives/SshTunnel.dll")
+        libloading::Library::new(native_path("SshTunnel.dll"))
             .expect("Failed to load SshTunnel.dll")
     })
 }
@@ -103,7 +108,7 @@ static SQLCIPHER: OnceLock<libloading::Library> = OnceLock::new();
 // Add this function:
 fn get_sqlcipher() -> &'static libloading::Library {
     SQLCIPHER.get_or_init(|| unsafe {
-        libloading::Library::new("natives/sqlcipher.dll")
+        libloading::Library::new(native_path("sqlcipher.dll"))
             .expect("Failed to load sqlcipher.dll")
     })
 }
@@ -1846,58 +1851,44 @@ fn log_ready_time(ms: u32) {
     }
 }
 
-
-// ─── invoke_handler addition ────────────────────────────────────────────────
-//
-// In your existing tauri::generate_handler![ ... ] block near the end of run(),
-// add these two lines (anywhere in the list, comma-separated like the others):
-//
-//             get_activity,
-//             kill_session,
-//
-// For example, near the end of the existing list it would look like:
-//
-//             ...
-//             import_dbeaver_connections,
-//             get_activity,
-//             kill_session])
-//
-// ─────────────────────────────────────────────────────────────────────────────
-
-
-// ─── Update DLL hash after rebuild ──────────────────────────────────────────
-//
-// Because you're adding two new exports to QueryExecutor.dll, the hash will
-// change after the next build. After running `dotnet publish` on the
-// QueryExecutor project, regenerate the hash:
-//
-//   sha256sum natives/QueryExecutor.dll
-//   (or on Windows: Get-FileHash natives/QueryExecutor.dll -Algorithm SHA256)
-//
-// Then update this line at the top of main.rs:
-//
-//   const HASH_QUERYEXECUTOR: &str = "...";
-//
-// If you have the update-hashes.ps1 script mentioned in the Week 7-8 checklist
-// item, just run that — it'll handle all the hashes in one shot.
-// ─────────────────────────────────────────────────────────────────────────────
-
 fn main() {
 
-    let t0 = Instant::now();                        // <-- ADD: first line of main
-    mark(t0, "main() entered");                     // <-- ADD
+    // Catch-all: write any panic to a file, since stderr is dead in a
+    // windows-subsystem release build.
+    std::panic::set_hook(Box::new(|info| {
+        let _ = std::fs::write(
+            std::env::temp_dir().join("dbark_panic.log"),
+            format!("PANIC: {info}\n"),
+        );
+    }));
+
+    let t0 = Instant::now();                        
+    mark(t0, "main() entered");                     
 
      // Verify all native DLL integrity before loading
     let dlls = [
-        ("natives/ConnectionManager.dll", HASH_CONNECTIONMANAGER),
-        ("natives/FileQueryEngine.dll",   HASH_FILEQUERYENGINE),
-        ("natives/QueryExecutor.dll",     HASH_QUERYEXECUTOR),
-        ("natives/QueryHistory.dll",      HASH_QUERYHISTORY),
-        ("natives/SchemaExplorer.dll",    HASH_SCHEMAEXPLORER),
-        ("natives/duckdb.dll",            HASH_DUCKDB),
-        ("natives/SshTunnel.dll", HASH_SSHTUNNEL),
-        ("natives/sqlcipher.dll",         HASH_SQLCIPHER),
+        ("ConnectionManager.dll", HASH_CONNECTIONMANAGER),
+        ("FileQueryEngine.dll",   HASH_FILEQUERYENGINE),
+        ("QueryExecutor.dll",     HASH_QUERYEXECUTOR),
+        ("QueryHistory.dll",      HASH_QUERYHISTORY),
+        ("SchemaExplorer.dll",    HASH_SCHEMAEXPLORER),
+        ("duckdb.dll",            HASH_DUCKDB),
+        ("SshTunnel.dll", HASH_SSHTUNNEL),
+        ("sqlcipher.dll",         HASH_SQLCIPHER),
     ];
+
+   for (dll, expected) in &dlls {
+        let path = native_path(dll);
+        if let Err(reason) = verify_dll(&path, expected) {
+            let _ = std::fs::write(
+                std::env::temp_dir().join("dbark_fatal.log"),
+                format!("DLL integrity check failed.\n{reason}\n"),
+            );
+            std::process::exit(1);
+        }
+    }
+
+    mark(t0, "DLL hash verify done");
 
     // Generate or retrieve the state.db encryption key from keychain
     let history_key = {
@@ -1920,17 +1911,7 @@ fn main() {
     };
 
 
-    mark(t0, "keychain read done");
-
-    //Verify all DLLs before loading any. If any fail, abort immediately to avoid partial load state.
-    for (path, expected) in &dlls {
-        if !verify_dll(path, expected) {
-            eprintln!("FATAL: DLL integrity check failed for {} — aborting", path);
-            std::process::exit(1);
-        }
-    }
-
-     mark(t0, "DLL hash verify done");  
+    mark(t0, "keychain read done");  
 
     // Pass key to QueryHistory DLL
     unsafe {
