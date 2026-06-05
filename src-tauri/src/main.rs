@@ -26,20 +26,31 @@ static SQLSERVER_ODBC_DRIVER: OnceLock<String> = OnceLock::new();
 
 fn sqlserver_odbc_driver() -> &'static str {
     SQLSERVER_ODBC_DRIVER.get_or_init(|| {
-        const CANDIDATES: &[&str] = &[
-            "ODBC Driver 18 for SQL Server",
-            "ODBC Driver 17 for SQL Server",
-            "SQL Server", // legacy driver, always present on Windows
-        ];
-        for name in CANDIDATES {
-            if odbc_driver_installed(name) {
-                return name.to_string();
+        #[cfg(windows)]
+        {
+            const CANDIDATES: &[&str] = &[
+                "ODBC Driver 18 for SQL Server",
+                "ODBC Driver 17 for SQL Server",
+                "SQL Server", // legacy, always present on Windows
+            ];
+            for name in CANDIDATES {
+                if odbc_driver_installed(name) {
+                    return name.to_string();
+                }
             }
+            "SQL Server".to_string()
         }
-        "SQL Server".to_string()
+        #[cfg(not(windows))]
+        {
+            // macOS/Linux use unixODBC, not the registry. Microsoft's driver
+            // registers under this name in odbcinst.ini. Static default for now.
+            "ODBC Driver 18 for SQL Server".to_string()
+        }
     })
+    .as_str()
 }
 
+#[cfg(windows)]
 fn odbc_driver_installed(name: &str) -> bool {
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;

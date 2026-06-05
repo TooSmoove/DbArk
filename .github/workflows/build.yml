@@ -131,7 +131,7 @@ jobs:
           cp src-csharp/SchemaExplorer/bin/Release/net10.0/osx-arm64/publish/*.dylib    src-tauri/natives/
 
       - name: Build Tauri app
-        run: cargo tauri build
+        run: cargo tauri build --target aarch64-apple-darwin
         env:
           TAURI_SIGNING_PRIVATE_KEY: placeholder
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: placeholder
