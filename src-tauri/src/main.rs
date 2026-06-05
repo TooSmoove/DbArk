@@ -19,6 +19,37 @@ fn native_path(dll: &str) -> String {
     natives_dir().join(dll).to_string_lossy().into_owned()
 }
 
+/// The SQL Server ODBC driver name to use in connection strings, detected once
+/// from what is actually installed. Avoids hardcoding a single version (a clean
+/// machine may have Driver 18 but not 17, which throws ODBC IM002).
+static SQLSERVER_ODBC_DRIVER: OnceLock<String> = OnceLock::new();
+
+fn sqlserver_odbc_driver() -> &'static str {
+    SQLSERVER_ODBC_DRIVER.get_or_init(|| {
+        const CANDIDATES: &[&str] = &[
+            "ODBC Driver 18 for SQL Server",
+            "ODBC Driver 17 for SQL Server",
+            "SQL Server", // legacy driver, always present on Windows
+        ];
+        for name in CANDIDATES {
+            if odbc_driver_installed(name) {
+                return name.to_string();
+            }
+        }
+        "SQL Server".to_string()
+    })
+}
+
+fn odbc_driver_installed(name: &str) -> bool {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    hklm.open_subkey(r"SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers")
+        .and_then(|k| k.get_value::<String, _>(name))
+        .map(|v| v == "Installed")
+        .unwrap_or(false)
+}
+
 #[inline]
 fn timing_enabled() -> bool {
     std::env::var("DBARK_TIMING").as_deref() == Ok("1")
@@ -45,12 +76,12 @@ fn verify_dll(path: &str, expected_hex: &str) -> Result<(), String> {
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "22c284266cbb0feee325f26602a473ce6915fc2e4abea61861d073fc7d719999";
-const HASH_FILEQUERYENGINE: &str = "e2afb7771c1c397ad298f997a697eb327f8db441e294d664835251bcbdeec4bb";
-const HASH_QUERYEXECUTOR: &str = "2e48256efa86898812a15cdf0fe6943756127fb244a9b933f13276e59ab5dbcc";
-const HASH_QUERYHISTORY: &str = "5bcf7fbce40ce737eb97c4a455161c947d04b841177091f670dfdf5f7bbda0ff";
-const HASH_SCHEMAEXPLORER: &str = "376c7c895c0c0942abb0059e61697e4e6c36b78e60d874ec80150f7ca4d04e8f";
-const HASH_SSHTUNNEL: &str = "fde39b1a8439f07de3c3edb7c9e6e4b136f363fb3bc5184b123de9e82f420aa5";
+const HASH_CONNECTIONMANAGER: &str = "c4c3aacb1d89f772e85085f7083e93a6a6699915f2ec27b18d6ce1988fb67876";
+const HASH_FILEQUERYENGINE: &str = "591827fc5e92b9c13bede2d291fb8911d46cd1e4b19a9610a0637672b5e7ca41";
+const HASH_QUERYEXECUTOR: &str = "280f576dfee8208e73e330c4a47944491dc65d6fd05a801457e7f7d073758017";
+const HASH_QUERYHISTORY: &str = "9281b3c9b64507c58ba46a4e36c42196dba0c33811fce05fc619b08fef9b34f4";
+const HASH_SCHEMAEXPLORER: &str = "8ba64267e86fd30737993374cb4347fa09de40fe9e7a592faec8a9c39a630055";
+const HASH_SSHTUNNEL: &str = "413e874b186089077a3aeb234a146f66aba73de42be13f6656a95fe9bbe3e3e8";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 const HASH_SQLCIPHER: &str = "895c0f5203352446f159d7780021b69b280dec6347c434c7a643ad6b7d0d883b";
 
@@ -313,10 +344,12 @@ fn build_connection_string(
                 _             => "no",
             };
             if win_auth {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database, encrypt)
             } else {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database, username, password, encrypt)
             }
         },
@@ -495,10 +528,12 @@ async fn get_schema(
                 format!("{},{}", host, port)
             };
             if win_auth {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database)
             } else {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database, username, password)
             }
         },
@@ -621,9 +656,11 @@ async fn test_connection(
                 format!("{},{}", host, port)
             };
             if win_auth {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;", server, database)
+                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(), server, database)
             } else {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;", server, database, username, password)
+                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(), server, database, username, password)
             }
         },
         _ => return Err(format!("Unsupported engine: {}", engine)),
@@ -1090,10 +1127,12 @@ async fn get_object_definition(
                 format!("{},{}", host, port)
             };
             if win_auth {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database)
             } else {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database, username, password)
             }
         },
@@ -1250,10 +1289,12 @@ async fn drop_object(
                 format!("{},{}", host, port)
             };
             if win_auth {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database)
             } else {
-                format!("Driver={{ODBC Driver 17 for SQL Server}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
                     server, database, username, password)
             }
         },

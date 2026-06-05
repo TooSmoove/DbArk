@@ -15,6 +15,8 @@ using System.Text.RegularExpressions;
 
 public static class QueryExecutor
 {
+    private static readonly System.Collections.Generic.HashSet<string> BatchScopedDdlObjects = new(System.StringComparer.Ordinal) { "PROCEDURE", "PROC", "FUNCTION", "VIEW", "TRIGGER" };
+    
     // ── NativeAOT entry points ──────────────────────────────────────────────
 
     // NOTE: test_connection is a legacy pointer-validity check only.
@@ -935,12 +937,6 @@ public static class QueryExecutor
         return ReaderToQueryResult(reader);
     }
 
-    // ── CockroachDB (Npgsql 8 with programmatic SSL) ────────────────────────
-    // Npgsql 8 removed SslMode=Disable from the connection string parser.
-    // SslMode.Prefer (default) sends an SSLRequest that CockroachDB insecure
-    // ignores, causing a 30-second connection timeout. Setting SslMode.Disable
-    // via NpgsqlDataSourceBuilder bypasses the string parser entirely.
-
     private static QueryResult ExecuteCockroachDbInternal(string connectionString, string sql)
     {
         using var conn = OpenCockroachDbConnection(connectionString);
@@ -1271,34 +1267,12 @@ public static class QueryExecutor
         }
         return sb.ToString();
     }
-    // ── Stage 1: GO-aware batch splitter (SQL Server only) ───────────────────────
-    //
-    // Splits a T-SQL script into BATCHES on the `GO` separator — NOT on `;`.
-    // `GO` is the sqlcmd/SSMS batch terminator; it is not T-SQL and must never be
-    // sent to the server. Each returned batch is one coherent unit that the server
-    // executes as a single command, so variable scope (DECLARE @x), temp tables,
-    // and SET options survive across the `;`-separated statements WITHIN a batch.
-    //
-    // GO recognition rule (matches sqlcmd/SSMS):
-    //   - `GO` must be ALONE on its own line (only whitespace around it),
-    //   - optionally followed by an integer repeat count (e.g. `GO 5`),
-    //   - case-insensitive,
-    //   - NOT inside a string literal, comment, or dollar-quote.
-    // So "SELECT * FROM GOods", "x GO y", and "'GO'" are never separators.
-    //
-    // This reuses the same string/comment/dollar-quote scanning as SplitStatements
-    // so a `GO` appearing inside any of those is treated as literal text.
-    //
-    // NOTE: a repeat count (`GO 5`) is recognised so it is not mistaken for a
-    // non-separator line, but the batch is returned ONCE. Honouring the repeat
-    // count (running the batch N times) is intentionally NOT done here — it is a
-    // rare sqlcmd feature and out of scope for stage 1. If desired later, the
-    // parsed count is available at the split point.
 
-    internal static List<string> SplitSqlServerBatches(string sql)
+
+    internal static System.Collections.Generic.List<string> SplitSqlServerBatches(string sql)
     {
-        var batches = new List<string>();
-        var current = new StringBuilder();
+        var batches = new System.Collections.Generic.List<string>();
+        var current = new System.Text.StringBuilder();
 
         bool inString = false;
         bool inDollarQuote = false;
@@ -1308,10 +1282,8 @@ public static class QueryExecutor
         string dollarTag = "";
         int i = 0;
 
-        // Tracks whether, since the last newline, we have seen only whitespace
-        // (so far) — i.e. we are still at "line start" position. A GO can only
-        // begin a separator when atLineStart is true.
-        bool atLineStart = true;
+        bool atLineStart = true;   // for GO (must occupy its own line)
+        bool atStmtStart = true;   // for implicit DDL (line start OR just after a ';')
 
         while (i < sql.Length)
         {
@@ -1321,7 +1293,7 @@ public static class QueryExecutor
             if (inLineComment)
             {
                 current.Append(c);
-                if (c == '\n') { inLineComment = false; atLineStart = true; }
+                if (c == '\n') { inLineComment = false; atLineStart = true; atStmtStart = true; }
                 i++;
                 continue;
             }
@@ -1338,6 +1310,7 @@ public static class QueryExecutor
                 }
                 else i++;
                 atLineStart = false;
+                atStmtStart = false;
                 continue;
             }
 
@@ -1349,6 +1322,7 @@ public static class QueryExecutor
                 current.Append("--");
                 i += 2;
                 atLineStart = false;
+                atStmtStart = false;
                 continue;
             }
 
@@ -1360,11 +1334,11 @@ public static class QueryExecutor
                 current.Append("/*");
                 i += 2;
                 atLineStart = false;
+                atStmtStart = false;
                 continue;
             }
 
-            // ── Dollar-quoted strings (kept for parity with the ; splitter; T-SQL
-            //    doesn't use them, but harmless and keeps behaviour identical) ────
+            // ── Dollar-quoted strings (parity with the ; splitter) ───────────────
             if (!inString && !inDollarQuote && c == '$')
             {
                 int tagEnd = i + 1;
@@ -1379,6 +1353,7 @@ public static class QueryExecutor
                     current.Append(dollarTag);
                     i = tagEnd + 1;
                     atLineStart = false;
+                    atStmtStart = false;
                     continue;
                 }
             }
@@ -1391,6 +1366,7 @@ public static class QueryExecutor
                 current.Append(dollarTag);
                 i += dollarTag.Length;
                 atLineStart = false;
+                atStmtStart = false;
                 continue;
             }
 
@@ -1399,6 +1375,7 @@ public static class QueryExecutor
                 current.Append(c);
                 i++;
                 atLineStart = false;
+                atStmtStart = false;
                 continue;
             }
 
@@ -1410,6 +1387,7 @@ public static class QueryExecutor
                     inString = false;
                 i++;
                 atLineStart = false;
+                atStmtStart = false;
                 continue;
             }
 
@@ -1420,48 +1398,39 @@ public static class QueryExecutor
                 current.Append(c);
                 i++;
                 atLineStart = false;
+                atStmtStart = false;
                 continue;
             }
 
-            // ── Whitespace handling: track line-start position ──────────────────
+            // ── Whitespace handling: leading whitespace keeps line/stmt-start ────
             if (c == '\n')
             {
                 current.Append(c);
                 atLineStart = true;
+                atStmtStart = true;
                 i++;
                 continue;
             }
             if (c == '\r' || c == ' ' || c == '\t')
             {
                 current.Append(c);
-                // whitespace does NOT clear atLineStart — leading whitespace before
-                // GO is allowed
+                // whitespace does NOT clear atLineStart/atStmtStart
                 i++;
                 continue;
             }
 
             // ── GO batch separator ───────────────────────────────────────────────
-            // Only at line start, outside all quoted/comment contexts. Match a
-            // standalone GO (case-insensitive), optionally followed by an integer
-            // repeat count, with nothing else of substance on the line.
             if (atLineStart
                 && (c == 'G' || c == 'g')
                 && i + 1 < sql.Length && (sql[i + 1] == 'O' || sql[i + 1] == 'o')
-                // char before GO must be a line boundary or start (we know we're at
-                // line start, but guard the 'GOods' case: next char after GO must
-                // not be an identifier char)
                 && (i + 2 >= sql.Length || !IsIdentChar(sql[i + 2])))
             {
                 // Confirm the REST of the line is only whitespace or an optional
                 // integer repeat count, then a newline / EOF / comment.
                 int j = i + 2;
-                // skip spaces/tabs
                 while (j < sql.Length && (sql[j] == ' ' || sql[j] == '\t')) j++;
-                // optional integer repeat count
                 while (j < sql.Length && char.IsDigit(sql[j])) j++;
-                // skip trailing spaces/tabs
                 while (j < sql.Length && (sql[j] == ' ' || sql[j] == '\t')) j++;
-                // the line must now end: \r, \n, EOF, or a -- comment start
                 bool lineEnds =
                     j >= sql.Length
                     || sql[j] == '\n' || sql[j] == '\r'
@@ -1469,27 +1438,43 @@ public static class QueryExecutor
 
                 if (lineEnds)
                 {
-                    // Close the current batch (do not include the GO line).
                     var batch = current.ToString().Trim();
                     if (!string.IsNullOrWhiteSpace(batch))
                         batches.Add(batch);
                     current.Clear();
 
-                    // Advance past the GO line up to and including the newline, so
-                    // the GO text itself is discarded. Leave any trailing -- comment
-                    // on the GO line out of the next batch too.
                     while (i < sql.Length && sql[i] != '\n') i++;
                     if (i < sql.Length) i++; // consume the newline
                     atLineStart = true;
+                    atStmtStart = true;
                     continue;
                 }
-                // Not a real GO separator (e.g. "GO" followed by more code) — fall
-                // through and treat as ordinary text.
+                // Not a real GO separator — fall through and treat as ordinary text.
+            }
+
+            // ── Implicit DDL batch boundary ──────────────────────────────────────
+            // CREATE/ALTER [OR ALTER|OR REPLACE] PROCEDURE|PROC|FUNCTION|VIEW|TRIGGER
+            if (atStmtStart
+                && (c == 'C' || c == 'c' || c == 'A' || c == 'a')
+                && StartsBatchScopedDdl(sql, i))
+            {
+                var prior = current.ToString().Trim();
+                if (!string.IsNullOrEmpty(prior))
+                {
+                    batches.Add(prior);
+                    current.Clear();
+                    // Do NOT advance i: reprocess the keyword into the fresh batch.
+                    // Next pass `current` is empty, so the prior-content guard below
+                    // fails and the keyword is appended normally — no infinite loop.
+                    continue;
+                }
+                // current empty → nothing to close; fall through and append normally.
             }
 
             // ── Ordinary character ──────────────────────────────────────────────
             current.Append(c);
             atLineStart = false;
+            atStmtStart = (c == ';');   // a top-level ';' starts a new statement
             i++;
         }
 
@@ -1498,6 +1483,53 @@ public static class QueryExecutor
             batches.Add(lastBatch);
 
         return batches;
+    }
+
+    // Reads a run of identifier chars from `i`, advances `i` past it, and returns
+    // the UPPER-cased word (empty string if `i` is not on an identifier char).
+    private static string ReadWord(string sql, ref int i)
+    {
+        int start = i;
+        while (i < sql.Length && IsIdentChar(sql[i])) i++;
+        return sql.Substring(start, i - start).ToUpperInvariant();
+    }
+
+    private static void SkipWs(string sql, ref int i)
+    {
+        while (i < sql.Length
+            && (sql[i] == ' ' || sql[i] == '\t' || sql[i] == '\r' || sql[i] == '\n'))
+            i++;
+    }
+
+    // True iff text at `start` (the first non-whitespace char of a statement) begins
+    // a batch-scoped DDL: CREATE/ALTER [OR ALTER|OR REPLACE] of
+    // PROCEDURE/PROC/FUNCTION/VIEW/TRIGGER. Word-boundary aware (so VIEWS, a column
+    // named `procedure`, etc. do not match). Whitespace between tokens is skipped;
+    // comments between tokens are not (rare — conservatively yields no split).
+    private static bool StartsBatchScopedDdl(string sql, int start)
+    {
+        if (start >= sql.Length) return false;
+        char c0 = sql[start];
+        if (c0 != 'C' && c0 != 'c' && c0 != 'A' && c0 != 'a') return false;
+
+        int i = start;
+        string w1 = ReadWord(sql, ref i);
+        if (w1 != "CREATE" && w1 != "ALTER") return false;
+
+        SkipWs(sql, ref i);
+        string w2 = ReadWord(sql, ref i);
+
+        if (w2 == "OR")
+        {
+            SkipWs(sql, ref i);
+            string w3 = ReadWord(sql, ref i);
+            if (w3 != "ALTER" && w3 != "REPLACE") return false;
+            SkipWs(sql, ref i);
+            string obj = ReadWord(sql, ref i);
+            return BatchScopedDdlObjects.Contains(obj);
+        }
+
+        return BatchScopedDdlObjects.Contains(w2);
     }
 
     private static bool IsIdentChar(char c) =>
@@ -1525,9 +1557,6 @@ public class MultiResult
 
 public class ErrorResult
 {
-    // Fixed: was lowercase `error` with no attribute — inconsistent with every
-    // other type in this file. PascalCase property + explicit JsonPropertyName
-    // produces identical JSON output ("error") while matching C# conventions.
     [JsonPropertyName("error")] public string Error { get; set; } = "";
 }
 

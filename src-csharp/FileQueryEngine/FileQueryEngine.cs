@@ -217,6 +217,7 @@ public static class FileQueryEngineLib
                 "mysql" or "mariadb" => "SHOW TABLES",
                 "postgres" or "cockroachdb" => "SELECT tablename AS table_name FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
                 "sqlite" => "SELECT name AS table_name FROM sqlite_master WHERE type='table' ORDER BY name",
+                "sqlserver" => "SELECT TABLE_NAME AS table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
                 _ => throw new Exception($"Unsupported engine: {engine}")
             };
 
@@ -323,6 +324,7 @@ public static class FileQueryEngineLib
             "mysql" or "mariadb" => ExecuteMySql(connectionString, sql),
             "postgres" or "cockroachdb" => ExecutePostgres(connectionString, sql),
             "sqlite" => ExecuteSqliteDb(connectionString, sql),
+            "sqlserver" => ExecuteSqlServer(connectionString, sql),
             _ => throw new Exception($"Unsupported engine: {engine}")
         };
     }
@@ -340,6 +342,21 @@ public static class FileQueryEngineLib
     private static string ExecutePostgres(string connectionString, string sql)
     {
         using var conn = new NpgsqlConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        using var reader = cmd.ExecuteReader();
+        return ReaderToJson(reader);
+    }
+
+    // SQL Server goes through ODBC: the connection string DevSql builds for the
+    // sqlserver engine is an ODBC string (Driver={ODBC Driver 18 for SQL Server};...),
+    // which SqlConnection cannot parse — OdbcConnection accepts it directly and
+    // matches the rest of the app's SQL Server path. Requires the System.Data.Odbc
+    // package reference in this project's .csproj.
+    private static string ExecuteSqlServer(string connectionString, string sql)
+    {
+        using var conn = new System.Data.Odbc.OdbcConnection(connectionString);
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;

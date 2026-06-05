@@ -127,6 +127,9 @@ public static class QueryHistoryLib
         }
         catch (Exception ex)
         {
+            Console.Error.WriteLine($"Error in AddHistoryEntry: {ex}"); 
+            Console.Error.WriteLine(ex.Message);
+
             return 0;
         }
     }

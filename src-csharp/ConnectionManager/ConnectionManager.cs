@@ -147,8 +147,16 @@ public static class ConnectionManagerLib
             if (request.Engine != "sqlite" && !request.WindowsAuth && !IsValidIdentifier(request.Username))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid username '{request.Username}' — only alphanumeric characters, underscores, hyphens, dots allowed");
 
-            if (!IsValidEngine(request.Engine))
-                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid engine '{request.Engine}'");
+
+            if (request.Engine is not null)
+            {
+                if (!IsValidEngine(request.Engine))
+                    return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid engine '{request.Engine}'");
+            }
+            else
+            {
+                return Marshal.StringToCoTaskMemUTF8("ERROR: Engine is required");
+            }
 
             if (!IsValidSslMode(request.SslMode))
                 request.SslMode = "prefer";
