@@ -80,6 +80,17 @@ public class DefinitionResult
     [JsonPropertyName("error")] public string? Error { get; set; }
 }
 
+// Result of enumerating the databases hosted on a server/cluster for a single
+// connection. Server-wide for SQL Server (sys.databases), cluster-wide for
+// Postgres/CockroachDB (pg_database), and the schemata list for MySQL/MariaDB
+// (where a "database" and a "schema" are the same thing). SQLite returns an
+// empty list — a SQLite connection is a single file, i.e. a single database.
+public class DatabaseListResult
+{
+    [JsonPropertyName("databases")] public List<string> Databases { get; set; } = new();
+    [JsonPropertyName("error")] public string? Error { get; set; }
+}
+
 [JsonSerializable(typeof(SchemaResult))]
 [JsonSerializable(typeof(List<TableInfo>))]
 [JsonSerializable(typeof(List<ProcedureInfo>))]
@@ -89,6 +100,7 @@ public class DefinitionResult
 [JsonSerializable(typeof(List<IndexInfo>))]
 [JsonSerializable(typeof(DefinitionResult))]
 [JsonSerializable(typeof(List<ForeignKeyInfo>))]
+[JsonSerializable(typeof(DatabaseListResult))]
 internal partial class AppJsonContext : JsonSerializerContext { }
 
 public static class SchemaExplorerLib
@@ -121,6 +133,121 @@ public static class SchemaExplorerLib
             return Marshal.StringToCoTaskMemUTF8(
                 JsonSerializer.Serialize(err, AppJsonContext.Default.SchemaResult));
         }
+    }
+
+    // ---- Database enumeration ---------------------------------
+    // Lists every database/schema visible to this login on the connected
+    // server. Called once when a connection is selected in the sidebar; the
+    // result drives the database list, and expanding any one database calls
+    // the existing get_schema export with that database name.
+    //
+    // The connection string passed in targets whatever default database the
+    // connection was saved with — that's fine, because every enumeration query
+    // here is server/cluster-wide and works from any database the login can
+    // reach.
+    [UnmanagedCallersOnly(EntryPoint = "list_databases")]
+    public static IntPtr ListDatabases(IntPtr connectionStringPtr, IntPtr enginePtr)
+    {
+        try
+        {
+            var connectionString = Marshal.PtrToStringUTF8(connectionStringPtr) ?? "";
+            var engine = Marshal.PtrToStringUTF8(enginePtr) ?? "";
+
+            var databases = engine.ToLower() switch
+            {
+                "mysql" => ListMySqlDatabases(connectionString),
+                "mariadb" => ListMySqlDatabases(connectionString),
+                "postgres" => ListPostgresDatabases(connectionString),
+                "cockroachdb" => ListPostgresDatabases(connectionString),
+                "sqlserver" => ListSqlServerDatabases(connectionString),
+                "sqlite" => new List<string>(),   // one file == one database
+                _ => throw new Exception($"Unsupported engine: {engine}")
+            };
+
+            var result = new DatabaseListResult { Databases = databases };
+            return Marshal.StringToCoTaskMemUTF8(
+                JsonSerializer.Serialize(result, AppJsonContext.Default.DatabaseListResult));
+        }
+        catch (Exception ex)
+        {
+            var err = new DatabaseListResult { Error = ex.Message };
+            return Marshal.StringToCoTaskMemUTF8(
+                JsonSerializer.Serialize(err, AppJsonContext.Default.DatabaseListResult));
+        }
+    }
+
+    private static List<string> ListSqlServerDatabases(string connectionString)
+    {
+        // sys.databases is server-wide. state = 0 means ONLINE (skip RESTORING,
+        // OFFLINE, etc. that would error on connect). HAS_DBACCESS filters out
+        // databases this login cannot open, so the sidebar only shows databases
+        // the user can actually browse. System databases are excluded by default;
+        // remove the NOT IN clause if you want master/model/msdb/tempdb shown.
+        var rows = SqlServerOdbc.Query(connectionString, @"
+        SELECT name
+        FROM sys.databases
+        WHERE state = 0
+          AND name NOT IN ('master', 'tempdb', 'model', 'msdb')
+          AND HAS_DBACCESS(name) = 1
+        ORDER BY name");
+
+        return rows
+            .Select(r => r[0] ?? "")
+            .Where(s => s.Length > 0)
+            .ToList();
+    }
+
+    private static List<string> ListPostgresDatabases(string connectionString)
+    {
+        // pg_database is cluster-wide and readable from any database the login
+        // can connect to. datistemplate = false drops template0/template1;
+        // datallowconn = true drops databases that reject connections (so the
+        // user never sees a database they cannot expand). Works unchanged for
+        // CockroachDB, which exposes the same catalog over the Postgres wire.
+        var databases = new List<string>();
+
+        using var conn = new NpgsqlConnection(connectionString);
+        conn.Open();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+        SELECT datname
+        FROM pg_database
+        WHERE datistemplate = false
+          AND datallowconn = true
+        ORDER BY datname";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            databases.Add(reader.GetString(0));
+
+        return databases;
+    }
+
+    private static List<string> ListMySqlDatabases(string connectionString)
+    {
+        // In MySQL/MariaDB a "database" and a "schema" are the same object, so
+        // there is no separate schema layer below the database — the sidebar
+        // shows database -> tables directly. Exclude the four engine-internal
+        // schemas so only user databases appear.
+        var databases = new List<string>();
+
+        using var conn = new MySqlConnection(connectionString);
+        conn.Open();
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+        SELECT schema_name
+        FROM information_schema.schemata
+        WHERE schema_name NOT IN
+            ('information_schema', 'performance_schema', 'mysql', 'sys')
+        ORDER BY schema_name";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            databases.Add(reader.GetString(0));
+
+        return databases;
     }
 
     private static SchemaResult GetSqlServerFullSchema(string connectionString)

@@ -227,6 +227,12 @@ interface Tab {
   // Per-tab (not global) so a user can keep "plan mode" on for one tab
   // while running normal queries in another.
   includePlan?: boolean;
+  // Which database on the connection's server this tab is currently browsing /
+  // querying. Defaults to the connection's saved `database`. Set when the user
+  // picks a different database in the sidebar's database list. The query
+  // connection string is built against this database, so switching it here also
+  // switches what unqualified queries (SELECT * FROM t) run against.
+  activeDatabase?: string;
 }
 
 function createTab(id?: string): Tab {
@@ -245,6 +251,7 @@ function createTab(id?: string): Tab {
     pendingEdits: [],
     editingCell:  null,
     includePlan:  false,
+    activeDatabase: undefined,
   };
 }
 
@@ -2593,6 +2600,20 @@ function App() {
   const [connectionsFolder, setConnectionsFolder] = useState("");
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
+  // Database list for the currently-active connection. Only the active
+  // connection renders its tree (see the sidebar), so a single list here is
+  // enough — switching connections refetches. dbListCache memoises per
+  // connection id so re-selecting a connection is instant.
+  const [databases, setDatabases] = useState<string[]>([]);
+  const [databasesLoading, setDatabasesLoading] = useState(false);
+  const dbListCache = useRef<Map<string, string[]>>(new Map());
+  // Free-text filter over the database list — the scalability unlock for
+  // servers with many databases. Reset whenever the active connection changes.
+  const [dbFilter, setDbFilter] = useState("");
+  // Whether the active database's tree is collapsed. The active database is
+  // always the one whose schema is loaded; collapsing hides its tree inline
+  // (chevron ▸) without changing which database queries run against.
+  const [dbTreeCollapsed, setDbTreeCollapsed] = useState(false);
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(["public"]));
   const schemaRef = useRef<SchemaResult | null>(null);
@@ -3012,11 +3033,15 @@ function App() {
       schemaConnectionId.current = conn.id;
       setSchema(null);
       setExpandedTables(new Set());
-      loadSchema(conn);
+      // Load the server's database list, then the schema for this tab's active
+      // database (or the connection default if the tab hasn't picked one yet).
+      setDbTreeCollapsed(false);
+      loadDatabases(conn, activeTab.activeDatabase ?? conn.database);
     } else {
       schemaConnectionId.current = null;
       setSchema(null);
       setExpandedTables(new Set());
+      setDatabases([]);
     }
   }, [activeTabId]);
 
@@ -3047,7 +3072,8 @@ function App() {
           if (!tab.connection) return tab;
           const fresh = parsed.connections.find(c => c.id === tab.connection!.id);
           if (fresh) {
-            schemaCache.current.delete(fresh.id);
+            purgeSchemaCache(fresh.id);
+            dbListCache.current.delete(fresh.id);
             setExpandedSchemas(new Set(["public"]));
             return { ...tab, connection: fresh, error: null, results: [], activeResult: 0 };
           }
@@ -3061,7 +3087,7 @@ function App() {
             schemaConnectionId.current = null;
             setSchema(null);
             setExpandedTables(new Set());
-            loadSchema(freshConn);
+            loadDatabases(freshConn, activeTabRef.current.activeDatabase ?? freshConn.database);
           }
         }
       }
@@ -3532,7 +3558,10 @@ function App() {
             engine:        conn.engine,
             host:          conn.host,
             port:          conn.port,
-            database:      conn.database,
+            // Run against the database the user is browsing in the sidebar, not
+            // necessarily the connection's saved default. Lets one connection
+            // query any database on its server without a separate connection.
+            database:      tab.activeDatabase ?? conn.database,
             username:      conn.username,
             sslMode:       effectiveSslMode,
             sqlInstance:   conn.sqlInstance ?? "",
@@ -4117,9 +4146,15 @@ function App() {
     });
   };
 
-  async function loadSchema(conn: ConnectionConfig) {
-    if (schemaCache.current.has(conn.id)) {
-      setSchema(schemaCache.current.get(conn.id)!);
+  // Resolve which database to load: explicit arg wins, else the connection's
+  // saved default. The cache is keyed by connection id + database so two
+  // databases on the same server are cached independently.
+  async function loadSchema(conn: ConnectionConfig, database?: string) {
+    const db      = database ?? conn.database;
+    const cacheKey = `${conn.id}::${db}`;
+
+    if (schemaCache.current.has(cacheKey)) {
+      setSchema(schemaCache.current.get(cacheKey)!);
       return;
     }
 
@@ -4154,7 +4189,7 @@ function App() {
         engine:        conn.engine,
         host:          effectiveHost,
         port:          effectivePort,
-        database:      conn.database,
+        database:      db,
         username:      conn.username,
         sslMode:       effectiveSsl,
         sqlInstance:   conn.sqlInstance ?? "",
@@ -4209,13 +4244,151 @@ function App() {
         }
       }
 
-      schemaCache.current.set(conn.id, parsed);
+      schemaCache.current.set(cacheKey, parsed);
       setSchema(parsed);
     } catch (e) {
       console.error("Schema load failed:", e);
     } finally {
       setSchemaLoading(false);
     }
+  }
+
+  // Drop every cached schema for a connection (all of its databases). Used when
+  // a connection is edited/refreshed so stale schemas across databases clear.
+  function purgeSchemaCache(connId: string) {
+    for (const key of [...schemaCache.current.keys()]) {
+      if (key === connId || key.startsWith(`${connId}::`)) {
+        schemaCache.current.delete(key);
+      }
+    }
+  }
+
+  // Fetch the list of databases on a connection's server, then load the schema
+  // for the tab's active database (defaulting to the connection's saved one).
+  // Called when a connection is selected. SQLite returns an empty list, in
+  // which case the sidebar shows tables directly with no database layer.
+  async function loadDatabases(conn: ConnectionConfig, preferredDb?: string) {
+    const defaultDb = preferredDb ?? conn.database;
+
+    // SQLite has no server-side database list — go straight to the schema.
+    if (conn.engine === "sqlite") {
+      setDatabases([]);
+      loadSchema(conn, defaultDb);
+      return;
+    }
+
+    // Serve a cached list instantly, but still (re)load the schema.
+    if (dbListCache.current.has(conn.id)) {
+      setDatabases(dbListCache.current.get(conn.id)!);
+      loadSchema(conn, defaultDb);
+      return;
+    }
+
+    setDatabases([]);
+    setDatabasesLoading(true);
+
+    try {
+      let tunnelPort: number | undefined;
+      if (conn.sshEnabled) {
+        const port = await openTunnel(conn);
+        if (port) tunnelPort = port;
+      }
+
+      const effectiveHost = tunnelPort !== undefined ? "127.0.0.1" : conn.host;
+      const effectivePort = tunnelPort ?? conn.port;
+      const effectiveSsl  = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
+
+      const raw = await invoke<string>("list_databases", {
+        credentialRef: conn.credentialRef,
+        engine:        conn.engine,
+        host:          effectiveHost,
+        port:          effectivePort,
+        database:      defaultDb,
+        username:      conn.username,
+        sslMode:       effectiveSsl,
+        sqlInstance:   conn.sqlInstance ?? "",
+        windowsAuth:   conn.windowsAuth ?? false,
+      });
+
+      const parsed: { databases?: string[]; error?: string } = JSON.parse(raw);
+      let list = parsed.databases ?? [];
+
+      // Always include the connection's saved database, even if the
+      // enumeration query couldn't see it (permissions, or it's a system DB
+      // we filtered out) — the user explicitly configured it, so it must be
+      // browsable. Keep it first so it reads as the default.
+      if (defaultDb && !list.includes(defaultDb)) {
+        list = [defaultDb, ...list];
+      }
+
+      dbListCache.current.set(conn.id, list);
+      setDatabases(list);
+    } catch (e) {
+      console.error("Database list load failed:", e);
+      // Fall back to just the saved database so the user can still browse it.
+      setDatabases(defaultDb ? [defaultDb] : []);
+    } finally {
+      setDatabasesLoading(false);
+      loadSchema(conn, defaultDb);
+    }
+  }
+
+  // One collapsible database row in the sidebar accordion. The active database
+  // (the one whose schema is loaded) shows expanded with its tree nested below
+  // it; clicking its row toggles collapse. Clicking any other row switches the
+  // active database and loads its schema. Shared by the rows rendered above the
+  // active database's tree and the rows rendered below it.
+  function renderDbRow(conn: ConnectionConfig, db: string, activeDb: string) {
+    const isActive = db === activeDb;
+    const expanded = isActive && !dbTreeCollapsed;
+    return (
+      <div
+        key={db}
+        onClick={() => {
+          if (isActive) {
+            setDbTreeCollapsed(c => !c);
+            return;
+          }
+          updateActiveTab({ activeDatabase: db });
+          setSchema(null);
+          setExpandedTables(new Set());
+          setExpandedSections(new Set());
+          setExpandedSchemas(new Set(["public"]));
+          setDbTreeCollapsed(false);
+          loadSchema(conn, db);
+        }}
+        title={isActive
+          ? `${db} — click to ${expanded ? "collapse" : "expand"}`
+          : `Browse ${db}`}
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "5px 14px", cursor: "pointer",
+          borderLeft: `3px solid ${isActive ? conn.color : "transparent"}`,
+          background: isActive ? "var(--surface-3)" : "transparent",
+        }}
+      >
+        <span style={{
+          fontSize: 9, color: expanded ? "var(--accent)" : "var(--text-disabled)",
+          flexShrink: 0, width: 8,
+        }}>
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span style={{
+          fontSize: 10, color: isActive ? "var(--accent)" : "var(--text-disabled)",
+          flexShrink: 0, width: 12,
+        }}>
+          🗄
+        </span>
+        <span style={{
+          fontSize: 11, flex: 1, fontFamily: "monospace",
+          color: isActive ? "var(--text)" : "var(--text-secondary)",
+          fontWeight: isActive ? 600 : 400,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {db}
+        </span>
+      </div>
+    );
   }
 
   async function saveToHistory(
@@ -5410,12 +5583,12 @@ function handleCellCommit(
                     });
 
                     // Invalidate schema cache and reload
-                    schemaCache.current.delete(conn.id);
+                    purgeSchemaCache(conn.id);
                     schemaConnectionId.current = null;
                     setSchema(null);
                     setExpandedTables(new Set());
                     setExpandedSections(new Set());
-                    loadSchema(conn);
+                    loadSchema(conn, activeTabRef.current.activeDatabase ?? conn.database);
 
                     setDropConfirm(null);
                   } catch (e) {
@@ -6366,11 +6539,14 @@ function handleCellCommit(
                         results:    [],
                         activeResult: 0,
                         error:      null,
+                        activeDatabase: conn.database,
                       });
                       setSchema(null);
                       setExpandedTables(new Set());
                       setExpandedSections(new Set());
-                      loadSchema(conn);
+                      setDbFilter("");
+                      setDbTreeCollapsed(false);
+                      loadDatabases(conn, conn.database);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -6421,6 +6597,115 @@ function handleCellCommit(
                   {/* Schema tree — only shown for the active connection */}
                   {activeTab.connection?.id === conn.id && (
                     <div style={{ background: "var(--bg)", borderBottom: "1px solid var(--border)" }}>
+                      {/* Database list — every database on this connection's
+                          server. SQLite has none (single file), so this block
+                          is skipped and the schema renders directly below.
+                          Selecting a database loads its schema and points
+                          query execution at it. */}
+                      {databasesLoading && (
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace" }}>
+                          Loading databases…
+                        </div>
+                      )}
+                      {conn.engine !== "sqlite" && databases.length > 0 && (() => {
+                        const activeDb = activeTab.activeDatabase ?? conn.database;
+                        const q = dbFilter.trim().toLowerCase();
+                        const filtered = q
+                          ? databases.filter(d => d.toLowerCase().includes(q))
+                          : databases;
+                        // The filter input appears once a server has enough
+                        // databases that scanning becomes slower than typing.
+                        const showFilter = databases.length > 6;
+                        // Rows up to and including the active database render
+                        // here; the active database's schema tree renders right
+                        // after them (next sibling), and the remaining database
+                        // rows render below the tree. That positioning is what
+                        // makes the active database expand *inline* with its
+                        // tables nested beneath it, accordion-style.
+                        const activeIndex = filtered.indexOf(activeDb);
+                        const firstSegment = activeIndex >= 0
+                          ? filtered.slice(0, activeIndex + 1)
+                          : filtered;
+                        return (
+                          <div>
+                            <div style={{
+                              display: "flex", alignItems: "center", gap: 6,
+                              padding: "6px 14px 4px",
+                            }}>
+                              <span style={{
+                                fontSize: 9, color: "var(--text-tertiary)",
+                                fontFamily: "monospace", textTransform: "uppercase",
+                                letterSpacing: ".06em", flex: 1,
+                              }}>
+                                Databases
+                              </span>
+                              <span style={{
+                                fontSize: 9, color: "var(--text-disabled)",
+                                fontFamily: "monospace", flexShrink: 0,
+                              }}>
+                                {q ? `${filtered.length}/${databases.length}` : databases.length}
+                              </span>
+                            </div>
+
+                            {showFilter && (
+                              <div style={{
+                                display: "flex", alignItems: "center", gap: 6,
+                                margin: "0 10px 6px", padding: "4px 8px",
+                                border: "1px solid var(--border)", borderRadius: 5,
+                                background: "var(--bg)",
+                              }}>
+                                <span style={{ fontSize: 10, color: "var(--text-disabled)", flexShrink: 0 }}>⌕</span>
+                                <input
+                                  value={dbFilter}
+                                  onChange={(e) => setDbFilter(e.target.value)}
+                                  placeholder="Filter databases…"
+                                  spellCheck={false}
+                                  style={{
+                                    border: "none", outline: "none", background: "transparent",
+                                    flex: 1, fontSize: 11, fontFamily: "monospace",
+                                    color: "var(--text)", padding: 0,
+                                  }}
+                                />
+                                {dbFilter && (
+                                  <span
+                                    onClick={() => setDbFilter("")}
+                                    title="Clear filter"
+                                    style={{ fontSize: 10, color: "var(--text-disabled)", cursor: "pointer", flexShrink: 0 }}
+                                  >✕</span>
+                                )}
+                              </div>
+                            )}
+
+                            {filtered.length === 0 && (
+                              <div style={{ padding: "6px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace" }}>
+                                No databases match “{dbFilter}”
+                              </div>
+                            )}
+                            {firstSegment.map(db => renderDbRow(conn, db, activeDb))}
+                          </div>
+                        );
+                      })()}
+
+                      {/* Active database's schema tree — renders inline right
+                          beneath the active database row (its previous sibling),
+                          indented so the tables read as nested under it. Hidden
+                          when the database is collapsed or filtered out of view. */}
+                      {(() => {
+                        const hasDbLayer = conn.engine !== "sqlite" && databases.length > 0;
+                        if (hasDbLayer) {
+                          const fq = dbFilter.trim().toLowerCase();
+                          const activeDbName = activeTab.activeDatabase ?? conn.database;
+                          const activeVisible = !fq || activeDbName.toLowerCase().includes(fq);
+                          // Collapsed, or the active database is filtered out of
+                          // the list above — either way, show no tree.
+                          if (dbTreeCollapsed || !activeVisible) return null;
+                        }
+                        return (
+                      <div style={{
+                        borderLeft: hasDbLayer ? "2px solid var(--border)" : "none",
+                        marginLeft: hasDbLayer ? 8 : 0,
+                      }}>
+
                       {schemaLoading && (
                         <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace" }}>
                           Loading schema…
@@ -6488,8 +6773,9 @@ function handleCellCommit(
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                schemaCache.current.delete(conn.id);
-                                loadSchema(conn);
+                                const db = activeTab.activeDatabase ?? conn.database;
+                                schemaCache.current.delete(`${conn.id}::${db}`);
+                                loadSchema(conn, db);
                               }}
                               style={{ background: "none", border: "none", color: "var(--text-disabled)",
                                 cursor: "pointer", fontSize: 10, fontFamily: "monospace", padding: "2px 4px" }}
@@ -7004,6 +7290,27 @@ function handleCellCommit(
                           </>
                           );
                         })()}
+                      </div>
+                        );
+                      })()}
+
+                      {/* Remaining databases, listed below the active database's
+                          tree so the active one expands inline between its
+                          siblings — true accordion behaviour. */}
+                      {conn.engine !== "sqlite" && databases.length > 0 && (() => {
+                        const activeDb = activeTab.activeDatabase ?? conn.database;
+                        const q = dbFilter.trim().toLowerCase();
+                        const filtered = q
+                          ? databases.filter(d => d.toLowerCase().includes(q))
+                          : databases;
+                        const activeIndex = filtered.indexOf(activeDb);
+                        if (activeIndex < 0) return null;
+                        const rest = filtered.slice(activeIndex + 1);
+                        if (rest.length === 0) return null;
+                        return (
+                          <>{rest.map(db => renderDbRow(conn, db, activeDb))}</>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>

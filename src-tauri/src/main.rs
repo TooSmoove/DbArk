@@ -91,7 +91,7 @@ const HASH_CONNECTIONMANAGER: &str = "c4c3aacb1d89f772e85085f7083e93a6a6699915f2
 const HASH_FILEQUERYENGINE: &str = "591827fc5e92b9c13bede2d291fb8911d46cd1e4b19a9610a0637672b5e7ca41";
 const HASH_QUERYEXECUTOR: &str = "280f576dfee8208e73e330c4a47944491dc65d6fd05a801457e7f7d073758017";
 const HASH_QUERYHISTORY: &str = "9281b3c9b64507c58ba46a4e36c42196dba0c33811fce05fc619b08fef9b34f4";
-const HASH_SCHEMAEXPLORER: &str = "8ba64267e86fd30737993374cb4347fa09de40fe9e7a592faec8a9c39a630055";
+const HASH_SCHEMAEXPLORER: &str = "516c6548bcb728a61fbad70154763a74f9b139feeb7737aa8bf151cdfb8394f3";
 const HASH_SSHTUNNEL: &str = "413e874b186089077a3aeb234a146f66aba73de42be13f6656a95fe9bbe3e3e8";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 const HASH_SQLCIPHER: &str = "895c0f5203352446f159d7780021b69b280dec6347c434c7a643ad6b7d0d883b";
@@ -557,6 +557,100 @@ async fn get_schema(
         ) -> *const c_char> = get_schema_explorer()
             .get(b"get_schema")
             .expect("get_schema");
+        let cs  = CString::new(connection_string.as_str()).unwrap();
+        let eng = CString::new(engine).unwrap();
+        let ptr = func(cs.as_ptr(), eng.as_ptr());
+        if ptr.is_null() { return Err("null response".to_string()); }
+        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    };
+
+    // Zero out connection string
+    unsafe {
+        let bytes = connection_string.as_bytes_mut();
+        for b in bytes.iter_mut() { *b = 0; }
+    }
+
+    result
+}
+
+// Enumerate the databases hosted on a server/cluster for one saved connection.
+// Mirrors get_schema's connection-string construction exactly (same credential
+// fetch, same SSH-tunnel handling, same per-engine string) and then calls the
+// schema-explorer DLL's `list_databases` export instead of `get_schema`. The
+// frontend calls this once when a connection is selected to populate the
+// database list, then calls get_schema(database = <chosen db>) on expand.
+#[tauri::command]
+async fn list_databases(
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    ssl_mode: Option<String>,
+    sql_instance: Option<String>,
+    windows_auth: Option<bool>,
+) -> Result<String, String> {
+    let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+    let instance = sql_instance.unwrap_or_default();
+    let win_auth = windows_auth.unwrap_or(false);
+
+    let is_sqlite = engine.to_lowercase() == "sqlite";
+
+    // SQLite has no databases-on-a-server concept — short-circuit with an empty
+    // list so the frontend renders tables directly with no database layer.
+    if is_sqlite {
+        return Ok("{\"databases\":[]}".to_string());
+    }
+
+    let password = if !win_auth {
+        let entry = keyring::Entry::new(&credential_ref, &username)
+            .map_err(|e| e.to_string())?;
+        let pw = match entry.get_password() {
+            Ok(p)  => p,
+            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
+            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+        };
+        if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
+            return Err(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref));
+        }
+        pw
+    } else {
+        String::new()
+    };
+
+    let mut connection_string = match engine.to_lowercase().as_str() {
+        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};",
+            host, port, database, username, password),
+        "postgres"    => format!("Host={};Port={};Database={};Username={};Password={};",
+            host, port, database, username, password),
+        "cockroachdb"  => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Allow;",
+            host, port, database, username, password),
+        "sqlserver" => {
+            let server = if !instance.is_empty() {
+                format!("{}\\{}", host, instance)
+            } else {
+                format!("{},{}", host, port)
+            };
+            if win_auth {
+                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
+                    server, database)
+            } else {
+                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
+                    sqlserver_odbc_driver(),
+                    server, database, username, password)
+            }
+        },
+        _ => return Err(format!("Unsupported engine: {}", engine)),
+    };
+
+    let result = unsafe {
+        let func: libloading::Symbol<unsafe extern "C" fn(
+            *const c_char, *const c_char,
+        ) -> *const c_char> = get_schema_explorer()
+            .get(b"list_databases")
+            .expect("list_databases");
         let cs  = CString::new(connection_string.as_str()).unwrap();
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
@@ -2002,6 +2096,7 @@ fn main() {
             list_db_tables,
             query_file_with_db,
             get_schema,
+            list_databases,
             add_history_entry,
             get_history,
             clear_history,
