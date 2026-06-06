@@ -1560,7 +1560,7 @@ internal static class SqlServerOdbc
     [DllImport(OdbcDll)] static extern short SQLExecDirectW(IntPtr s, [MarshalAs(UnmanagedType.LPWStr)] string q, int l);
     [DllImport(OdbcDll)] static extern short SQLNumResultCols(IntPtr s, out short n);
     [DllImport(OdbcDll)] static extern short SQLFetch(IntPtr s);
-    [DllImport(OdbcDll)] static extern short SQLGetData(IntPtr s, short c, short t, IntPtr v, int b, out int ind);
+    [DllImport(OdbcDll)] static extern short SQLGetData(IntPtr s, short c, short t, IntPtr v, IntPtr b, out IntPtr ind);
     [DllImport(OdbcDll)] static extern short SQLFreeHandle(short t, IntPtr h);
     [DllImport(OdbcDll)] static extern short SQLDisconnect(IntPtr h);
 
@@ -1596,9 +1596,10 @@ internal static class SqlServerOdbc
                     var row = new string?[colCount];
                     for (short i = 1; i <= colCount; i++)
                     {
-                        SQLGetData(hStmt, i, SQL_C_WCHAR, buf, 4096, out int ind);
+                        SQLGetData(hStmt, i, SQL_C_WCHAR, buf, (IntPtr)4096, out IntPtr indPtr);
+                        long ind = indPtr.ToInt64();
                         row[i - 1] = ind == SQL_NULL_DATA ? null
-                            : Marshal.PtrToStringUni(buf, ind / 2);
+                            : Marshal.PtrToStringUni(buf, (int)(ind / 2));
                     }
                     results.Add(row);
                 }
