@@ -1167,6 +1167,7 @@ function ResultsGrid({
     data: EMPTY_ROWS,        // header + sort state only — body renders from sortedRows
     columns,
     getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
     onSortingChange: setSorting,
     state: { sorting },
     manualSorting: true,     // we sort sortedRows ourselves; don't let TanStack try
