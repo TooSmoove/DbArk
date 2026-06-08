@@ -16,6 +16,33 @@ public static class FileQueryEngineLib
     private const int DUCKDB_RESULT_SIZE = 64;
     private const int DUCKDB_SUCCESS = 0;
 
+    // Resolve duckdb.dll from the app's natives\ folder regardless of the process
+    // working directory. Bare-name DllImport searches the exe dir + PATH but NOT the
+    // natives\ subfolder, so an installed app (CWD = System32) failed to load it.
+    // SetDllImportResolver fixes all duckdb.dll imports in one place — no per-import
+    // change, and removes the copy-beside-exe workaround.
+    static FileQueryEngineLib()
+    {
+        NativeLibrary.SetDllImportResolver(
+            typeof(FileQueryEngineLib).Assembly,
+            (libraryName, assembly, searchPath) =>
+            {
+                if (!libraryName.Equals(DuckDbDll, StringComparison.OrdinalIgnoreCase))
+                    return IntPtr.Zero; // not ours — let the default resolver handle it
+
+                // The DLLs live in <assembly dir>\natives\ in every build target.
+                var asmDir = System.IO.Path.GetDirectoryName(AppContext.BaseDirectory) ?? "";
+                var candidate = System.IO.Path.Combine(asmDir, "natives", DuckDbDll);
+                if (System.IO.File.Exists(candidate) &&
+                    NativeLibrary.TryLoad(candidate, out var handle))
+                    return handle;
+
+                // Fall back to the default search (e.g. DLL sitting beside the exe in dev).
+                return NativeLibrary.TryLoad(DuckDbDll, assembly, searchPath, out var fallback)
+                    ? fallback : IntPtr.Zero;
+            });
+    }
+
     [DllImport(DuckDbDll, CallingConvention = CallingConvention.Cdecl)]
     private static extern int duckdb_open(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? path,

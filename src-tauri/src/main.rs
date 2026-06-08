@@ -50,6 +50,45 @@ fn sqlserver_odbc_driver() -> &'static str {
     .as_str()
 }
 
+/// Builds the ODBC connection string for a SQL Server connection.
+/// SINGLE SOURCE OF TRUTH — every SQL Server call site must use this so the
+/// driver name, instance/port form, auth mode, and Encrypt/SSL handling can
+/// never drift between code paths again.
+fn build_sqlserver_odbc(
+    host: &str,
+    port: u16,
+    instance: &str,
+    database: &str,
+    username: &str,
+    password: &str,
+    win_auth: bool,
+    ssl_mode: &str,
+) -> String {
+    // Named instance => host\instance; otherwise host,port (ODBC comma form).
+    let server = if !instance.is_empty() {
+        format!("{}\\{}", host, instance)
+    } else {
+        format!("{},{}", host, port)
+    };
+    let encrypt = match ssl_mode {
+        "require"     => "yes",
+        "verify-full" => "strict",
+        _             => "no",
+    };
+    let driver = sqlserver_odbc_driver();
+    if win_auth {
+        format!(
+            "Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
+            driver, server, database, encrypt
+        )
+    } else {
+        format!(
+            "Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
+            driver, server, database, username, password, encrypt
+        )
+    }
+}
+
 #[cfg(windows)]
 fn odbc_driver_installed(name: &str) -> bool {
     use winreg::enums::HKEY_LOCAL_MACHINE;
@@ -88,10 +127,10 @@ fn verify_dll(path: &str, expected_hex: &str) -> Result<(), String> {
 
 // DLL integrity hashes — regenerate after every DLL rebuild
 const HASH_CONNECTIONMANAGER: &str = "c4c3aacb1d89f772e85085f7083e93a6a6699915f2ec27b18d6ce1988fb67876";
-const HASH_FILEQUERYENGINE: &str = "591827fc5e92b9c13bede2d291fb8911d46cd1e4b19a9610a0637672b5e7ca41";
-const HASH_QUERYEXECUTOR: &str = "280f576dfee8208e73e330c4a47944491dc65d6fd05a801457e7f7d073758017";
+const HASH_FILEQUERYENGINE: &str = "645e8d0b9cb8438a1f3f8069f283d45ac3fb89b4169e6b8d36f513929cfc0d19";
+const HASH_QUERYEXECUTOR: &str = "a25b5d7e09f1bdf232b91a8e7fbc7acc49f9b7bdf9b114e51c11598a43c73481";
 const HASH_QUERYHISTORY: &str = "9281b3c9b64507c58ba46a4e36c42196dba0c33811fce05fc619b08fef9b34f4";
-const HASH_SCHEMAEXPLORER: &str = "5838ee4dcc6a95e8fc8e9ad59208bbc6dea7d5e0f321bfdee3ccf376d1cb7c61";
+const HASH_SCHEMAEXPLORER: &str = "003ace4523587c8895a755174feeb6995a57ce715eb341c44d420ede9dc4ce1f";
 const HASH_SSHTUNNEL: &str = "413e874b186089077a3aeb234a146f66aba73de42be13f6656a95fe9bbe3e3e8";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 const HASH_SQLCIPHER: &str = "895c0f5203352446f159d7780021b69b280dec6347c434c7a643ad6b7d0d883b";
@@ -156,17 +195,21 @@ fn get_sqlcipher() -> &'static libloading::Library {
 }
 
 #[tauri::command]
-async fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>) -> String {
+async fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>, row_limit: Option<u32>) -> String {
     let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
+    // Row cap from the user's resultRowLimit setting; passed as a string over FFI
+    // (like read_only). C# clamps a zero/garbage value to its default.
+    let row_limit_str = row_limit.unwrap_or(10_000).to_string();
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char, *const c_char, *const c_char,
+            *const c_char, *const c_char, *const c_char, *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor().get(b"execute_query").expect("execute_query");
         let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
         let c_sql    = CString::new(sql).unwrap_or_default();
         let c_engine = CString::new(engine).unwrap_or_default();
         let c_ro     = CString::new(read_only_str).unwrap_or_default();
-        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr());
+        let c_limit  = CString::new(row_limit_str).unwrap_or_default();
+        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr(), c_limit.as_ptr());
         if ptr.is_null() { "{\"error\":\"null response\"}".to_string() }
         else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     };
@@ -343,27 +386,9 @@ fn build_connection_string(
             format!("Host={};Port={};Database={};Username={};Password={};{}",
                 effective_host, effective_port, database, username, password, ssl_param)
         },
-        "sqlserver" => {
-            let server = if !instance.is_empty() {
-                format!("{}\\{}", effective_host, instance)
-            } else {
-                format!("{},{}", effective_host, effective_port)
-            };
-            let encrypt = match ssl.as_str() {
-                "require"     => "yes",
-                "verify-full" => "strict",
-                _             => "no",
-            };
-            if win_auth {
-                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database, encrypt)
-            } else {
-                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database, username, password, encrypt)
-            }
-        },
+        "sqlserver" => build_sqlserver_odbc(
+            &effective_host, effective_port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         "sqlite" => format!("Data Source={}", database),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
@@ -401,9 +426,13 @@ async fn get_file_schema(file_path: String) -> String {
 async fn list_db_tables(
     credential_ref: String, engine: String, host: String,
     port: u16, database: String, username: String,
+    ssl_mode: Option<String>, sql_instance: Option<String>, windows_auth: Option<bool>,
 ) -> Result<String, String> {
-    // SQLite has no stored credential — skip the keychain fetch for it.
-    let password = if engine.to_lowercase() == "sqlite" {
+    let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+    let instance = sql_instance.unwrap_or_default();
+    let win_auth = windows_auth.unwrap_or(false);
+    // No keychain password for SQLite, nor for Windows-auth (uses the OS identity).
+    let password = if engine.to_lowercase() == "sqlite" || win_auth {
         String::new()
     } else {
         let entry = keyring::Entry::new(&credential_ref, &username)
@@ -414,6 +443,9 @@ async fn list_db_tables(
         "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
         "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
         "sqlite"                   => format!("Data Source={}", database),
+        "sqlserver"                => build_sqlserver_odbc(
+            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         _                          => return Err(format!("Unsupported engine: {}", engine)),
     };
     let result = unsafe {
@@ -438,11 +470,15 @@ async fn query_file_with_db(
     file_path: String, sql: String, credential_ref: String,
     engine: String, host: String, port: u16,
     database: String, username: String, table_names: String,
+    ssl_mode: Option<String>, sql_instance: Option<String>, windows_auth: Option<bool>,
 ) -> Result<String, String> {
-    // SQLite has no stored credential — skip the keychain fetch for it. This
-    // path powers the flat-file-join feature; joining a CSV against a live
-    // SQLite DB must not require a (nonexistent) SQLite password.
-    let password = if engine.to_lowercase() == "sqlite" {
+    let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+    let instance = sql_instance.unwrap_or_default();
+    let win_auth = windows_auth.unwrap_or(false);
+    // No keychain password for SQLite, nor for Windows-auth (uses the OS identity).
+    // This path powers the flat-file-join: joining a CSV against a live SQLite DB
+    // (or a Windows-auth SQL Server) must not require a (nonexistent) password.
+    let password = if engine.to_lowercase() == "sqlite" || win_auth {
         String::new()
     } else {
         let entry = keyring::Entry::new(&credential_ref, &username)
@@ -453,6 +489,9 @@ async fn query_file_with_db(
         "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
         "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
         "sqlite"                   => format!("Data Source={}", database),
+        "sqlserver"                => build_sqlserver_odbc(
+            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         _                          => return Err(format!("Unsupported engine: {}", engine)),
     };
     let result = unsafe {
@@ -532,22 +571,9 @@ async fn get_schema(
         "cockroachdb"  => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Allow;",
             host, port, database, username, password),
         "sqlite"   => format!("Data Source={}", database),
-        "sqlserver" => {
-            let server = if !instance.is_empty() {
-                format!("{}\\{}", host, instance)
-            } else {
-                format!("{},{}", host, port)
-            };
-            if win_auth {
-                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database)
-            } else {
-                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database, username, password)
-            }
-        },
+        "sqlserver" => build_sqlserver_odbc(
+            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -626,22 +652,9 @@ async fn list_databases(
             host, port, database, username, password),
         "cockroachdb"  => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Allow;",
             host, port, database, username, password),
-        "sqlserver" => {
-            let server = if !instance.is_empty() {
-                format!("{}\\{}", host, instance)
-            } else {
-                format!("{},{}", host, port)
-            };
-            if win_auth {
-                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database)
-            } else {
-                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database, username, password)
-            }
-        },
+        "sqlserver" => build_sqlserver_odbc(
+            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -754,20 +767,9 @@ async fn test_connection(
                 host, port, database, username, password, ssl_param)
         },
         "sqlite" => format!("Data Source={}", database),
-        "sqlserver" => {
-            let server = if !instance.is_empty() {
-                format!("{}\\{}", host, instance)
-            } else {
-                format!("{},{}", host, port)
-            };
-            if win_auth {
-                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(), server, database)
-            } else {
-                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(), server, database, username, password)
-            }
-        },
+        "sqlserver" => build_sqlserver_odbc(
+            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -1132,7 +1134,7 @@ async fn get_object_definition(
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
     let schema   = schema_name.unwrap_or_else(|| "dbo".to_string());
-    let _ssl     = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+    let ssl     = ssl_mode.unwrap_or_else(|| "prefer".to_string());
 
     // SQLite — handle entirely in Rust via execute_query
     // avoids P/Invoke conflicts with the SchemaExplorer DLL
@@ -1225,22 +1227,9 @@ async fn get_object_definition(
         "postgres" | "cockroachdb" => format!(
             "Host={};Port={};Database={};Username={};Password={};",
             host, port, database, username, password),
-        "sqlserver" => {
-            let server = if !instance.is_empty() {
-                format!("{}\\{}", host, instance)
-            } else {
-                format!("{},{}", host, port)
-            };
-            if win_auth {
-                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database)
-            } else {
-                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database, username, password)
-            }
-        },
+        "sqlserver" => build_sqlserver_odbc(
+            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -1368,7 +1357,7 @@ async fn drop_object(
     let win_auth   = windows_auth.unwrap_or(false);
     let schema     = schema_name.unwrap_or_else(|| "dbo".to_string());
     let table      = table_name.unwrap_or_default();
-    let _ssl       = ssl_mode.unwrap_or_else(|| "prefer".to_string());
+    let ssl       = ssl_mode.unwrap_or_else(|| "prefer".to_string());
 
     // SQLite has no stored credential — skip the keychain fetch for it.
     let password = if !win_auth && engine.to_lowercase() != "sqlite" {
@@ -1387,22 +1376,9 @@ async fn drop_object(
             "Host={};Port={};Database={};Username={};Password={};",
             host, port, database, username, password),
         "sqlite"   => format!("Data Source={}", database),
-        "sqlserver" => {
-            let server = if !instance.is_empty() {
-                format!("{}\\{}", host, instance)
-            } else {
-                format!("{},{}", host, port)
-            };
-            if win_auth {
-                format!("Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database)
-            } else {
-                format!("Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt=no;TrustServerCertificate=yes;",
-                    sqlserver_odbc_driver(),
-                    server, database, username, password)
-            }
-        },
+        "sqlserver" => build_sqlserver_odbc(
+            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
+        ),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 

@@ -1310,15 +1310,51 @@ public static class SchemaExplorerLib
             return sb.ToString();
         }
 
-        // For SPs, functions, views, triggers — use OBJECT_DEFINITION
+        // For SPs, functions, views, triggers — use OBJECT_DEFINITION.
+        // NOTE: OBJECT_DEFINITION returns NULL (not an error) in three different
+        // cases — object missing, caller lacks VIEW DEFINITION, or object is
+        // encrypted. Disambiguate so the message tells the user what to DO.
         var rows = SqlServerOdbc.Query(connectionString,
             $"SELECT OBJECT_DEFINITION(OBJECT_ID('{schemaName}.{objectName}'))");
 
-        var def = rows.FirstOrDefault()?[0]
-            ?? throw new Exception($"No definition found for {objectName}. " +
-                "The object may be encrypted or you may not have VIEW DEFINITION permission.");
+        var def = rows.FirstOrDefault()?[0];
+        if (def != null)
+            return def;
 
-        return def;
+        // Definition came back NULL — ask the server why so the error is actionable.
+        // HAS_PERMS_BY_NAME answers the permission question for the *current* login
+        // against *this* object, and a least-privilege user can call it on itself.
+        var diag = SqlServerOdbc.Query(connectionString, $@"
+            SELECT
+                CASE WHEN OBJECT_ID('{schemaName}.{objectName}') IS NULL THEN 0 ELSE 1 END,
+                HAS_PERMS_BY_NAME('{schemaName}.{objectName}', 'OBJECT', 'VIEW DEFINITION')")
+            .FirstOrDefault();
+
+        var objIdVisible = diag != null && diag[0] == "1";
+        var hasPerm = diag != null && diag[1] == "1";
+
+        // IMPORTANT: OBJECT_ID() returns NULL both when an object is genuinely
+        // missing AND when the caller lacks any permission to see it (SQL Server
+        // metadata-visibility hides objects from unprivileged logins). So a NULL
+        // OBJECT_ID does NOT prove "missing". HAS_PERMS_BY_NAME is reliable
+        // regardless of metadata visibility, so check permission FIRST.
+        if (!hasPerm)
+            throw new Exception(
+                $"You don't have permission to view the definition of '{schemaName}.{objectName}'. " +
+                "This needs the VIEW DEFINITION permission, which is separate from read/execute access. " +
+                $"Ask your DBA to run:  GRANT VIEW DEFINITION ON OBJECT::{schemaName}.{objectName} TO [<your_login>];  " +
+                "— or, for every object in the database:  GRANT VIEW DEFINITION TO [<your_login>];");
+
+        // We DO have permission, yet OBJECT_ID is NULL → the object is really gone.
+        if (!objIdVisible)
+            throw new Exception(
+                $"Object '{schemaName}.{objectName}' was not found. It may have been " +
+                "renamed or dropped — try refreshing the schema tree.");
+
+        // Exists and permitted, but definition still NULL → encrypted.
+        throw new Exception(
+            $"The definition of '{schemaName}.{objectName}' is unavailable because the object " +
+            "was created WITH ENCRYPTION. Encrypted definitions cannot be retrieved by any client.");
     }
 
     // ---- MYSQL ----------------------------------------------------

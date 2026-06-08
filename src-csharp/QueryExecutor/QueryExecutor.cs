@@ -15,8 +15,16 @@ using System.Text.RegularExpressions;
 
 public static class QueryExecutor
 {
+    // Per-invocation result row cap, set from the user resultRowLimit setting
+    // at the top of ExecuteQuery before any executor runs. Safe as a static:
+    // FFI calls are serialized one at a time, so there is no concurrent writer.
+    public static int ActiveRowLimit = 10_000;
+    // Soft guard: when the cap is high or unlimited (0), results past this size are
+    // FLAGGED (not truncated) so the UI can warn that performance may suffer.
+    public const int LargeResultThreshold = 500_000;
+
     private static readonly System.Collections.Generic.HashSet<string> BatchScopedDdlObjects = new(System.StringComparer.Ordinal) { "PROCEDURE", "PROC", "FUNCTION", "VIEW", "TRIGGER" };
-    
+
     // ── NativeAOT entry points ──────────────────────────────────────────────
 
     // NOTE: test_connection is a legacy pointer-validity check only.
@@ -119,7 +127,8 @@ public static class QueryExecutor
         IntPtr connectionStringPtr,
         IntPtr sqlPtr,
         IntPtr enginePtr,
-        IntPtr readOnlyPtr)
+        IntPtr readOnlyPtr,
+        IntPtr rowLimitPtr)
     {
         try
         {
@@ -127,6 +136,11 @@ public static class QueryExecutor
             var sql = Marshal.PtrToStringUTF8(sqlPtr) ?? "";
             var engine = Marshal.PtrToStringUTF8(enginePtr) ?? "";
             var readOnly = Marshal.PtrToStringUTF8(readOnlyPtr) == "true";
+
+            // Result row cap from the user setting (string over FFI, like readOnly).
+            // Clamp to a floor so a bad/zero value cannot empty the grid.
+            ActiveRowLimit = int.TryParse(Marshal.PtrToStringUTF8(rowLimitPtr), out var rl) && rl > 0
+                ? rl : 10_000;
 
             var engineLower = engine.ToLowerInvariant();
             bool useBatchPath =
@@ -512,7 +526,8 @@ public static class QueryExecutor
             var columns = new List<string>();
             var rows = new List<List<string?>>();
             int rowCount = 0;
-            const int rowLimit = 10_000;
+            int rowLimit = ActiveRowLimit;
+            bool truncated = false;
 
             IntPtr sqlBuf = Marshal.StringToCoTaskMemUTF8(sql);
             IntPtr stmt;
@@ -528,7 +543,7 @@ public static class QueryExecutor
             try
             {
                 bool firstRow = true;
-                while (sqlite3_step(stmt) == SQLITE_ROW && rowCount < rowLimit)
+                while (sqlite3_step(stmt) == SQLITE_ROW && (rowLimit == 0 || rowCount < rowLimit))
                 {
                     int colCount = sqlite3_column_count(stmt);
 
@@ -560,6 +575,13 @@ public static class QueryExecutor
                     rows.Add(row);
                     rowCount++;
                 }
+                // If we stopped exactly at a positive cap, peek one more row to
+                // distinguish "exactly N rows" from "truncated at N".
+                if (rowLimit > 0 && rowCount >= rowLimit
+                    && sqlite3_step(stmt) == SQLITE_ROW)
+                {
+                    truncated = true;
+                }
             }
             finally
             {
@@ -571,6 +593,8 @@ public static class QueryExecutor
                 Columns = columns,
                 Rows = rows,
                 RowCount = rowCount,
+                Truncated = truncated,
+                LargeResult = rowCount >= LargeResultThreshold && (rowLimit == 0 || rowLimit > LargeResultThreshold),
             };
         }
         finally
@@ -591,7 +615,7 @@ public static class QueryExecutor
         var results = new List<QueryResult>();
         bool anyResultSet = false;
         int totalChanges = 0;
-        const int rowLimit = 10_000;
+        int rowLimit = ActiveRowLimit;
 
         // Persistent UTF-8 buffer so the tail pointer stays valid across the walk.
         IntPtr sqlBuf = Marshal.StringToCoTaskMemUTF8(sql);
@@ -633,7 +657,7 @@ public static class QueryExecutor
                     int stepRc;
                     while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW)
                     {
-                        if (rowCount >= rowLimit) { truncated = true; break; }
+                        if (rowLimit > 0 && rowCount >= rowLimit) { truncated = true; break; }
 
                         if (firstRow)
                         {
@@ -675,6 +699,7 @@ public static class QueryExecutor
                             Rows = rows,
                             RowCount = rowCount,
                             Truncated = truncated,
+                            LargeResult = rowCount >= LargeResultThreshold && (rowLimit == 0 || rowLimit > LargeResultThreshold),
                         });
                     }
                     else
@@ -978,7 +1003,7 @@ public static class QueryExecutor
     {
         var columns = new List<string>();
         var rows = new List<List<string?>>();
-        const int rowLimit = 10_000;
+        int rowLimit = ActiveRowLimit;
         bool truncated = false;
 
         for (int i = 0; i < reader.FieldCount; i++)
@@ -987,7 +1012,7 @@ public static class QueryExecutor
         int rowCount = 0;
         while (reader.Read())
         {
-            if (rowCount >= rowLimit) { truncated = true; break; }
+            if (rowLimit > 0 && rowCount >= rowLimit) { truncated = true; break; }
             var row = new List<string?>();
             for (int i = 0; i < reader.FieldCount; i++)
                 row.Add(reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString());
@@ -1001,6 +1026,7 @@ public static class QueryExecutor
             Rows = rows,
             RowCount = rowCount,
             Truncated = truncated,
+            LargeResult = rowCount >= LargeResultThreshold && (rowLimit == 0 || rowLimit > LargeResultThreshold),
         };
     }
 
@@ -1544,6 +1570,7 @@ public class QueryResult
     [JsonPropertyName("rows")] public List<List<string?>> Rows { get; set; } = new();
     [JsonPropertyName("rowCount")] public int RowCount { get; set; }
     [JsonPropertyName("truncated")] public bool Truncated { get; set; }
+    [JsonPropertyName("largeResult")] public bool LargeResult { get; set; }
     [JsonPropertyName("error")] public string? Error { get; set; }
     [JsonPropertyName("isMessage")] public bool IsMessage { get; set; }
     [JsonPropertyName("sql")] public string? Sql { get; set; }

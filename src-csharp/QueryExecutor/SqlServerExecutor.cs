@@ -161,16 +161,23 @@ public static class SqlServerExecutor
 
         // Fetch rows
         var rows = new List<List<string?>>();
-        int rowLimit = 10_000;
+        int rowLimit = QueryExecutor.ActiveRowLimit;
         int rowCount = 0;
         bool truncated = false;
 
         IntPtr dataBuf = Marshal.AllocHGlobal(SQL_COLUMN_BUFFER_SIZE);
         try
         {
-            while (SQLFetch(hStmt) == SQL_SUCCESS)
+            // ODBC has TWO success codes: SQL_SUCCESS and SQL_SUCCESS_WITH_INFO.
+            // Treating only SQL_SUCCESS as "keep going" drops the fetch loop the
+            // moment a row returns SUCCESS_WITH_INFO (informational diagnostic,
+            // truncation notice, etc.), silently truncating the result set. Accept
+            // both; the loop still terminates on SQL_NO_DATA (100). Mirrors the
+            // SchemaExplorer.SqlServerOdbc.Query fix.
+            short fetchRc;
+            while ((fetchRc = SQLFetch(hStmt)) == SQL_SUCCESS || fetchRc == SQL_SUCCESS_WITH_INFO)
             {
-                if (rowCount >= rowLimit) { truncated = true; break; }
+                if (rowLimit > 0 && rowCount >= rowLimit) { truncated = true; break; }
 
                 var row = new List<string?>();
                 for (short i = 1; i <= colCount; i++)
@@ -207,7 +214,8 @@ public static class SqlServerExecutor
             Columns = columns,
             Rows = rows,
             RowCount = rowCount,
-            Truncated = truncated
+            Truncated = truncated,
+            LargeResult = rowCount >= QueryExecutor.LargeResultThreshold && (rowLimit == 0 || rowLimit > QueryExecutor.LargeResultThreshold),
         };
 
         return Marshal.StringToCoTaskMemUTF8(
@@ -438,16 +446,23 @@ public static class SqlServerExecutor
         finally { Marshal.FreeHGlobal(nameBuf); }
 
         var rows = new List<List<string?>>();
-        int rowLimit = 10_000;
+        int rowLimit = QueryExecutor.ActiveRowLimit;
         int rowCount = 0;
         bool truncated = false;
 
         IntPtr dataBuf = Marshal.AllocHGlobal(SQL_COLUMN_BUFFER_SIZE);
         try
         {
-            while (SQLFetch(hStmt) == SQL_SUCCESS)
+            // ODBC has TWO success codes: SQL_SUCCESS and SQL_SUCCESS_WITH_INFO.
+            // Treating only SQL_SUCCESS as "keep going" drops the fetch loop the
+            // moment a row returns SUCCESS_WITH_INFO (informational diagnostic,
+            // truncation notice, etc.), silently truncating the result set. Accept
+            // both; the loop still terminates on SQL_NO_DATA (100). Mirrors the
+            // SchemaExplorer.SqlServerOdbc.Query fix.
+            short fetchRc;
+            while ((fetchRc = SQLFetch(hStmt)) == SQL_SUCCESS || fetchRc == SQL_SUCCESS_WITH_INFO)
             {
-                if (rowCount >= rowLimit) { truncated = true; break; }
+                if (rowLimit > 0 && rowCount >= rowLimit) { truncated = true; break; }
                 var row = new List<string?>();
                 for (short i = 1; i <= colCount; i++)
                 {
@@ -554,6 +569,7 @@ public static class SqlServerExecutor
             Rows = rows,
             RowCount = rowCount,
             Truncated = truncated,
+            LargeResult = rowCount >= QueryExecutor.LargeResultThreshold && (rowLimit == 0 || rowLimit > QueryExecutor.LargeResultThreshold),
         };
     }
 }

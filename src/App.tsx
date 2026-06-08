@@ -57,6 +57,7 @@ interface QueryResult {
   rows:      (string | null)[][];
   rowCount:  number;
   truncated?: boolean;
+  largeResult?: boolean;
   error?:    string;
   isMessage?: boolean;
   sql?:      string;  
@@ -235,6 +236,39 @@ interface Tab {
   activeDatabase?: string;
 }
 
+function Spinner({ size = 12 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      style={{ display: "inline-block", verticalAlign: "middle" }}
+      aria-hidden="true"
+    >
+      {/* faint full ring */}
+      <circle
+        cx="12" cy="12" r="9"
+        fill="none" stroke="currentColor"
+        strokeOpacity="0.25" strokeWidth="3"
+      />
+      {/* bright arc that rotates */}
+      <path
+        d="M12 3 a9 9 0 0 1 9 9"
+        fill="none" stroke="currentColor"
+        strokeWidth="3" strokeLinecap="round"
+      >
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from="0 12 12" to="360 12 12"
+          dur="0.7s" repeatCount="indefinite"
+        />
+      </path>
+    </svg>
+  );
+}
+
+
 function createTab(id?: string): Tab {
   return {
     id:           id ?? `tab-${Date.now()}`,
@@ -325,7 +359,7 @@ interface AppSettings {
 const DEFAULT_SETTINGS: AppSettings = {
   queryTimeoutSecs:      30,
   lockTimeoutMins:       15,
-  resultRowLimit:        10_000,
+  resultRowLimit:        50_000,
   historyRetentionDays:  90,
   resultClearMins:       5,
   auditLogEnabled:       false,
@@ -1020,6 +1054,9 @@ function AddConnectionForm({
   );
 }
 
+// Stable identity so the header-only table doesn't rebuild each render.
+const EMPTY_ROWS: (string | null)[][] = [];
+
 // ---- Results grid -----------------------------------------
 function ResultsGrid({
   result,
@@ -1067,19 +1104,22 @@ function ResultsGrid({
   const debouncedFilter = useDebounce(filterText, 300);
   const [sorting, setSorting] = useState<import("@tanstack/react-table").SortingState>([]);
 
-  const columnHelper = createColumnHelper<(string | null)[]>();
+  const columnHelper = useMemo(() => createColumnHelper<(string | null)[]>(), []);
 
-  const columns = result.columns.map((col, i) =>
-    columnHelper.accessor((row) => row[i], {
-      id: col && col.trim() ? `${col}_${i}` : `col_${i}`, // ← always unique
-      header: col && col.trim() ? col : `(col ${i + 1})`,  // ← friendly display name
-      cell: (info) => {
-        const val = info.getValue();
-        if (val === null)
-          return <span style={{ color: "var(--text-tertiary)", fontStyle: "italic" }}>NULL</span>;
-        return val;
-      },
-    })
+  const columns = useMemo(
+    () => result.columns.map((col, i) =>
+      columnHelper.accessor((row) => row[i], {
+        id: col && col.trim() ? `${col}_${i}` : `col_${i}`,
+        header: col && col.trim() ? col : `(col ${i + 1})`,
+        cell: (info) => {
+          const val = info.getValue();
+          if (val === null)
+            return <span style={{ color: "var(--text-tertiary)", fontStyle: "italic" }}>NULL</span>;
+          return val;
+        },
+      })
+    ),
+    [result.columns, columnHelper]
   );
 
   // Client-side filter — check if any cell in the row contains the filter text
@@ -1094,19 +1134,46 @@ function ResultsGrid({
     );
   }, [debouncedFilter, result.rows]);
 
+  // Sort the plain array ourselves so we never hand 600k rows to TanStack's
+  // row model (the source of the post-load freeze). Header UI + sort state
+  // still come from the table below, which now holds zero data rows.
+  const sortedRows = useMemo(() => {
+    if (sorting.length === 0) return filteredRows;
+    const { id, desc } = sorting[0];
+    const colIdx = result.columns.findIndex((c, i) =>
+      (c && c.trim() ? `${c}_${i}` : `col_${i}`) === id);
+    if (colIdx < 0) return filteredRows;
+
+    // Decide numeric vs string once from the first non-null sample, so a
+    // numeric column sorts 2 < 10 rather than lexically.
+    const sample = filteredRows.find(r => r[colIdx] != null)?.[colIdx];
+    const numeric = sample != null && sample.trim() !== "" && !Number.isNaN(Number(sample));
+
+    const copy = filteredRows.slice();
+    copy.sort((a, b) => {
+      const av = a[colIdx], bv = b[colIdx];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;           // nulls last
+      if (bv == null) return -1;
+      const cmp = numeric
+        ? Number(av) - Number(bv)
+        : av.localeCompare(bv, undefined, { numeric: true });
+      return desc ? -cmp : cmp;
+    });
+    return copy;
+  }, [filteredRows, sorting, result.columns]);
+
   const table = useReactTable({
-    data: filteredRows,
+    data: EMPTY_ROWS,        // header + sort state only — body renders from sortedRows
     columns,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
     onSortingChange: setSorting,
     state: { sorting },
+    manualSorting: true,     // we sort sortedRows ourselves; don't let TanStack try
   });
 
-  const { rows } = table.getRowModel();
-
   const rowVirtualiser = useVirtualizer({
-    count: rows.length,
+    count: sortedRows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 32,
     overscan: 20,
@@ -1155,7 +1222,7 @@ function ResultsGrid({
         {debouncedFilter && (
           <>
             <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace" }}>
-              {rows.length} of {result.rowCount} rows
+              {sortedRows.length} of {result.rowCount} rows
             </span>
             <button
               onClick={() => setFilterText("")}
@@ -1265,26 +1332,26 @@ function ResultsGrid({
               <tr><td style={{ height: paddingTop }} colSpan={columns.length} /></tr>
             )}
             {virtualRows.map((virtualRow) => {
-              const row = rows[virtualRow.index];
+              const rowIdx  = virtualRow.index;
+              const dataRow = sortedRows[rowIdx];
               return (
-                <tr key={row.id}>
-                  {row.getVisibleCells().map((cell, colIdx) => {
-                  const rowIdx     = virtualRow.index;
+                <tr key={virtualRow.key}>
+                  {result.columns.map((_, colIdx) => {
+                  const cellId     = `${rowIdx}_${colIdx}`;
                   const isEditing  = editingCell?.rowIndex === rowIdx
                                   && editingCell?.colIndex === colIdx;
                   const pending    = pendingEdits.find(
                     e => e.rowIndex === rowIdx && e.colIndex === colIdx);
-                  const cellValue  = pending ? pending.newValue
-                                  : cell.getValue() as string | null;
+                  const rawValue   = dataRow[colIdx] as string | null;
+                  const cellValue  = pending ? pending.newValue : rawValue;
                   const isModified = !!pending;
 
                   return (
                     <td
-                      key={cell.id}
+                      key={cellId}
                       onDoubleClick={() => {
                         if (!canEdit) return;
-                        const val = cell.getValue() as string | null;
-                        if (val === null && !hasPk) return;
+                        if (rawValue === null && !hasPk) return;
                         onCellEdit(rowIdx, colIdx);
                       }}
                       title={
@@ -1306,23 +1373,22 @@ function ResultsGrid({
                           ? "var(--accent-bg)"
                           : isModified
                           ? "var(--warning-bg)"
-                          : copiedCell === cell.id
+                          : copiedCell === cellId
                           ? "var(--accent-bg)"
                           : virtualRow.index % 2 === 0 ? "var(--bg)" : "var(--surface)",
                         transition: "background .15s",
                       }}
                       onClick={() => {
                         if (isEditing) return;
-                        const val = cell.getValue() as string | null;
-                        if (val === null) return;
+                        if (rawValue === null) return;
                         import("@tauri-apps/plugin-clipboard-manager").then(
                           ({ writeText, readText, clear }) => {
-                            writeText(val).then(() => {
-                              setCopiedCell(cell.id);
+                            writeText(rawValue).then(() => {
+                              setCopiedCell(cellId);
                               setTimeout(() => setCopiedCell(null), 800);
                               setTimeout(() => {
                                 readText().then(current => {
-                                  if (current === val) clear().catch(() => {});
+                                  if (current === rawValue) clear().catch(() => {});
                                 }).catch(() => {});
                               }, 60_000);
                             }).catch(() => {});
@@ -1357,10 +1423,8 @@ function ResultsGrid({
                             }
                           }}
                           onBlur={e => {
-                            // Commit on blur if value changed
                             const newVal = e.target.value;
-                            const orig   = cell.getValue() as string | null;
-                            if (newVal !== (orig ?? "")) {
+                            if (newVal !== (rawValue ?? "")) {
                               onCellCommit(rowIdx, colIdx, newVal);
                             } else {
                               onCellCancel();
@@ -1387,7 +1451,7 @@ function ResultsGrid({
           </tbody>
         </table>
 
-        {rows.length === 0 && filterText && (
+        {sortedRows.length === 0 && filterText && (
           <div style={{ padding: "24px 14px", color: "var(--text-disabled)", fontSize: 13, textAlign: "center" }}>
             No rows match "{filterText}"
           </div>
@@ -2657,6 +2721,7 @@ function App() {
   const [showQueryLibrary, setShowQueryLibrary] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTabRef = useRef<Tab>(activeTab);
+  const settingsRef  = useRef<AppSettings>(settings); 
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
   const formatSqlRef = useRef<() => void>(() => {});
   const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2774,7 +2839,7 @@ function App() {
           const mapped: AppSettings = {
             queryTimeoutSecs:      loaded.query_timeout_secs      ?? 30,
             lockTimeoutMins:       loaded.lock_timeout_mins       ?? 15,
-            resultRowLimit:        loaded.result_row_limit        ?? 10_000,
+            resultRowLimit:        loaded.result_row_limit        ?? 50_000,
             historyRetentionDays:  loaded.history_retention_days  ?? 90,
             resultClearMins:       loaded.result_clear_mins       ?? 5,
             auditLogEnabled:       loaded.audit_log_enabled       ?? false,
@@ -2802,6 +2867,7 @@ function App() {
   }, []);
 
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   // Sidebar resize
   useEffect(() => {
@@ -3574,6 +3640,7 @@ function App() {
           sql,
           engine:   conn.engine,
           readOnly: conn.readOnly ?? false,
+          rowLimit: settingsRef.current.resultRowLimit,
         });
 
         // Second call for non-SQL Server plan capture. Reuses the same
@@ -3590,6 +3657,7 @@ function App() {
               sql: wrappedPlanSql,
               engine: conn.engine,
               readOnly: conn.readOnly ?? false,
+              rowLimit: settingsRef.current.resultRowLimit,
             });
           } catch (e) {
             planRaw = JSON.stringify({
@@ -4998,6 +5066,7 @@ function handleCellCommit(
           sql,
           engine:   conn.engine,
           readOnly: false,
+          rowLimit: settingsRef.current.resultRowLimit,
         });
 
         const parsed = JSON.parse(raw);
@@ -5952,9 +6021,9 @@ function handleCellCommit(
                     }))}
                     style={selectStyle}
                   >
-                    {[1000, 5000, 10000, 25000].map(v => (
+                    {[50000, 250000, 5000000, 0].map(v => (
                       <option key={v} value={v}>
-                        {v.toLocaleString()} rows
+                        {v === 0 ? "Unlimited" : `${v.toLocaleString()} rows`}
                       </option>
                     ))}
                   </select>
@@ -7622,7 +7691,11 @@ function handleCellCommit(
               fontSize: 12, fontFamily: "monospace", flexShrink: 0, whiteSpace: "nowrap",
             }}
           >
-            {activeTab.loading ? "Running..." : "▶ Run (Cmd+Enter)"}
+            {activeTab.loading
+              ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <Spinner size={12} /> Running...
+                </span>
+              : "▶ Run (Cmd+Enter)"}
           </button>
           {/* Include Plan toggle — per tab. Hidden when there's no DB
               connection (plans are meaningless for flat-file DuckDB queries).
@@ -7787,7 +7860,13 @@ function handleCellCommit(
               {activeTab.duration}ms
               {activeTab.results.some(r => r.truncated) && (
                 <span style={{ color: "var(--warning)", marginLeft: 8 }}>
-                  ⚠ some results truncated at 10,000 rows
+                  ⚠ results truncated at {settings.resultRowLimit.toLocaleString()} rows
+                </span>
+              )}
+              {!activeTab.results.some(r => r.truncated)
+                && activeTab.results.some(r => r.largeResult) && (
+                <span style={{ color: "var(--warning)", marginLeft: 8 }}>
+                  ⚠ large result ({Math.max(...activeTab.results.map(r => r.rowCount ?? 0)).toLocaleString()} rows loaded) — performance may be affected
                 </span>
               )}
             </span>
