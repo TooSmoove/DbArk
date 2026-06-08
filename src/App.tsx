@@ -436,23 +436,39 @@ function EngineBadge({ engine }: { engine: string }) {
 }
 
 // ---- Join Tables Panel ------------------------------------
+// Shown whenever a flat file is open. Frames the file as the queryable `data`
+// table and lets the user pull live DB tables into the same query as
+// db_<table>. Two design rules drive this component:
+//   1. Visible, not hidden — the join affordance is the hero feature, so it is
+//      never collapsed behind an unlabeled control. Tables load as soon as a
+//      connection exists.
+//   2. Controlled selection — the panel holds NO local copy of the checked
+//      set. The single source of truth is the tab's joinTables (`selected`),
+//      so switching tabs and back can never desync the checkboxes from the set
+//      the query engine actually attaches.
 function JoinTablesPanel({
+  fileName,
   activeConnection,
-  onSelectionChange,
+  selected,
+  onToggle,
+  onInsert,
 }: {
+  fileName: string;
   activeConnection: ConnectionConfig | null;
-  onSelectionChange: (tables: string[]) => void;
+  selected: string[];
+  onToggle: (table: string, next: boolean) => void;
+  onInsert: (table: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [tables, setTables] = useState<string[]>([]);
-  const [checked, setChecked] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Load tables the moment a connection is available — no expand gate.
   useEffect(() => {
-    if (!open || !activeConnection) return;
-    setLoading(true);  // ← local state, not updateActiveTab
-    setError(null);    // ← local state, not updateActiveTab
+    if (!activeConnection) { setTables([]); setError(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
     invoke<string>("list_db_tables", {
       credentialRef: activeConnection.credentialRef,
       engine: activeConnection.engine,
@@ -465,63 +481,35 @@ function JoinTablesPanel({
       windowsAuth: activeConnection.windowsAuth ?? false,
     })
       .then((result) => {
+        if (cancelled) return;
         const parsed = JSON.parse(result);
         if (parsed.error) { setError(parsed.error); return; }
         setTables(parsed.tables ?? []);
       })
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
-  }, [open, activeConnection]);
+      .catch((e) => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [activeConnection]);
 
-  const toggle = (table: string) => {
-    const next = new Set(checked);
-    next.has(table) ? next.delete(table) : next.add(table);
-    setChecked(next);
-    onSelectionChange([...next]);
-  };
-
-  if (!activeConnection) return null;
+  const selectedSet = new Set(selected);
 
   return (
-    <div style={{ borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "8px 12px",
-          background: "none",
-          border: "none",
-          color: "var(--text-secondary)",
-          fontSize: 12,
-          cursor: "pointer",
-          textAlign: "left",
-          fontFamily: "monospace",
-        }}
-      >
-        <span>⊕</span>
-        <span>Join DB Tables</span>
-        {checked.size > 0 && (
-          <span style={{
-            background: "var(--accent)",
-            color: "white",
-            borderRadius: 10,
-            padding: "1px 7px",
-            fontSize: 11,
-          }}>
-            {checked.size} selected
-          </span>
-        )}
-        <span style={{ marginLeft: "auto" }}>{open ? "▲" : "▼"}</span>
-      </button>
+    <div style={{ borderBottom: "1px solid var(--border)", background: "var(--surface)", padding: "10px 12px" }}>
+      {/* Framing line — names the `data` alias the file is queryable as. */}
+      <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, fontFamily: "monospace" }}>
+        Querying <strong style={{ color: "var(--text)" }}>{fileName}</strong> as{" "}
+        <code style={{ color: "var(--accent)", background: "var(--accent-bg)", padding: "1px 5px", borderRadius: 3 }}>data</code>
+      </p>
 
-      {open && (
-        <div style={{ padding: "8px 12px 12px", borderTop: "1px solid var(--border)" }}>
-          <p style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "0 0 8px" }}>
-            From <strong style={{ color: "var(--text-secondary)" }}>{activeConnection.name}</strong> —
-            checked tables available as <code style={{ color: "var(--accent)" }}>db_tablename</code>
+      {!activeConnection ? (
+        <p style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "6px 0 0" }}>
+          Connect to a database in the sidebar to join live tables into this query.
+        </p>
+      ) : (
+        <>
+          <p style={{ fontSize: 11, color: "var(--text-tertiary)", margin: "4px 0 8px" }}>
+            Add live tables from <strong style={{ color: "var(--text-secondary)" }}>{activeConnection.name}</strong> —
+            click a table to drop <code style={{ color: "var(--accent)" }}>db_tablename</code> into the editor.
           </p>
 
           {loading && <p style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Loading tables…</p>}
@@ -530,39 +518,51 @@ function JoinTablesPanel({
             <p style={{ fontSize: 12, color: "var(--text-tertiary)" }}>No tables found</p>
           )}
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 180, overflowY: "auto" }}>
-            {tables.map(t => (
-              <label key={t} style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "3px 4px",
-                borderRadius: 4,
-                cursor: "pointer",
-                fontSize: 12,
-                color: "var(--text)",
-              }}>
-                <input
-                  type="checkbox"
-                  checked={checked.has(t)}
-                  onChange={() => toggle(t)}
-                />
-                <span style={{ flex: 1 }}>{t}</span>
-                {checked.has(t) && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 180, overflowY: "auto" }}>
+            {tables.map(t => {
+              const isSelected = selectedSet.has(t);
+              return (
+                <div
+                  key={t}
+                  onClick={() => onInsert(t)}
+                  title={`Insert db_${t} into the editor and join`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "4px 6px",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                    fontSize: 12,
+                    color: "var(--text)",
+                    background: isSelected ? "var(--accent-bg)" : "transparent",
+                  }}
+                  onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = "rgba(127,127,127,0.10)"; }}
+                  onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}
+                >
+                  {/* Checkbox = attach WITHOUT inserting text. stopPropagation
+                      so toggling it doesn't also fire the row's insert. */}
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onClick={e => e.stopPropagation()}
+                    onChange={e => onToggle(t, e.target.checked)}
+                  />
+                  <span style={{ flex: 1 }}>{t}</span>
                   <code style={{
                     fontSize: 10,
-                    color: "var(--accent)",
-                    background: "var(--accent-bg)",
+                    color: isSelected ? "var(--accent)" : "var(--text-tertiary)",
+                    background: isSelected ? "var(--accent-bg)" : "transparent",
                     padding: "1px 5px",
                     borderRadius: 3,
                   }}>
-                    → db_{t}
+                    db_{t}
                   </code>
-                )}
-              </label>
-            ))}
+                </div>
+              );
+            })}
           </div>
-        </div>
+        </>
       )}
     </div>
   );
@@ -2728,9 +2728,43 @@ function App() {
   const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schemaCache = useRef<Map<string, SchemaResult>>(new Map());
   
-  const handleJoinSelectionChange = useCallback((tables: string[]) => {
-    updateActiveTab({ joinTables: tables });
-  }, [activeTabId])
+  // Toggle one live table in/out of the join set (checkbox path: attach or
+  // detach without touching the editor text).
+  const handleToggleJoinTable = useCallback((table: string, next: boolean) => {
+    setTabs(prev => prev.map(t => {
+      if (t.id !== activeTabId) return t;
+      const has = t.joinTables.includes(table);
+      if (next === has) return t;
+      return {
+        ...t,
+        joinTables: next
+          ? [...t.joinTables, table]
+          : t.joinTables.filter(x => x !== table),
+      };
+    }));
+  }, [activeTabId]);
+
+  // Click-to-insert: drop db_<table> at the cursor AND ensure the table is
+  // attached, so the identifier you just inserted is always one the query
+  // engine actually exposes (no "db_x does not exist" surprise).
+  const handleInsertJoinTable = useCallback((table: string) => {
+    setTabs(prev => prev.map(t =>
+      t.id === activeTabId && !t.joinTables.includes(table)
+        ? { ...t, joinTables: [...t.joinTables, table] }
+        : t
+    ));
+    const editor = editorRef.current;
+    if (editor) {
+      const sel = editor.getSelection();
+      editor.executeEdits("join-insert-table", [{
+        range: sel ?? editor.getModel()!.getFullModelRange(),
+        text: `db_${table}`,
+        forceMoveMarkers: true,
+      }]);
+      editor.focus();
+    }
+  }, [activeTabId]);
+  
   const autocompleteRegistered = useRef(false);
   const tokensProviderRegistered = useRef(false);
 
@@ -3298,7 +3332,6 @@ function App() {
 
       updateActiveTab({
         file:       file,
-        connection: null,
         title:      name,
         joinTables: [],
         results:     [],
@@ -7968,8 +8001,11 @@ function handleCellCommit(
         {/* Join tables panel — only shown when a file is active */}
         {activeTab.file && (
           <JoinTablesPanel
+            fileName={activeTab.file.name}
             activeConnection={activeTab.connection}
-            onSelectionChange={handleJoinSelectionChange}
+            selected={activeTab.joinTables}
+            onToggle={handleToggleJoinTable}
+            onInsert={handleInsertJoinTable}
           />
         )}
 

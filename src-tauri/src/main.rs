@@ -24,6 +24,8 @@ fn native_path(dll: &str) -> String {
 /// machine may have Driver 18 but not 17, which throws ODBC IM002).
 static SQLSERVER_ODBC_DRIVER: OnceLock<String> = OnceLock::new();
 
+mod fatal;
+
 fn sqlserver_odbc_driver() -> &'static str {
     SQLSERVER_ODBC_DRIVER.get_or_init(|| {
         #[cfg(windows)]
@@ -1978,10 +1980,7 @@ fn main() {
     // Catch-all: write any panic to a file, since stderr is dead in a
     // windows-subsystem release build.
     std::panic::set_hook(Box::new(|info| {
-        let _ = std::fs::write(
-            std::env::temp_dir().join("dbark_panic.log"),
-            format!("PANIC: {info}\n"),
-        );
+        fatal::report_panic(&info.to_string());
     }));
 
     let t0 = Instant::now();                        
@@ -2002,11 +2001,7 @@ fn main() {
    for (dll, expected) in &dlls {
         let path = native_path(dll);
         if let Err(reason) = verify_dll(&path, expected) {
-            let _ = std::fs::write(
-                std::env::temp_dir().join("dbark_fatal.log"),
-                format!("DLL integrity check failed.\n{reason}\n"),
-            );
-            std::process::exit(1);
+            fatal::report_fatal("DLL integrity check", reason);
         }
     }
 
