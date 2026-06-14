@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DbArk — v1.0 Launch Plan</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0e0f11; --surface: #16181c; --surface2: #1e2026;
+    --border: rgba(255,255,255,0.07); --border2: rgba(255,255,255,0.12);
+    --text: #e8e9ec; --muted: #6b7280; --subtle: #9ca3af;
+    --accent: #6c63ff; --accent-dim: rgba(108,99,255,0.15);
+    --green: #10b981; --green-dim: rgba(16,185,129,0.12);
+    --amber: #f59e0b; --amber-dim: rgba(245,158,11,0.12);
+    --red: #ef4444; --blue: #3b82f6; --blue-dim: rgba(59,130,246,0.12);
+    --pink: #ec4899; --pink-dim: rgba(236,72,153,0.12);
+    --mono: 'IBM Plex Mono', monospace; --sans: 'Syne', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+  .topbar { position: sticky; top: 0; z-index: 100; background: rgba(14,15,17,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); padding: 14px 32px; display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+  .logo { font-family: var(--mono); font-size: 13px; font-weight: 500; color: var(--accent); letter-spacing: .05em; white-space: nowrap; }
+  .logo span { color: var(--muted); }
+  .progress-section { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 200px; }
+  .progress-track { flex: 1; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); border-radius: 2px; transition: width .4s cubic-bezier(.4,0,.2,1); width: 0%; }
+  .progress-text { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; min-width: 80px; }
+  .reset-btn { font-family: var(--mono); font-size: 11px; color: var(--muted); background: none; border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px; cursor: pointer; transition: all .15s; white-space: nowrap; }
+  .reset-btn:hover { border-color: var(--border2); color: var(--subtle); }
+  .container { max-width: 880px; margin: 0 auto; padding: 40px 32px 80px; }
+  .page-header { margin-bottom: 32px; }
+  .page-title { font-size: 32px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; margin-bottom: 10px; }
+  .page-title .accent { color: var(--accent); }
+  .page-sub { font-size: 14px; color: var(--muted); font-family: var(--mono); line-height: 1.6; }
+  .stat-row { display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; min-width: 100px; }
+  .stat-val { font-size: 22px; font-weight: 700; font-family: var(--mono); line-height: 1; margin-bottom: 4px; }
+  .stat-lbl { font-size: 11px; color: var(--muted); font-family: var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+
+  /* North star banner */
+  .northstar { background: linear-gradient(135deg, rgba(108,99,255,0.10), rgba(16,185,129,0.06)); border: 1px solid var(--border2); border-radius: 12px; padding: 22px 24px; margin-bottom: 32px; }
+  .northstar-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .12em; color: var(--accent); margin-bottom: 10px; }
+  .northstar-text { font-size: 15px; line-height: 1.55; color: var(--text); }
+  .northstar-text strong { color: var(--accent); font-weight: 600; }
+  .northstar-meta { display: flex; gap: 24px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .northstar-meta-item { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .northstar-meta-item strong { color: var(--text); font-weight: 500; }
+
+  .phase { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; transition: border-color .2s; }
+  .phase:hover { border-color: var(--border2); }
+  .phase.phase-complete { border-color: rgba(16,185,129,0.25); }
+  .phase-header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; cursor: pointer; background: var(--surface); user-select: none; transition: background .15s; }
+  .phase-header:hover { background: var(--surface2); }
+  .phase-week { font-family: var(--mono); font-size: 10px; font-weight: 500; padding: 3px 10px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; letter-spacing: .04em; text-transform: uppercase; }
+  .phase-title-text { font-size: 13px; font-weight: 600; flex: 1; line-height: 1.3; }
+  .phase-progress { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .phase-progress.done-all { color: var(--green); }
+  .phase-chev { font-size: 10px; color: var(--muted); transition: transform .2s; flex-shrink: 0; }
+  .phase.open .phase-chev { transform: rotate(180deg); }
+  .phase-body { display: none; border-top: 1px solid var(--border); }
+  .phase.open .phase-body { display: block; }
+  .task { display: flex; align-items: flex-start; gap: 14px; padding: 13px 18px; border-top: 1px solid var(--border); cursor: pointer; transition: background .1s; }
+  .task:first-child { border-top: none; }
+  .task:hover { background: rgba(255,255,255,0.02); }
+  .task.done { opacity: 0.45; }
+  .task.done .task-title { text-decoration: line-through; color: var(--muted); }
+  .cb { width: 20px; height: 20px; border-radius: 5px; border: 1.5px solid var(--border2); flex-shrink: 0; margin-top: 1px; display: flex; align-items: center; justify-content: center; transition: all .15s; background: transparent; }
+  .task.done .cb { background: var(--green); border-color: var(--green); }
+  .cb-tick { display: none; width: 11px; height: 11px; }
+  .task.done .cb-tick { display: block; }
+  .task-content { flex: 1; min-width: 0; }
+  .task-title { font-size: 13px; font-weight: 600; line-height: 1.4; margin-bottom: 4px; color: var(--text); }
+  .task-detail { font-size: 12px; color: var(--subtle); line-height: 1.6; font-family: var(--mono); }
+  .task-detail code { color: var(--accent); background: var(--accent-dim); padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+  .task-detail .warn-code { color: var(--amber); background: var(--amber-dim); }
+  .task-detail .good-code { color: var(--green); background: var(--green-dim); }
+  .task-detail .sec-code  { color: #f87171; background: rgba(248,113,113,0.12); }
+  .task-detail .pink-code { color: var(--pink); background: var(--pink-dim); }
+  .task-tag { font-size: 9px; font-weight: 600; font-family: var(--mono); padding: 2px 8px; border-radius: 20px; white-space: nowrap; flex-shrink: 0; margin-top: 2px; text-transform: uppercase; letter-spacing: .05em; }
+  .tt-must { background: rgba(239,68,68,0.12); color: #ef4444; }
+  .tt-nice { background: rgba(245,158,11,0.12); color: #f59e0b; }
+  .tt-test { background: rgba(59,130,246,0.12); color: #3b82f6; }
+  .tt-gate { background: rgba(16,185,129,0.12); color: #10b981; }
+  .tt-sec  { background: rgba(248,113,113,0.12); color: #f87171; }
+  .tt-launch { background: rgba(236,72,153,0.12); color: var(--pink); }
+  .tt-cond { background: rgba(245,158,11,0.12); color: #f59e0b; }
+  .milestone { margin: 6px 0; padding: 12px 18px; background: rgba(108,99,255,0.06); border-left: 3px solid var(--accent); font-size: 12px; color: var(--subtle); font-family: var(--mono); line-height: 1.6; }
+  .milestone strong { color: var(--accent); font-weight: 500; }
+  .milestone.launch-milestone { background: rgba(236,72,153,0.06); border-left-color: var(--pink); }
+  .milestone.launch-milestone strong { color: var(--pink); }
+  .milestone.sec-milestone { background: rgba(248,113,113,0.06); border-left-color: #f87171; }
+  .milestone.sec-milestone strong { color: #f87171; }
+  .milestone.cut-milestone { background: rgba(245,158,11,0.06); border-left-color: var(--amber); }
+  .milestone.cut-milestone strong { color: var(--amber); }
+  .section-divider { display: flex; align-items: center; gap: 12px; margin: 32px 0 16px; }
+  .divider-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); white-space: nowrap; }
+  .divider-line { flex: 1; height: 1px; background: var(--border); }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  @media (max-width: 600px) { .container { padding: 24px 16px 60px; } .topbar { padding: 12px 16px; } .page-title { font-size: 24px; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">DbArk <span>/</span> launch-plan_v6.html</div>
+  <div class="progress-section">
+    <div class="progress-track"><div class="progress-fill" id="prog-fill"></div></div>
+    <div class="progress-text" id="prog-text">0 / 0 done</div>
+  </div>
+  <button class="reset-btn" onclick="resetAll()">Reset all</button>
+</div>
+
+<div class="container">
+  <div class="page-header">
+    <div class="page-title">v1.0 <span class="accent">Launch</span> Plan<br><span style="font-size:18px;color:var(--muted);font-weight:400;">Strategy-aligned · May 2026</span></div>
+    <div class="page-sub">Aligned to the May 2026 strategy refinement · Build is ~75% · Launch surface is ~0% · This plan reverses that ratio</div>
+    <div class="stat-row">
+      <div class="stat"><div class="stat-val" id="stat-done">0</div><div class="stat-lbl">Done</div></div>
+      <div class="stat"><div class="stat-val" id="stat-remain">0</div><div class="stat-lbl">Remaining</div></div>
+      <div class="stat"><div class="stat-val" id="stat-pct">0%</div><div class="stat-lbl">Complete</div></div>
+      <div class="stat"><div class="stat-val" id="stat-phase">—</div><div class="stat-lbl">Current phase</div></div>
+    </div>
+  </div>
+
+  <div class="northstar">
+    <div class="northstar-label">North star</div>
+    <div class="northstar-text">v1.0 is a <strong>starting line, not a destination</strong>. The job of v1.0 is to earn an audience by being demonstrably more trustworthy and demonstrably more useful for one workflow nobody else offers. SSMS replacement is v1.1+ work — funded by an audience that exists.</div>
+    <div class="northstar-meta">
+      <div class="northstar-meta-item">Target launch day: <strong>1,000 downloads</strong></div>
+      <div class="northstar-meta-item">Target stars: <strong>250+</strong></div>
+      <div class="northstar-meta-item">HN front page: <strong>4+ hours</strong></div>
+      <div class="northstar-meta-item">Email signups: <strong>200+</strong></div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase A — Finish the build</span><div class="divider-line"></div></div>
+
+  <div class="phase open" id="phase-a">
+    <div class="phase-header" onclick="togglePhase('phase-a')">
+      <span class="phase-week" style="background:rgba(59,130,246,0.12);color:#3b82f6">Remaining</span>
+      <span class="phase-title-text">Close out the carryover items from the original build</span>
+      <span class="phase-progress" id="pp-phase-a">0/7</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone"><strong>End state:</strong> Every "in progress" or "remaining" item from the original Weeks 7–10 sprint is shipped. After this, the build is feature-complete for v1.0 scope.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Multi-statement batch / T-SQL variable scope <span style="color:var(--amber);font-size:9px;">◑ 2a+2b DONE · 2c (SQLite) LEFT</span></div><div class="task-detail">Root cause: each ;-split statement ran on its OWN connection, so <code>DECLARE @x</code> then using <code>@x</code> failed ("Must declare the scalar variable"). <strong>Fix (chosen approach b): split SQL Server on GO only, send each batch as one command; other engines send the whole script as one command — drivers preserve scope natively.</strong> <span class="good-code">DONE &amp; tested: stage 1 (GO splitter, 25 unit tests). Stage 2a (SQL Server — DECLARE@x→5, GO multi-batch, rows-affected incl. zero-row UPDATE/SQL_NO_DATA fix, read-only). Stage 2b (Postgres temp-table scope, MySQL/MariaDB SET @x→5 via AllowUserVariables=true Rust flag, Cockroach — all multi-result + read-only verified).</span> <span class="warn-code">LEFT — stage 2c: SQLite still on legacy path. Its sqlite3_prepare_v2 uses pzTail=IntPtr.Zero → silently runs ONLY the first statement (pre-existing bug). Needs a prepare/step walker with the tail pointer (new P/Invoke). Fiddly unmanaged code — do as its own focused session.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Legacy-path error returns are bare strings, not JSON <span style="color:var(--amber);font-size:9px;">◑ FIXED for migrated engines · SQLite left</span></div><div class="task-detail">Non-SQL-Server engines used the legacy execution path, whose error returns (read-only rejection, "No statements found", etc.) returned a <strong>bare string</strong> via <code>Marshal.StringToCoTaskMemUTF8("Connection is read-only…")</code> instead of serialized <code>MultiResult</code> JSON. Frontend always <code>JSON.parse</code>s the response → <span class="warn-code">"SyntaxError: Unexpected token 'C', \"Connection\"… is not valid JSON"</span> on read-only rejection. <span class="good-code">FIXED by stage 2b for Postgres/MySQL/MariaDB/Cockroach — they now flow through RunBatches → structured MultiResult JSON; read-only rejection shows a clean message, verified. Remaining only for SQLite until it migrates off the legacy path in stage 2c.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">"Unknown ODBC error" on some SQL Server UPDATEs</div><div class="task-detail">A SQL Server <code>UPDATE dbo.products SET is_published = 1 WHERE is_published = 1</code> returns <span class="warn-code">"Unknown ODBC error"</span> while INSERTs work. <span class="good-code">Likely <code>GetDiagnostic</code> not surfacing the real ODBC error message for this failure mode (a clear DB-level error showing up as "unknown"), OR a statement-specific issue. Diagnose: run the same UPDATE in sqlcmd — if it errors clearly there, the DB is rejecting it for a real reason and the bug is just error-message extraction; if it runs fine in sqlcmd but fails in the GUI, it's an execution-path issue. Improve <code>GetDiagnostic</code> to never return a bare "unknown" — always include SQLSTATE + native error text.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Implicit batch boundary detection — CREATE/ALTER PROCEDURE/FUNCTION/VIEW/TRIGGER</div><div class="task-detail">Root cause: T-SQL requires <code>CREATE/ALTER PROCEDURE</code>, <code>FUNCTION</code>, <code>VIEW</code>, and <code>TRIGGER</code> to be the first and only statement in their batch. When a user writes multiple statements without a <code>GO</code> separator, the executor sends them as one batch and SQL Server rejects with <span class="warn-code">[42000] (native 111) 'CREATE/ALTER PROCEDURE' must be the first statement in a query batch.</span> SSMS handles this silently by treating these DDL keywords as implicit batch boundaries even without <code>GO</code>. <strong>Fix:</strong> in the SQL Server batch splitter (currently splits on <code>GO</code> only), add a pre-pass that detects <code>CREATE</code> or <code>ALTER</code> followed by <code>PROCEDURE</code>, <code>FUNCTION</code>, <code>VIEW</code>, or <code>TRIGGER</code> at statement start (case-insensitive, accounting for leading whitespace and comments) and inserts an implicit batch split before it. Each DDL object definition then gets its own batch, same as if the user had typed <code>GO</code>. <span class="good-code">Discovered during dogfooding: running CREATE TABLE + ALTER TABLE + CREATE PROCEDURE in one editor execution hit this error. Target behaviour: the same multi-statement block executes cleanly without requiring the user to manually add GO separators between DDL statements.</span> <span class="warn-code">Edge cases to handle: (1) CREATE PROCEDURE inside a BEGIN/END block (do not split inside a block body); (2) OR REPLACE variants for MySQL/Postgres — those engines handle this natively, so the split logic is SQL Server-only; (3) the pre-pass must not trigger on PROCEDURE/FUNCTION as identifiers in DML (e.g. a column named procedure).</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">SSH tunneling via SSH.NET</div><div class="task-detail">Finish the in-progress work. Test against a real AWS RDS instance behind a bastion. Verify NativeAOT compatibility under <code>PublishAot=true</code> — if reflection issues surface, move SSH.NET to a non-AOT sidecar subprocess. <span class="warn-code">Do not paper over with trimmer suppressions.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Saved query library</div><div class="task-detail"><code>Cmd+S</code> saves editor content as <code>.sql</code> file with <code>.meta.toml</code> sidecar. Query browser panel searchable by name and tag. Files live alongside connection TOML — Git-diffable by design.</div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">PostgreSQL schema namespace support</div><div class="task-detail">Update schema tree to <strong>database → schema → table → columns</strong> for Postgres connections. Exclude <code>pg_catalog</code> and <code>information_schema</code>. <span class="good-code">Without this, the launch post claim "great for Postgres developers" is not survivable in r/PostgreSQL.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Connection groups in sidebar</div><div class="task-detail">The <code>group</code> field is already in TOML files but not surfaced visually. Group connections under collapsible header rows — Production, Staging, Local. Groups remember collapse state in <code>localStorage</code>. <span class="sec-code">Visual separation of Production from Staging reduces accidental writes — a daily safety win.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Import connections from DBeaver</div><div class="task-detail">Parse DBeaver's <code>data-sources.json</code> and generate TOML files. Handle SQL Server, Postgres, and MySQL. <span class="good-code">Removes the #1 switching friction for the target audience. A demo of "I imported all my DBeaver connections in 5 seconds" in the launch GIF is a strong signal.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" data-default-done="1" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Native DLL paths resolve against exe dir, not CWD</div><div class="task-detail">All native DLL loads + the integrity check use <code>native_path()</code> (exe-relative), never bare relative paths. <span class="warn-code">Bare paths resolve against CWD — work from target\release by luck, fail silently from an MSI install (CWD is System32).</span> <span class="good-code">DONE: native_path on all loaders + check loop; <code>"natives": "natives"</code> resources bundle entry. VERIFY the MSI install launches on the clean VM with no manual copy.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" data-default-done="1" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Startup failures write to a file — eprintln is dead in release</div><div class="task-detail">In a <code>windows_subsystem="windows"</code> release build, stderr goes nowhere, so every startup failure vanished silently (cost a full debugging session). <span class="good-code">DONE: panic hook → dbark_panic.log; verify_dll → Result → dbark_fatal.log. Keep permanently.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" data-default-done="1" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">SQL Server support in the file + DB join</div><div class="task-detail">The hero feature must target SQL Server (r/SQLServer is the most-aligned audience). <span class="good-code">DONE: FileQueryEngine ExecuteSqlServer via ODBC + ListTables INFORMATION_SCHEMA case; both Rust commands (list_db_tables + query_file_with_db) now have the sqlserver arm. VERIFY end-to-end: selector populates AND the data/db_&lt;table&gt; join returns rows.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" data-default-done="1" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">ODBC reader accepts SQL_SUCCESS_WITH_INFO</div><div class="task-detail">SqlServerOdbc.Query only continued on SQL_SUCCESS, so result sets returning code 1 truncated — why tables didn't appear and SP names were blank (NOT a permissions issue). <span class="good-code">DONE: loop accepts SUCCESS_WITH_INFO + handles SQLGetData rc + truncation/SQL_NO_TOTAL. VERIFY the ER-diagram FK query (same reader) populates.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" data-default-done="1" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Runtime ODBC driver detection (no hardcoded version)</div><div class="task-detail">Driver name was hardcoded to <code>ODBC Driver 17</code> in 10 places → IM002 on a clean VM that only had Driver 18. <span class="good-code">DONE: <code>sqlserver_odbc_driver()</code> detects installed driver (18 → 17 → legacy) via registry, used everywhere.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Visible error dialog on integrity / startup failure</div><div class="task-detail">A DLL integrity failure or missing dependency currently exits with no window — the user can't know to check a temp log. Show a native message box (windows crate / rfd, both already in tree) naming the failure before <code>exit(1)</code>. <span class="sec-code">Turns "it won't open" into "ConnectionManager.dll failed an integrity check."</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Centralize SQL Server ODBC connection-string building</div><div class="task-detail">Built in FOUR places now (build_connection_string, FileQueryEngine path, list_db_tables, query_file_with_db) — each was its own "Unsupported engine"/wrong-string bug this session. <span class="warn-code">One Rust helper taking host/port/db/auth/ssl_mode → ODBC string (using sqlserver_odbc_driver()), called everywhere. Collapse list_db_tables + query_file_with_db first.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Windows-auth support in list_db_tables / query_file_with_db</div><div class="task-detail">Both unconditionally fetch a keychain password (except sqlite), so a windows_auth SQL Server connection throws "Credential not found" (seen on the host's "Local SQL Server"). <span class="warn-code">Add a windows_auth param + a Trusted_Connection=yes branch that skips the keychain fetch, mirroring build_connection_string. SQL-auth works today; this is the gap for Windows-auth users.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">VIEW DEFINITION: detect + tell the user what to GRANT</div><div class="task-detail">A read-only / least-privilege login (the DbArk audience) can't "Open Definition" without VIEW DEFINITION — separate from datareader + execute. <span class="good-code">Detect this specific failure and surface "ask your DBA to GRANT VIEW DEFINITION" instead of the raw server error. Same legibility theme as the DLL dialog.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Resolve duckdb.dll from natives\ via SetDllImportResolver</div><div class="task-detail">duckdb.dll is loaded by bare-name DllImport, which searches the exe dir + PATH but NOT the natives\ subfolder — failed on install until copied beside the exe (current workaround). <span class="warn-code">Real fix: NativeLibrary.Load(native_path("duckdb.dll")) + SetDllImportResolver, OR bundle duckdb.dll beside the exe. Same CWD/path class as the main DLL fix.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">SqlServerExecutor fetch loops accept SQL_SUCCESS_WITH_INFO</div><div class="task-detail"><code>SqlServerExecutor</code>'s result-fetch loops use <code>while (SQLFetch(hStmt) == SQL_SUCCESS)</code> — the <span class="warn-code">SQL_SUCCESS-only</span> condition. This is the SAME bug class already fixed in <code>SchemaExplorer</code>'s reader (now accepts <code>SQL_SUCCESS_WITH_INFO</code> too). A statement returning <code>SQL_SUCCESS_WITH_INFO</code> (e.g. with informational messages, truncation, or driver notices) would end the fetch loop early, silently truncating the result set. <span class="good-code">Fix: change both fetch loops to continue on <code>SQL_SUCCESS</code> OR <code>SQL_SUCCESS_WITH_INFO</code>, mirroring the SchemaExplorer.SqlServerOdbc.Query fix (also handle the SQLGetData rc + SQL_NO_TOTAL truncation case the same way). Separate code path from the schema reader, so it was not covered by that fix.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase B — Polish &amp; v1.0 must-haves</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-b">
+    <div class="phase-header" onclick="togglePhase('phase-b')">
+      <span class="phase-week" style="background:rgba(108,99,255,0.12);color:#6c63ff">Polish</span>
+      <span class="phase-title-text">Make the product feel finished — keyboard-first, fast, themed, AI-aware</span>
+      <span class="phase-progress" id="pp-phase-b">0/9</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone"><strong>End state:</strong> The product feels like a finished tool. Keyboard-first workflow. Sub-1.5s cold start. Light/dark theme. AI explainer available. Linux ships. Everything that makes a professional developer say "this is well made."</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Encrypt state.db with SQLCipher</div><div class="task-detail">Query history and tab state encrypted with key derived from OS keychain. <span class="sec-code">Query history reveals every query ever run against production. Plaintext SQLite on a shared machine is a serious risk and the first security question enterprise contributors will ask.</span></div></div>
+        <span class="task-tag tt-sec">Security</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Execution plan display — tree view, positioned as inspection</div><div class="task-detail">Toolbar toggle that prefixes the query with <code>EXPLAIN</code> (MySQL/Postgres) or <code>SET STATISTICS IO/TIME ON</code> (SQL Server). Plan renders in a dedicated tab as a readable tree with operator nodes, costs, and row counts. <span class="warn-code">Position this as "plan inspection" — not query tuning. The graphical plan (SSMS-style icons + arrows + cost percentages) is a v1.1 feature. Be honest in copy: "Inspect execution plans across all four engines" not "tune queries like SSMS."</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Keyboard-first — command palette + SSMS keybindings</div><div class="task-detail"><code>Ctrl+P</code> command palette: switch connection, open table, run snippet, toggle settings. <code>F5</code> alias for Run (SSMS muscle memory), <code>Ctrl+/</code> comment toggle, <code>Ctrl+Shift+F</code> format. Palette fuzzy-searches connections + tables + snippets. <span class="good-code">Keyboard-first is the fastest signal that a tool respects professional developers.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">SQL formatter</div><div class="task-detail">Integrate <code>sql-formatter</code> npm package. <code>Ctrl+Shift+F</code> formats whole editor or selection. Dialect-aware — picks <code>sql / mysql / postgresql / tsql</code> from active connection. Applied as Monaco edit operation so undoable with <code>Ctrl+Z</code>.</div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Light/dark theme</div><div class="task-detail">System theme detection plus manual override. Connection colour labels already handle the most important visual safety signal.</div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Startup time benchmark — target &lt;1.5s</div><div class="task-detail">Measure cold start on a mid-range Windows machine. If over 1.5s, profile C# library load time first. <span class="good-code">Publish the number prominently on the landing page — it is a competitive differentiator nobody else can claim. "1.2s cold start vs DBeaver's 14s" is a Reddit comment thread on its own.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Live server activity panel</div><div class="task-detail">Toggleable <strong>Activity</strong> panel (<code>Ctrl+Shift+A</code>) auto-refreshing every 5 seconds. Per engine: SQL Server (<code>sys.dm_exec_requests</code>), MySQL (<code>SHOW FULL PROCESSLIST</code>), Postgres (<code>pg_stat_activity</code>). Shows query text, duration, state, host, with <strong>Kill</strong> button for current connection's own queries. <span class="good-code">Covers 80% of what developers use SSMS Activity Monitor for.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Flat-file-join discoverability — the hero feature's UX</div><div class="task-detail">"Join a CSV against a live DB" is a novel action with no mental model, so it can't hide behind an unlabeled control. When a file is opened with a connection active, surface an explicit banner: <strong>"Querying &lt;file&gt; as <code>data</code>. Add live tables to join:"</strong> with the table list right there. The identifiers (<code>data</code>, <code>db_&lt;table&gt;</code>) are a discoverability tax — show them; ideally click a table to insert <code>db_Products</code> into the editor. <span class="pink-code">For the launch GIF this matters most: the setup has to look effortless on screen, because that clarity IS the pitch. Fixing this enables both the feature and the demo that sells it.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="phase" id="phase-b2">
+    <div class="phase-header" onclick="togglePhase('phase-b2')">
+      <span class="phase-week" style="background:rgba(245,158,11,0.12);color:#f59e0b">Conditional</span>
+      <span class="phase-title-text">Earns its place by giving the launch post a second screenshot</span>
+      <span class="phase-progress" id="pp-phase-b2">0/1</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone cut-milestone"><strong>Decision rule:</strong> Stays in v1.0 only if the launch surface and Phase A are on track. If anything in Phase A slips, this is the first thing cut — its job is screenshot fuel, not functional value.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Auto-generated ER diagram</div><div class="task-detail">Read-only ER diagram in the schema panel using <code>d3-force</code>. FK relationships queried once per connection and cached alongside schema. Drag tables, scroll to zoom, click to highlight relationships. PNG/SVG export. For schemas &gt;50 tables, show a table selector — never render a hairball. <span class="warn-code">Cut at the first sign of timeline pressure. The launch can survive without it; it cannot survive without the landing page.</span></div></div>
+        <span class="task-tag tt-cond">Conditional</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase C — Trust signals</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-c">
+    <div class="phase-header" onclick="togglePhase('phase-c')">
+      <span class="phase-week" style="background:rgba(248,113,113,0.12);color:#f87171">Trust</span>
+      <span class="phase-title-text">The verifiable proof that closes the download</span>
+      <span class="phase-progress" id="pp-phase-c">0/3</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone sec-milestone"><strong>End state:</strong> Every privacy claim in the launch post is backed by something the reader can verify themselves in under 60 seconds. This is what makes DbArk credible to the security-conscious audience that is most likely to share it.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Wireshark zero-telemetry capture + screenshot</div><div class="task-detail">Run Wireshark while using DbArk normally for 10 minutes. Capture shows only configured DB hosts — zero calls elsewhere. <span class="sec-code">Screenshot becomes the hero proof image on the landing page and the first reply in the HN thread when someone asks "how do I trust this." No competitor publishes this.</span></div></div>
+        <span class="task-tag tt-sec">Security</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">SECURITY.md whitepaper</div><div class="task-detail">Document every security measure: keychain-only passwords, zero IPC password exposure, DLL integrity checking, connection string zeroing, session lock, audit log, query timeout, SQL scrubbing, Wireshark proof, SSL enforcement. Link from landing page and README. <span class="sec-code">Also fixes the currently broken link in README. No competitor in this space publishes one. It is a trust signal that costs only time.</span></div></div>
+        <span class="task-tag tt-sec">Security</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Verify open source story is airtight</div><div class="task-detail">Re-read MIT LICENSE in repo. Re-read README for any stale "paid tier" copy. Run <code>git log --all -p | grep -i password</code> one final time. Confirm CI badges are live. Confirm PRIVACY.md exists and is linked from the README. <span class="good-code">The whole MIT/open source positioning depends on these mechanics being clean. A stale "Pro tier" mention in any file is a credibility wound on launch day.</span></div></div>
+        <span class="task-tag tt-sec">Security</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase C.5 — The rename · GATES ALL LAUNCH ASSETS</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-rename">
+    <div class="phase-header" onclick="togglePhase('phase-rename')">
+      <span class="phase-week" style="background:rgba(245,158,11,0.12);color:#f59e0b">Rename</span>
+      <span class="phase-title-text">DevSql → DbArk — must complete before any screenshot, GIF, or repo goes public</span>
+      <span class="phase-progress" id="pp-phase-rename">0/1</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone cut-milestone"><strong>Why this gates everything:</strong> The app, package, and paths still say "DevSql" — the pre-DbArk name. Every visual launch asset (hero GIF, ER screenshot, demo video) films the live app, so a stale "DevSql" in the title bar or sidebar is a credibility crack in the hero image. Held deliberately until v1 code is complete (one clean pass, not piecemeal), but it MUST land before the Phase D asset capture and before the repo is public.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Complete DevSql → DbArk rename (deliberate, end-of-v1 pass)</div><div class="task-detail">Safe to find-replace: <code>package.json</code> name, <code>tauri.conf.json</code> productName / identifier / window title, README + badge URLs, <code>PRIVACY.md</code>, any "DevSql" UI strings (title bar, sidebar header). <span class="warn-code">Needs thought, NOT blind replace: the <code>~/.devsql/connections</code> runtime folder path — renaming it to <code>~/.dbark</code> means existing connections "vanish" until moved, so handle migration or pick the moment deliberately. Also the repo/folder name <code>C:\…\repos\DevSql</code> breaks absolute paths and IDE/git remotes when renamed — do it when you can re-clone/re-open cleanly.</span> <span class="good-code">One coordinated pass clears the stale name everywhere at once. After it, immediately capture the Phase D assets (hero GIF + ER screenshot retake + demo video) against the renamed app + DbArkShopDemo data — one asset-capture session.</span> Verify after: grep the whole tree for <code>devsql</code>/<code>DevSql</code> (excluding node_modules, target, obj, dist) returns nothing in source.</div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase D — Launch surface · CURRENTLY 0%</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-d">
+    <div class="phase-header" onclick="togglePhase('phase-d')">
+      <span class="phase-week" style="background:rgba(236,72,153,0.12);color:#ec4899">Launch</span>
+      <span class="phase-title-text">The work that turns a Reddit lurker into a download</span>
+      <span class="phase-progress" id="pp-phase-d">0/8</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone launch-milestone"><strong>End state:</strong> Every asset that converts a click into a download exists, has been reviewed, and is ready to go live. This is the single biggest gap in the current plan. Build is 75% done — launch surface is 0%. This phase reverses that ratio.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Hero demo GIF — flat-file-join above the fold</div><div class="task-detail">Record a 10-15 second GIF: open a CSV file → write a JOIN against a live database table → results appear. <strong>This is the single most important asset in the entire launch.</strong> It is the headline, the share, the thing that makes someone scrolling through r/SQLServer stop and click. <span class="pink-code">Iterate on this until you would yourself click the link. Test it on someone unfamiliar with the project.</span> <span class="good-code">Demo data: reuse the <code>DbArkShopDemo</code> schema (already built for the ER screenshot) as the live DB side. For the CSV side, make a small realistic file that joins naturally — e.g. <code>inventory_update.csv</code> (sku, new_qty) joined against the live <code>products</code> table to flag SKUs needing reorder, or a <code>price_update.csv</code>. The join must tell an obvious story in one glance — "spreadsheet meets live DB" is the whole pitch. SQL Server is fine (r/SQLServer is the most-aligned audience); doesn't have to be Postgres.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Landing page — live two weeks before launch</div><div class="task-detail">Goes live at the start of Phase D, not on launch day — you want it indexed before the launch post goes up. Above-the-fold: the hero GIF, the one-line install, the download button. Below: Wireshark screenshot, three feature bullets (flat-file-join, zero telemetry, 80MB RAM), three testimonial quotes, SECURITY.md link, email signup. <span class="pink-code">No marketing copy. No buzzwords. Plain language that lets the GIF and the proof do the work.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">90-second demo video</div><div class="task-detail">For the HN comment thread — first reply on every Show HN post is "is there a video." Show: install, connect, query, the flat-file-join, the AI explainer, the Wireshark proof. Voiceover or captions, either works. Upload to YouTube unlisted, embed on landing page, link in HN reply. <span class="pink-code">Do not over-produce. The audience prefers a screen recording with a real voice over a polished marketing asset.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Three testimonial quotes — collected during beta</div><div class="task-detail">Recruit 20 beta testers (Phase F). Ask three of them — by name, after they have used the tool for a week — for a one-sentence quote. Use real names, real job titles, real companies if they consent. <span class="pink-code">Generic "this is great" quotes are worse than no quotes. Look for specifics: "I deleted DBeaver after one day" or "the flat-file-join saved me an entire ETL pipeline."</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Pre-launch email list</div><div class="task-detail">Stand up an email capture on the landing page two weeks before launch. Offer: "Be the first to know when DbArk v1.0 launches." Target: 200+ signups before launch day. <span class="pink-code">This list is the most valuable asset you will own coming out of v1.0 — it is the audience that converts to v1.1, v1.2, and every product after.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Launch post drafts — HN + Reddit, three reviewers</div><div class="task-detail">Draft <strong>Show HN</strong> post and Reddit posts for <code>r/SQLServer</code>, <code>r/dotnet</code>, <code>r/sysadmin</code>, <code>r/linux</code>, <code>r/selfhosted</code>. Each subreddit gets its own angle — r/sysadmin cares about the security story, r/linux cares about the cross-platform story, r/dotnet cares about the AOT + native binary story. <span class="pink-code">Lead every post with the flat-file-join. It is the only angle no competitor can match. Have three people read each draft. Sit on them for 48 hours before posting.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">One-line install command on landing page</div><div class="task-detail">Windows: <code>winget install DbArk</code> or a single .msi link. macOS: <code>brew install dbark</code> or a single .dmg link. Linux: a curl-pipe-bash that any developer can paste. <span class="pink-code">Friction at install is friction at adoption. The download button must be the most prominent element on the page after the hero GIF.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Launch-morning email ping</div><div class="task-detail">At 9am ET on launch day, email the pre-launch list. Subject: "DbArk v1.0 is live." Body: one sentence, the HN link, the download link. <span class="pink-code">The first hour on HN determines whether you hit the front page. 200 pre-warmed signups arriving in the first 30 minutes is the difference between front page and page 4. This is the highest-leverage 30 minutes of the entire launch.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase E — Release engineering</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-e">
+    <div class="phase-header" onclick="togglePhase('phase-e')">
+      <span class="phase-week" style="background:rgba(16,185,129,0.12);color:#10b981">Release</span>
+      <span class="phase-title-text">The installers, the updater, the build script — everything between code and download</span>
+      <span class="phase-progress" id="pp-phase-e">0/5</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone"><strong>End state:</strong> A user clicks the download link and is using DbArk 90 seconds later with no SmartScreen warnings, no Gatekeeper blocks, and no terminal sorcery. Updates arrive automatically. Crashes report themselves with no data leakage.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Windows MSI with code signing</div><div class="task-detail">Tauri bundles automatically. Enable WebView2 bootstrapper in <code>tauri.conf.json</code>. <span class="warn-code">Code sign the installer — a SmartScreen warning on first install will crater your conversion rate. Get the cert before Phase D ends.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">macOS .dmg with notarization</div><div class="task-detail">Apple Developer account ($99/yr). Add keychain entitlements to <code>.entitlements</code> file before notarizing. <span class="warn-code">Notarization takes 5–30 minutes per build — start early in Phase E. Test the notarized binary on a clean macOS install before launch day, not on the dev machine.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Tauri auto-updater plugin</div><div class="task-detail">Configure <code>tauri-plugin-updater</code> with the update server endpoint. In-app notification when a new version is available. Without this, every release requires users to manually download — fatal for v1.1 momentum.</div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Opt-in crash reporter</div><div class="task-detail">Dialog on crash: "Send a crash report? [Yes] [No]". Collects stack trace and OS version only. <span class="good-code">No query content, no connection details, no file paths.</span> Make the privacy guarantee explicit in the dialog text itself, not just in SECURITY.md.</div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Build script + README repo rename cleanup</div><div class="task-detail">Write <code>build.ps1</code> (Windows) and <code>build.sh</code> (macOS/Linux) that wraps the six <code>dotnet publish</code> commands into one invocation. Update README to show one command. Global find-and-replace any remaining "DevSql" references in the README and badge URLs. <span class="warn-code">Do not publish the launch post until both are done. "DevSql" in the clone URL on a repo called DbArk is an immediate credibility gap.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Locked, atomic build script (the single biggest process fix)</div><div class="task-detail">No command today does: clean → publish all 6 engines (AOT) → copy natives beside the exe in EVERY target (target\debug, target\release, MSI) → regenerate all 8 SHA-256 hashes into main.rs → build Rust app → build MSI. <span class="warn-code">The installed natives\ rotted to a May-8 DLL while source was June because each step was manual — caused hours of "stale binary" debugging. build.ps1/build.sh must make this one atomic sequence.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Exclude the test project from release publish</div><div class="task-detail">QueryExecutorTests got swept into the publish set; its xunit AOT/trim warnings are noise and it must not ship.</div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Pin the AOT publish invocation</div><div class="task-detail">AOT triggering is finicky: <code>-c PublishAot=true</code> was a no-op, <code>-c Release -p:PublishAot=true</code> silently fell back to managed, <code>-p PublishAot=true</code> AOT-compiled. <span class="warn-code">Use <code>dotnet publish -c Release -r win-x64 -p:PublishAot=true</code> + set <code>&lt;PublishAot&gt;true&lt;/PublishAot&gt;</code> in each csproj so the flag isn't load-bearing. A cached publish stamps a fresh timestamp on stale code — force <code>dotnet clean</code> for releases.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Installer ensures runtime dependencies on a clean machine</div><div class="task-detail">Each was hit on the clean VM: <strong>WebView2</strong> (set webviewInstallMode = downloadBootstrapper), <strong>modern SQL Server ODBC driver</strong> (clean VM had only the legacy "SQL Server" driver → IM002), <strong>VC++ redist</strong> (DuckDB is native C++). <span class="warn-code">Installer should install/check these or give legible messages — not raw IM002 / "could not load duckdb.dll."</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase F — Beta program</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-f">
+    <div class="phase-header" onclick="togglePhase('phase-f')">
+      <span class="phase-week" style="background:rgba(59,130,246,0.12);color:#3b82f6">Beta</span>
+      <span class="phase-title-text">20 testers, real feedback, three testimonials, top 5 bugs fixed</span>
+      <span class="phase-progress" id="pp-phase-f">0/4</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone"><strong>End state:</strong> 20 developers have used the tool for at least a week. Three are willing to attach their name to a quote. Every crash and every wrong behaviour has been fixed. No feature requests have been accepted into v1.0 scope — they all go on the v1.1 list.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Recruit 20 beta testers from Reddit</div><div class="task-detail">Post in <code>r/SQLServer</code>, <code>r/dotnet</code>, <code>r/sysadmin</code>: "I built a DBeaver alternative in C#/Tauri, looking for 20 testers." Direct download link, no account required. Track all feedback in GitHub Issues. <span class="good-code">These 20 people are your launch day amplification network — ask one or two to be ready to comment on the HN thread on launch morning.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Validate SSH against a real AWS RDS bastion</div><div class="task-detail">Spin up a real RDS instance behind a bastion host. Test SSH tunnel with key-based and password auth on both Windows and macOS. <span class="warn-code">SSH tunneling is the most common reason a developer's first impression fails — they connect to localhost-only, see it works, then fail at their actual production setup. Catch it in beta, not in the HN thread.</span></div></div>
+        <span class="task-tag tt-test">Test</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Collect three named testimonial quotes</div><div class="task-detail">After 7 days of beta usage, ask three testers — by name — for a one-sentence quote. Get permission to use their name, title, and company. <span class="pink-code">Direct prompt: "What changed about your workflow this week?" produces better quotes than "what do you think of DbArk?" The former gets specifics, the latter gets clichés.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Fix top 5 beta feedback items — refuse feature creep</div><div class="task-detail">Categorise feedback: crashes, wrong behaviour, missing features, UX confusion. Fix every crash. Fix every wrong behaviour. Address top 2 UX confusions. <strong>Defer every feature request to v1.1 — no exceptions.</strong> <span class="warn-code">Feature creep at this stage is what kills launches. The cure for "users want X" is shipping v1.0 and then doing v1.1, not delaying v1.0 by another month.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">Phase G — Launch day</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-g">
+    <div class="phase-header" onclick="togglePhase('phase-g')">
+      <span class="phase-week" style="background:rgba(236,72,153,0.12);color:#ec4899">Launch day</span>
+      <span class="phase-title-text">Tuesday or Wednesday · 9am ET · The 72 hours that decide v1.0's audience</span>
+      <span class="phase-progress" id="pp-phase-g">0/6</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone launch-milestone"><strong>End state:</strong> 1,000 downloads, 250+ stars, HN front page for 4+ hours, 500+ combined Reddit upvotes, 200+ email signups, 15+ GitHub issues or discussions opened. If these numbers come in, the audience exists — and every subsequent retention feature (SP debugger, graphical plans, Agent jobs) is being built for real users with real feedback.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Final Wireshark capture + sanity check</div><div class="task-detail">Run the Wireshark capture one final time against the v1.0 binary that will ship. Confirm zero external calls. Update the screenshot if anything has changed. <span class="sec-code">The Wireshark proof is the answer to every "how do I trust you" question for the next 72 hours. It must be current.</span></div></div>
+        <span class="task-tag tt-sec">Security</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Send the launch-morning email at 9am ET</div><div class="task-detail">Email goes out 30 minutes before the HN post. One sentence, the HN link, the download link. <span class="pink-code">This is the single highest-leverage action in the entire launch. The first hour on HN decides front page placement.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Post Show HN at 9:30am ET</div><div class="task-detail">Tuesday or Wednesday, never Monday or Friday. Title leads with the differentiator, not the project name. <span class="pink-code">"Show HN: A local-first SQL client that joins CSV files against live databases" beats "Show HN: DbArk — a database GUI" by a wide margin. The first version describes a product; the second describes a name.</span> Post once. Do not delete and repost.</div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Post to Reddit 30 minutes later — staggered</div><div class="task-detail">r/SQLServer first (most aligned audience). Then r/dotnet. Then r/sysadmin. Then r/linux and r/selfhosted in the afternoon. <span class="pink-code">Each subreddit gets its own headline and angle — copy-pasting the same post across all five is the fastest way to get downvoted in every one.</span> Stay in the comments for the first 6 hours. Answer every question. Thank every contributor.</div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Monitor + respond — first 6 hours, then first 72</div><div class="task-detail">Stay at the keyboard for the first 6 hours of the HN post. Every question answered within 15 minutes. Every legitimate criticism acknowledged honestly — never defensively. For the next 72 hours, check every 2 hours. <span class="pink-code">Founders who answer 50 HN questions on launch day convert at 3-4x the rate of founders who post and walk away.</span></div></div>
+        <span class="task-tag tt-launch">Launch</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Tag v1.0 in GitHub + publish release notes</div><div class="task-detail">GitHub Release with the MSI, .dmg, and .deb attached. Release notes lead with the differentiators: flat-file-join, zero telemetry, 80MB RAM, open source MIT, cross-platform. Link to SECURITY.md, PRIVACY.md, and the Wireshark proof. <span class="good-code">The GitHub Release is the canonical landing point for users arriving via the launch posts — make it as polished as the landing page itself.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-divider"><span class="divider-label">v1.1 roadmap — cut from v1.0, scheduled not cancelled</span><div class="divider-line"></div></div>
+
+  <div class="phase" id="phase-v11">
+    <div class="phase-header" onclick="togglePhase('phase-v11')">
+      <span class="phase-week" style="background:rgba(245,158,11,0.12);color:#f59e0b">v1.1+</span>
+      <span class="phase-title-text">The retention features — built for an audience that exists, with real feedback</span>
+      <span class="phase-progress" id="pp-phase-v11">0/12</span>
+      <span class="phase-chev">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="milestone cut-milestone"><strong>Why this list matters:</strong> v1.0 launch day + 1 is when v1.1 work begins. Every item below is scheduled, not cancelled. Each becomes its own launch beat — a new post, a new screenshot, a new reason for the audience to come back. <strong>v1.1 headline: schema &amp; data compare</strong> — "free, cross-platform Red Gate replacement" is a stronger standalone post than the SP debugger, and the DacFx engine is already proven against a local instance. The SP debugger + graphical execution plan move to v1.2 as their own paired launch beat. Sequencing logic: lead each release with the feature whose headline reaches the broadest audience; a pain-hook (Red Gate replacement) plus existing beta-tester social proof beats a deeper-but-narrower feature on a fresh launch.</div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Schema &amp; data compare — free cross-platform Red Gate replacement (v1.1 HEADLINE feature)</div><div class="task-detail"><strong>Schema compare (SQL Server):</strong> via <code>Microsoft.SqlServer.DacFx</code> NuGet in a non-AOT sidecar (same pattern as SSH.NET). <span class="good-code">DacFx engine PROVEN against local SQL Server Express — spike returned correct diffs (added table, added column, added SP) and the GenerateScript path is healthy. Reuse ConnectionManager's connection strings (Encrypt/TrustServerCertificate/SSH inherited) — do not let the sidecar build its own.</span> <code>SchemaComparison(src, tgt).Compare()</code> → diff tree; <code>GenerateScript(targetDbName)</code> → sync T-SQL. <strong>Schema compare (Postgres/MySQL):</strong> diff <code>information_schema</code> on both connections — covers tables, columns, views, routines; be honest in UI that indexes/FKs/permissions are not covered. <strong>Data compare (all engines):</strong> DuckDB cross-connection FULL OUTER JOIN on PK, reusing the flat-file-join infrastructure; row limit (default 10k) with warning. <strong>UI:</strong> two-connection compare panel, diff grid grouped by object type with tri-state (added=green / deleted=red / changed=amber), Monaco side-by-side diff per object, sync-script tab with "save to query library" (becomes a Git-diffable migration). <span class="warn-code">Non-negotiable: explicit destructive-change warning before any DROP can be saved/run. Check GetErrors() — Compare() fails silently with null Differences; surface structured errors to the UI, never crash. Map DifferenceType/null-side correctly: added=TargetObject null, deleted=SourceObject null.</span> <span class="good-code">Standalone launch post: "Show HN: free, open-source Red Gate SQL Compare replacement — schema + data diff, works on macOS and Linux, MIT." Hits free vs $595/yr, cross-platform vs Windows-only, and verifiable-open-source in one title. Estimate: 3–4 days SQL Server schema compare, 3–4 days Postgres/MySQL, 5–6 days data compare, 1–2 days testing.</span></div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Stored procedure debugger — SQL Server (v1.2 paired launch beat)</div><div class="task-detail">DAP-based debugger using <code>Microsoft.SqlServer.Management.Sdk.Sfc</code>. Breakpoints, step over/into/out, variables panel, call stack. <span class="good-code">Becomes its own launch post paired with the graphical execution plan: "DbArk now debugs SQL Server stored procedures — on macOS and Linux." Moved to v1.2 so schema/data compare takes the v1.1 headline.</span></div></div>
+        <span class="task-tag tt-gate">v1.2</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Graphical execution plan — SSMS-style icons, arrows, costs</div><div class="task-detail">SVG canvas with operator icons, proportional arrow widths, cost percentages, implicit conversion warnings, missing index hints. <span class="good-code">Paired with the SP debugger as the v1.2 launch beat — "DbArk now does query tuning the way SSMS users expect." Moved to v1.2 with the debugger to keep them launching together.</span></div></div>
+        <span class="task-tag tt-gate">v1.2</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">SQL Server Agent job browser + pg_cron + MySQL Events</div><div class="task-detail">Jobs node in schema tree. Per engine: <code>msdb.dbo.sysjobs</code> + <code>sysjobhistory</code>, <code>cron.job</code>, <code>information_schema.EVENTS</code>. Run Now, Enable/Disable, View History, Open Definition. <span class="good-code">v1.2 launch beat. Covers the 9am DBA workflow that keeps SSMS pinned to the taskbar.</span></div></div>
+        <span class="task-tag tt-gate">v1.2</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Deployed vs local diff</div><div class="task-detail">Side-by-side Monaco diff of editor content vs deployed object. Whitespace and case normalised. Prevents stale-overwrite deployments. <span class="good-code">No competitor offers this — pairs naturally with the SP debugger launch.</span></div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Object dependency map</div><div class="task-detail">For any SP/function/view, list inbound and outbound dependencies parsed from <code>sys.sql_expression_dependencies</code> / <code>information_schema.ROUTINES</code>. <span class="good-code">Critical before refactoring a table. No competitor in this price tier does this.</span></div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">SP parameter inspector</div><div class="task-detail">Type <code>EXEC procName</code> and pause — Monaco overlay shows parameter list, types, defaults. Tab inserts next placeholder. Auto-triggered.</div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Cross-database querying — multiple live connections</div><div class="task-detail">Extend file+DB join to live connections. Check additional connections to pull their tables into DuckDB as <code>conn2_tablename</code>. Postgres + MySQL, SQL Server + SQLite, any combination. <span class="good-code">Makes DbArk genuinely irreplaceable for microservices and legacy modernisation work.</span></div></div>
+        <span class="task-tag tt-gate">v1.2</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Team connection vault — encrypted, shareable</div><div class="task-detail">Optional encrypted vault file committed to a shared repo. Decrypt with own key. Metadata shared, credentials never. Enterprise teams want this without a cloud service.</div></div>
+        <span class="task-tag tt-gate">v1.2</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Multi-result export — ZIP or Excel workbook</div><div class="task-detail">Export all open result tabs as a ZIP of CSVs or a single .xlsx with each result as a sheet. Add based on beta demand.</div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Secure screen sharing mode</div><div class="task-detail">Keyboard shortcut instantly blurs connection names, hostnames, and result data. TablePlus has this and it is a genuine daily-use feature for developers who screenshare constantly.</div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+       <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">AI inline query explainer</div><div class="task-detail">Right-click query → <strong>Explain this query</strong>. Schema context + SQL sent to Anthropic API (<code>claude-haiku-4-5</code> for latency). Streams plain-English explanation to a collapsible panel. Gated behind settings toggle (off by default). User supplies own API key — stored in OS keychain. <span class="warn-code">Never send result data — schema + SQL text only. Make this explicit in settings copy.</span> <span class="good-code">Secondary headline for the launch post: repositions DbArk from "no AI" to "AI-assisted, on your terms" with 1-2 days of work.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Linux build target</div><div class="task-detail">Add <code>ubuntu-latest</code> to CI matrix. Replace <code>winsqlite3.dll</code> P/Invoke with platform-conditional load of <code>libsqlite3.so</code>. Verify DuckDB <code>libduckdb.so</code> path resolves. Run full query + schema explorer + SSH tunnel + flat-file-join flow on clean Ubuntu 22.04 before adding to release matrix. <span class="good-code">r/linux and r/selfhosted become additional launch surfaces. Not having Linux is a visible gap when OpenHare ships it.</span></div></div>
+        <span class="task-tag tt-must">Must</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">ER diagram PNG / SVG export</div><div class="task-detail">Export buttons are hidden for v1.0. Re-enable and fix the save path: the browser <code>&lt;a download&gt;</code> trick silently no-ops in the Tauri webview — route through <code>@tauri-apps/plugin-dialog</code> <code>save()</code> + <code>plugin-fs</code> write instead. <span class="warn-code">Needs the fs plugin added (npm + Cargo + register in main.rs) and a scoped <code>fs:allow-write-file</code> capability — a real permissions/security-surface decision for a locked-down app, which is why it's deferred. SVG serialisation + html-to-image rasterisation already work; only the save mechanism needs the Tauri treatment.</span> Code is written and staged, pending the plugin + capability setup.</div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+      <div class="task" onclick="toggle(this)">
+        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="task-content"><div class="task-title">Raise / warn on the 1000-row cap in the join engine</div><div class="task-detail">The live-table fetch + result serialization cap at 1000 rows; fine for the demo (Products = 500) but joins against larger live tables silently truncate. Surface a warning or raise the cap.</div></div>
+        <span class="task-tag tt-gate">v1.1</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const STORAGE_KEY = 'dbark_launch_plan_v6';
+
+  function getState() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+    catch(e) { return {}; }
+  }
+
+  function saveState(state) { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+
+  function getTaskId(taskEl) {
+    const phase = taskEl.closest('.phase').id;
+    const tasks = [...taskEl.closest('.phase-body').querySelectorAll('.task')];
+    return phase + '_' + tasks.indexOf(taskEl);
+  }
+
+  function isTaskDone(taskEl, state) {
+    const id = getTaskId(taskEl);
+    if (id in state) return !!state[id];
+    return taskEl.dataset.defaultDone === '1';
+  }
+
+  function toggle(taskEl) {
+    const state = getState();
+    const id = getTaskId(taskEl);
+    state[id] = !isTaskDone(taskEl, state);
+    saveState(state);
+    applyState();
+  }
+
+  function togglePhase(id) { document.getElementById(id).classList.toggle('open'); }
+
+  function applyState() {
+    const state = getState();
+    const allTasks = document.querySelectorAll('.task');
+    let total = allTasks.length, done = 0;
+
+    allTasks.forEach(task => {
+      if (isTaskDone(task, state)) { task.classList.add('done'); done++; }
+      else { task.classList.remove('done'); }
+    });
+
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    document.getElementById('stat-done').textContent = done;
+    document.getElementById('stat-remain').textContent = total - done;
+    document.getElementById('stat-pct').textContent = pct + '%';
+    document.getElementById('prog-fill').style.width = pct + '%';
+    document.getElementById('prog-text').textContent = done + ' / ' + total + ' done';
+
+    const phases = document.querySelectorAll('.phase');
+    let currentPhase = '—';
+    phases.forEach(phase => {
+      const phaseTasks = phase.querySelectorAll('.task');
+      const phaseDone = [...phaseTasks].filter(t => t.classList.contains('done')).length;
+      if (phaseDone < phaseTasks.length && currentPhase === '—')
+        currentPhase = phase.querySelector('.phase-week').textContent;
+    });
+    document.getElementById('stat-phase').textContent = currentPhase;
+
+    phases.forEach(phase => {
+      const phaseTasks = phase.querySelectorAll('.task');
+      const phaseDone = [...phaseTasks].filter(t => t.classList.contains('done')).length;
+      const counter = document.getElementById('pp-' + phase.id);
+      if (counter) {
+        counter.textContent = phaseDone + '/' + phaseTasks.length;
+        if (phaseDone === phaseTasks.length) { counter.classList.add('done-all'); phase.classList.add('phase-complete'); }
+        else { counter.classList.remove('done-all'); phase.classList.remove('phase-complete'); }
+      }
+    });
+  }
+
+  function resetAll() {
+    if (confirm('Reset all progress? This cannot be undone.')) {
+      localStorage.removeItem(STORAGE_KEY);
+      applyState();
+    }
+  }
+
+  applyState();
+</script>
+</body>
+</html>

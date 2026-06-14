@@ -36,7 +36,7 @@ Six supported engines via four driver implementations:
 - **Inline table editing** — double-click any cell to edit, UPDATE generated automatically
 - **Multi-tab editor** — each tab has its own connection, SQL, and results
 - **Multi-statement results** — each `;`-separated statement gets its own result tab
-- **Query history** — 90-day local history, credential-scrubbed, never leaves your machine
+- **Query history** — 90-day local history, credential-scrubbed, encrypted at rest, never leaves your machine
 - **Smart DDL rewrite** — auto rewrites `CREATE` → `CREATE OR ALTER/REPLACE` on deploy
 - **Git-native** — connection configs are plain TOML files, committable to any repo
 
@@ -44,6 +44,7 @@ Six supported engines via four driver implementations:
 
 - **DLL integrity checking** — SHA-256 verification of all native libraries at startup
 - **Credentials in OS keychain only** — never written to disk, never cross the IPC boundary to JavaScript
+- **Encrypted query history** — `state.db` encrypted with SQLCipher, key derived from the OS keychain
 - **Read-only connection mode** — enforced at the driver level, not just the UI
 - **Session lock** — auto-locks after 15 minutes of inactivity
 - **TOML input validation** — rejects injection attempts at the parser layer
@@ -71,17 +72,21 @@ Six supported engines via four driver implementations:
 
 ### Build & Run
 
+The six C# projects publish as NativeAOT binaries. AOT only triggers when the flag
+is passed explicitly **and** a runtime identifier (RID) is supplied — a plain
+`dotnet publish -c Release` silently produces a managed build instead. Each `.csproj`
+also sets `<PublishAot>true</PublishAot>` so the flag is not load-bearing, but pass
+it anyway and pick the RID for your platform (`win-x64`, `osx-arm64`, `linux-x64`):
+
 ```bash
 git clone https://github.com/TooSmoove/DbArk.git
 cd DbArk
 
-# Build C# NativeAOT projects
-cd src-csharp/QueryExecutor    && dotnet publish -c Release && cd ../..
-cd src-csharp/ConnectionManager && dotnet publish -c Release && cd ../..
-cd src-csharp/FileQueryEngine   && dotnet publish -c Release && cd ../..
-cd src-csharp/QueryHistory      && dotnet publish -c Release && cd ../..
-cd src-csharp/SshTunnel         && dotnet publish -c Release && cd ../..
-cd src-csharp/SchemaExplorer    && dotnet publish -c Release && cd ../..
+# Build C# NativeAOT projects (example uses win-x64 — substitute your RID)
+RID=win-x64
+for proj in QueryExecutor ConnectionManager FileQueryEngine QueryHistory SshTunnel SchemaExplorer; do
+  dotnet publish "src-csharp/$proj" -c Release -r "$RID" -p:PublishAot=true
+done
 
 # Install frontend deps
 npm install
@@ -90,6 +95,10 @@ npm install
 cargo tauri dev
 ```
 
+> A one-command build script (`build.ps1` / `build.sh`) that publishes all engines,
+> copies native libraries beside the executable, regenerates integrity hashes, and
+> bundles the installer is the recommended path — see the build checklist.
+
 ---
 
 ## Privacy & Security
@@ -97,6 +106,7 @@ cargo tauri dev
 - **Zero telemetry** — no analytics, no crash reporting unless you opt in, no accounts, ever
 - **Credentials in OS keychain only** — never written to disk, never sent across the IPC boundary to JavaScript
 - **TOML configs are safe to commit** — they contain connection metadata only, never passwords
+- **Encrypted history** — `state.db` is encrypted with SQLCipher
 - **DLL integrity checking** — SHA-256 hash verification before any native library loads
 - **Full details** — see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md)
 
@@ -112,13 +122,21 @@ The project is free forever — no paid tier added later, no rug-pull, no "we go
 
 ## Roadmap
 
-See the [build checklist](dbark-build-checklist.html) for the full plan. Currently in the polish and beta phase — full public launch coming soon. Notable items shipping with v1.0:
+See the [build checklist](dbark-build-checklist.html) for the full plan. Currently in the polish and beta phase — full public launch coming soon.
 
-- AI query explainer (opt-in, bring-your-own API key)
+**Shipping with v1.0:**
+
+- Live server activity panel (active queries, locks, kill button)
 - Auto-generated ER diagrams
+- Cross-platform — Windows, macOS, and Linux
+
+**Planned after launch (v1.1+):** each ships as its own release, built on real user feedback.
+
+- Schema & data compare — a free, cross-platform Red Gate alternative
 - Stored procedure debugger with breakpoints and step-through
-- Live server activity panel
-- Linux support
+- Graphical execution plans
+- SQL Server Agent job browser
+- Cross-database querying across multiple live connections
 
 ---
 
