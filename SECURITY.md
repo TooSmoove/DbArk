@@ -32,7 +32,7 @@ Report privately through one of:
 
 1. **GitHub private vulnerability reporting** — the preferred channel.
    Go to the repository's **Security** tab → **Report a vulnerability**.
-2. **Email** — `SECURITY_CONTACT_EMAIL` *(replace with your real address before
+2. **Email** — `smoovesoftwaresolutions@gmail.com` *(replace with your real address before
    publishing)*. Encrypt with the PGP key in `SECURITY-PGP.asc` if you wish.
 
 Please include: affected version, platform/OS, reproduction steps, and impact.
