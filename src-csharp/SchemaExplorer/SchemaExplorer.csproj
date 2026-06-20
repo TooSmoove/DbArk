@@ -13,4 +13,7 @@
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
     <PackageReference Include="Npgsql" Version="8.0.5" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/NativeString.cs" Link="NativeString.cs" />
+  </ItemGroup>
 </Project>

@@ -19,6 +19,44 @@ fn native_path(dll: &str) -> String {
     natives_dir().join(dll).to_string_lossy().into_owned()
 }
 
+/// Release a CoTaskMem buffer a C# DLL handed back across the FFI boundary by
+/// calling that DLL's exported `free_string` (Marshal.FreeCoTaskMem on the C#
+/// side). Audit C-1: before this, every returned string was copied with
+/// `into_owned()` and the raw pointer dropped un-freed, leaking one buffer per
+/// query/schema/history call.
+///
+/// `lib` MUST be the library that produced `ptr`. The buffer has to be released
+/// by the runtime that allocated it — on Windows CoTaskMem is process-global, but
+/// on macOS/Linux NativeAOT uses a per-runtime allocator, so freeing through the
+/// wrong DLL would be undefined behaviour. If the `free_string` export is missing
+/// we skip the free (a tiny leak is strictly safer than a bad free).
+///
+/// # Safety
+/// `ptr` must be a pointer returned by a `free_string`-exporting C# DLL, or null.
+unsafe fn free_cstr(lib: &libloading::Library, ptr: *const c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    if let Ok(free) =
+        lib.get::<unsafe extern "C" fn(*const c_char)>(b"free_string")
+    {
+        free(ptr);
+    }
+}
+
+/// Copy a non-null UTF-8 C string returned by a C# DLL into an owned Rust
+/// `String`, then free the C#-allocated buffer via `free_cstr`. Call sites guard
+/// `ptr.is_null()` before reaching here (the null branch supplies the fallback),
+/// so this assumes `ptr` is non-null.
+///
+/// # Safety
+/// `ptr` must be a non-null, NUL-terminated UTF-8 buffer produced by `lib`.
+unsafe fn read_and_free(lib: &libloading::Library, ptr: *const c_char) -> String {
+    let owned = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+    free_cstr(lib, ptr);
+    owned
+}
+
 /// The SQL Server ODBC driver name to use in connection strings, detected once
 /// from what is actually installed. Avoids hardcoding a single version (a clean
 /// machine may have Driver 18 but not 17, which throws ODBC IM002).
@@ -128,12 +166,12 @@ fn verify_dll(path: &str, expected_hex: &str) -> Result<(), String> {
 }
 
 // DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "c4c3aacb1d89f772e85085f7083e93a6a6699915f2ec27b18d6ce1988fb67876";
-const HASH_FILEQUERYENGINE: &str = "645e8d0b9cb8438a1f3f8069f283d45ac3fb89b4169e6b8d36f513929cfc0d19";
-const HASH_QUERYEXECUTOR: &str = "a25b5d7e09f1bdf232b91a8e7fbc7acc49f9b7bdf9b114e51c11598a43c73481";
-const HASH_QUERYHISTORY: &str = "9281b3c9b64507c58ba46a4e36c42196dba0c33811fce05fc619b08fef9b34f4";
-const HASH_SCHEMAEXPLORER: &str = "003ace4523587c8895a755174feeb6995a57ce715eb341c44d420ede9dc4ce1f";
-const HASH_SSHTUNNEL: &str = "413e874b186089077a3aeb234a146f66aba73de42be13f6656a95fe9bbe3e3e8";
+const HASH_CONNECTIONMANAGER: &str = "1c30e462c1747b517f2c098e0d6c44ed7021bbacf2226bee79522cf95d8c3f69";
+const HASH_FILEQUERYENGINE: &str = "8c928dba5606a18e3d3f6cb52a8537e356a7bc129f263e632cea6a69d6817098";
+const HASH_QUERYEXECUTOR: &str = "71d2c613c2245e32d132b1671a1fec6b0a4067dd4dd4833d724eeff75ace2faa";
+const HASH_QUERYHISTORY: &str = "85fe8144916c71dff309aac56889db9b7e83982811e20e5a764666ef2fa0e55b";
+const HASH_SCHEMAEXPLORER: &str = "4101e36ff5ea449544948a3d91e9299c09b099c9522c76f5cd20ecd56eb41e87";
+const HASH_SSHTUNNEL: &str = "bc034e811d78117819e8ac4d1df237f45276dbe5e2c8a4e1593c6871ff351b0c";
 const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
 const HASH_SQLCIPHER: &str = "895c0f5203352446f159d7780021b69b280dec6347c434c7a643ad6b7d0d883b";
 
@@ -213,7 +251,7 @@ async fn execute_query(mut connection_string: String, sql: String, engine: Strin
         let c_limit  = CString::new(row_limit_str).unwrap_or_default();
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr(), c_limit.as_ptr());
         if ptr.is_null() { "{\"error\":\"null response\"}".to_string() }
-        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+        else { read_and_free(get_query_executor(), ptr) }
     };
     unsafe {
         let bytes = connection_string.as_bytes_mut();
@@ -230,7 +268,7 @@ fn list_connections(folder_path: String) -> String {
         let c_path = CString::new(folder_path).unwrap_or_default();
         let ptr = func(c_path.as_ptr());
         if ptr.is_null() { "{\"connections\":[]}".to_string() }
-        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+        else { read_and_free(get_connection_manager(), ptr) }
     }
 }
 
@@ -270,7 +308,7 @@ fn save_connection(request_json: String) -> String {
         let c_req = CString::new(request_json).unwrap_or_default();
         let ptr = func(c_req.as_ptr());
         if ptr.is_null() { "ERROR: null response".to_string() }
-        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+        else { read_and_free(get_connection_manager(), ptr) }
     }
 }
 
@@ -408,7 +446,7 @@ async fn query_file(file_path: String, sql: String) -> String {
         let c_sql  = CString::new(sql).unwrap_or_default();
         let ptr = func(c_path.as_ptr(), c_sql.as_ptr());
         if ptr.is_null() { "{\"error\":\"null\"}".to_string() }
-        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+        else { read_and_free(get_file_query_engine(), ptr) }
     }
 }
 
@@ -420,7 +458,7 @@ async fn get_file_schema(file_path: String) -> String {
         let c_path = CString::new(file_path).unwrap_or_default();
         let ptr = func(c_path.as_ptr());
         if ptr.is_null() { "{\"error\":\"null\"}".to_string() }
-        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+        else { read_and_free(get_file_query_engine(), ptr) }
     }
 }
 
@@ -458,7 +496,7 @@ async fn list_db_tables(
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+        Ok(read_and_free(get_file_query_engine(), ptr))
     };
     unsafe {
         let bytes = connection_string.as_bytes_mut();
@@ -514,7 +552,7 @@ async fn query_file_with_db(
             strings.4.as_ptr(),
         );
         if ptr.is_null() { return Err("null response".to_string()); }
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+        Ok(read_and_free(get_file_query_engine(), ptr))
     };
     unsafe {
         let bytes = connection_string.as_bytes_mut();
@@ -589,7 +627,7 @@ async fn get_schema(
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+        Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
     // Zero out connection string
@@ -670,7 +708,7 @@ async fn list_databases(
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+        Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
     // Zero out connection string
@@ -710,7 +748,7 @@ async fn get_history(connection_id: String, limit: i32) -> String {
         let c_id = CString::new(connection_id).unwrap();
         let ptr  = func(c_id.as_ptr(), limit);
         if ptr.is_null() { "{\"entries\":[]}".to_string() }
-        else { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+        else { read_and_free(get_query_history(), ptr) }
     }
 }
 
@@ -799,7 +837,7 @@ async fn test_connection(
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
         if ptr.is_null() { return Err("No response".to_string()); }
-        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        read_and_free(get_query_executor(), ptr)
     };
 
     let parsed: serde_json::Value = serde_json::from_str(&result)
@@ -935,7 +973,7 @@ async fn open_tunnel(
         );
 
         if ptr.is_null() { return Err("null response".to_string()); }
-        let json = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        let json = read_and_free(get_ssh_tunnel(), ptr);
 
         let val: serde_json::Value = serde_json::from_str(&json)
             .map_err(|e| e.to_string())?;
@@ -1175,7 +1213,7 @@ async fn get_object_definition(
             let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                            c_engine.as_ptr(), c_ro.as_ptr());
             if ptr.is_null() { return Err("null response".to_string()); }
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            read_and_free(get_query_executor(), ptr)
         };
 
         // Parse the result — first row, first column is the definition
@@ -1257,7 +1295,7 @@ async fn get_object_definition(
         );
 
         if ptr.is_null() { return Err("null response".to_string()); }
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+        Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
     unsafe {
@@ -1333,7 +1371,7 @@ async fn get_sqlite_objects(database: String) -> Result<String, String> {
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
-        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        read_and_free(get_query_executor(), ptr)
     };
 
     Ok(raw)
@@ -1404,7 +1442,7 @@ async fn drop_object(
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
         if ptr.is_null() { return Err("null response".to_string()); }
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+        Ok(read_and_free(get_query_executor(), ptr))
     };
 
     unsafe {
@@ -1929,7 +1967,7 @@ async fn get_activity(mut connection_string: String, engine: String) -> String {
         if ptr.is_null() {
             "{\"error\":\"null response\"}".to_string()
         } else {
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            read_and_free(get_query_executor(), ptr)
         }
     };
     // Zero the connection string in memory after use — same pattern as
@@ -1958,7 +1996,7 @@ async fn kill_session(mut connection_string: String, engine: String, pid: String
         if ptr.is_null() {
             "{\"error\":\"null response\"}".to_string()
         } else {
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            read_and_free(get_query_executor(), ptr)
         }
     };
     unsafe {

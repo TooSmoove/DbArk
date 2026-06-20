@@ -8,4 +8,7 @@
     <SelfContained>true</SelfContained>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/NativeString.cs" Link="NativeString.cs" />
+  </ItemGroup>
 </Project>
