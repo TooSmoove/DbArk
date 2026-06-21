@@ -5,7 +5,7 @@ host = "localhost"
 port = 1433
 database = "master"
 username = "sa"
-credential_ref = "devsql:local-sqlserver:sa"
+credential_ref = "dbark:local-sqlserver:sa"
 
 [display]
 color = "#6c63ff"

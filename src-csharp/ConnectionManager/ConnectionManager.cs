@@ -201,7 +201,7 @@ public static class ConnectionManagerLib
             bool isSqlite = request.Engine == "sqlite";
             string credentialRef = isSqlite
                 ? ""
-                : $"devsql:{safeName}:{request.Username}";
+                : $"dbark:{safeName}:{request.Username}";
 
             // SQLite has no port; other engines default by engine when unset.
             int port = isSqlite ? 0 : (request.Port > 0 ? request.Port : GetDefaultPort(request.Engine));
@@ -268,7 +268,7 @@ public static class ConnectionManagerLib
     {
         string home = Environment.GetFolderPath(
             Environment.SpecialFolder.UserProfile);
-        string path = Path.Combine(home, ".devsql", "connections");
+        string path = Path.Combine(home, ".dbark", "connections");
 
         if (!Directory.Exists(path))
         {

@@ -7,6 +7,33 @@ on:
     branches: [main]
 
 jobs:
+  naming-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail on stale "devsql" naming in shipped source
+        shell: bash
+        run: |
+          # Guards the completed DevSql -> DbArk rename (code audit C-2).
+          # main.rs is excepted because it holds the TEMPORARY one-shot
+          # migration shim (migrate_legacy_devsql), which must reference the
+          # legacy "devsql:" / "~/.devsql" names. Remove --exclude=main.rs
+          # below once that shim is deleted post-v1.0.
+          matches=$(grep -rInI \
+            --exclude-dir=node_modules --exclude-dir=target \
+            --exclude-dir=obj --exclude-dir=bin \
+            --exclude-dir=.git --exclude-dir=.vs \
+            --exclude=main.rs \
+            -e devsql \
+            src src-tauri src-csharp index.html package.json || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Stale 'devsql' naming found in shipped source — finish the DbArk rename:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK: no stale devsql naming in shipped source (migration shim in main.rs excepted)."
+
   build-windows:
     runs-on: windows-latest
     steps:

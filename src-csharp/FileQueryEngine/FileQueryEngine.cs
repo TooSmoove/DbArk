@@ -376,7 +376,7 @@ public static class FileQueryEngineLib
         return ReaderToJson(reader);
     }
 
-    // SQL Server goes through ODBC: the connection string DevSql builds for the
+    // SQL Server goes through ODBC: the connection string DbArk builds for the
     // sqlserver engine is an ODBC string (Driver={ODBC Driver 18 for SQL Server};...),
     // which SqlConnection cannot parse — OdbcConnection accepts it directly and
     // matches the rest of the app's SQL Server path. Requires the System.Data.Odbc

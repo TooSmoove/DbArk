@@ -880,6 +880,114 @@ fn migrate_credential(
     true
 }
 
+/// The application's per-user data directory: `~/.dbark`.
+/// Single source of truth — every settings/queries/audit/history path derives
+/// from here so the workspace location can never drift between call sites again.
+pub(crate) fn dbark_dir() -> std::path::PathBuf {
+    dirs::home_dir().unwrap_or_default().join(".dbark")
+}
+
+/// One-shot, marker-gated migration from the pre-rename `devsql` workspace.
+///
+/// Pre-launch only: relocates `~/.devsql` → `~/.dbark` and re-keys any
+/// credentials stored under the old `devsql:` / `devsql-ssh:` keychain service
+/// prefix. A `.migrated_from_devsql` marker in the new directory ensures this
+/// runs at most once per machine. No public build ever shipped the `devsql`
+/// names, so this exists purely to protect early (beta-tester) installs on
+/// their first `dbark` launch — safe to delete a release or two after v1.0.
+fn migrate_legacy_devsql() {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
+    let old_dir = home.join(".devsql");
+    let new_dir = dbark_dir();
+    let marker = new_dir.join(".migrated_from_devsql");
+
+    // Already migrated on this machine, or a clean install with nothing to move.
+    if marker.exists() || !old_dir.exists() {
+        return;
+    }
+
+    // 1. Relocate the workspace directory. Only move when the destination does
+    //    not already exist, so a partially-created ~/.dbark is never clobbered.
+    if !new_dir.exists() {
+        if std::fs::rename(&old_dir, &new_dir).is_err() {
+            // Cross-device move or a locked file: leave ~/.devsql in place and
+            // retry next launch rather than risk a half-migrated workspace.
+            return;
+        }
+    }
+
+    // 2. Re-key credentials and rewrite credential_ref strings in every
+    //    connection TOML that still references the old prefix.
+    let conns = new_dir.join("connections");
+    if let Ok(entries) = std::fs::read_dir(&conns) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if !text.contains("devsql") {
+                continue;
+            }
+
+            // Move the keychain entries (best-effort; absent entries are fine).
+            if let Ok(value) = toml::from_str::<toml::Value>(&text) {
+                let cred = value
+                    .get("connection")
+                    .and_then(|c| c.get("credential_ref"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                // credential_ref format: devsql:{slug}:{db_username}
+                if let Some(rest) = cred.strip_prefix("devsql:") {
+                    let new_cred = format!("dbark:{rest}");
+                    let db_username = rest.rsplit(':').next().unwrap_or("").to_string();
+                    let _ = migrate_credential(cred.to_string(), new_cred, db_username);
+
+                    // SSH password, when present, lives under
+                    // devsql-ssh:{slug}:{ssh_username}; the slug is the same
+                    // first segment as the credential_ref.
+                    if let Some(slug) = rest.split(':').next() {
+                        let ssh_user = value
+                            .get("ssh")
+                            .and_then(|s| s.get("user"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !ssh_user.is_empty() {
+                            let old_ssh = format!("devsql-ssh:{slug}:{ssh_user}");
+                            let new_ssh = format!("dbark-ssh:{slug}:{ssh_user}");
+                            let _ = migrate_credential(old_ssh, new_ssh, ssh_user.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Rewrite the file text. `-ssh:` first so the plain `devsql:`
+            // replacement can't partially rewrite the ssh-prefixed form.
+            let updated = text
+                .replace("devsql-ssh:", "dbark-ssh:")
+                .replace("devsql:", "dbark:");
+            if updated != text {
+                let _ = std::fs::write(&path, updated);
+            }
+        }
+    }
+
+    // 3. Drop the marker so this never runs again on this machine.
+    let _ = std::fs::create_dir_all(&new_dir);
+    let _ = std::fs::write(
+        &marker,
+        "DbArk migrated this workspace from the legacy ~/.devsql layout. \
+         Safe to delete this file.\n",
+    );
+}
+
 #[tauri::command]
 async fn open_tunnel(
     tunnel_id: String,
@@ -1129,7 +1237,7 @@ fn append_audit_log(
         None    => return false,
     };
 
-    let log_path = home.join(".devsql").join("audit.log");
+    let log_path = home.join(".dbark").join("audit.log");
 
     let timestamp = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%SZ")
@@ -1523,10 +1631,7 @@ impl Default for AppSettings {
 }
 
 fn settings_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".devsql")
-        .join("settings.toml")
+    dbark_dir().join("settings.toml")
 }
 
 #[tauri::command]
@@ -1577,10 +1682,7 @@ struct SavedQuery {
 }
 
 fn queries_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".devsql")
-        .join("queries")
+    dbark_dir().join("queries")
 }
 
 #[tauri::command]
@@ -2044,6 +2146,14 @@ fn main() {
     }
 
     mark(t0, "DLL hash verify done");
+
+    // ── One-shot legacy workspace migration (devsql → dbark) ────────────────
+    // Pre-launch rename only: relocate ~/.devsql → ~/.dbark and re-key any
+    // credentials stored under the old "devsql:" service prefix. Marker-gated,
+    // so it runs at most once. Delete this call + migrate_legacy_devsql() after
+    // v1.0 — no public build ever shipped the devsql names.
+    migrate_legacy_devsql();
+    mark(t0, "legacy migration check done");
 
     // Generate or retrieve the state.db encryption key from keychain
     let history_key = {

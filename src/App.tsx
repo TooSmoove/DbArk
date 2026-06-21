@@ -658,11 +658,11 @@ function AddConnectionForm({
       });
       if (result.startsWith("ERROR")) { setError(result); return; }
 
-      const newRef = `devsql:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
+      const newRef = `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
 
       if (form.sshEnabled && form.sshPassword) {
         await invoke<boolean>("store_credential", {
-          target:   `devsql-ssh:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.sshUser}`,
+          target:   `dbark-ssh:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.sshUser}`,
           username: form.sshUser,
           password: form.sshPassword,
         });
@@ -761,7 +761,7 @@ function AddConnectionForm({
           </div>
           {editingConnection && (
             <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 4, lineHeight: 1.5 }}>
-              Updates the password DevSql uses to connect. Change the password on the server first, then update it here.
+              Updates the password DbArk uses to connect. Change the password on the server first, then update it here.
             </div>
           )}
         </label>
@@ -987,7 +987,7 @@ function AddConnectionForm({
             try {
               const msg = await invoke<string>("test_connection", {
                 credentialRef: editingConnection?.credentialRef ??
-                  `devsql:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`,
+                  `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`,
                 engine:      form.engine,
                 host:        form.host,
                 port:        parseInt(form.port) || defaultPort[form.engine] || 3306,
@@ -2881,7 +2881,7 @@ function App() {
             clipboardClearEnabled: loaded.clipboard_clear_enabled ?? true,
             clipboardClearSecs:    loaded.clipboard_clear_secs    ?? 60,
           };
-          const stored = localStorage.getItem("devsql_collapsed_groups");
+          const stored = localStorage.getItem("dbark_collapsed_groups");
 
           if (stored) {
             try {
@@ -2897,7 +2897,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const stored = localStorage.getItem("devsql_audit_log");
+    const stored = localStorage.getItem("dbark_audit_log");
     if (stored === "true") setAuditLogEnabled(true);
   }, []);
 
@@ -2948,7 +2948,7 @@ function App() {
       next.has(group) ? next.delete(group) : next.add(group);
       // Persist to localStorage
       localStorage.setItem(
-        "devsql_collapsed_groups",
+        "dbark_collapsed_groups",
         JSON.stringify([...next])
       );
       return next;
@@ -3031,7 +3031,7 @@ function App() {
       let sshPassword = "";
       try {
         sshPassword = await invoke<string>("get_ssh_password", {
-          target:   `devsql-ssh:${conn.id}:${conn.sshUser}`,
+          target:   `dbark-ssh:${conn.id}:${conn.sshUser}`,
           username: conn.sshUser,
         });
       } catch { /* no SSH password stored — key-only auth */ }
@@ -3151,7 +3151,7 @@ function App() {
   useEffect(() => {
     import("@tauri-apps/api/path").then(({ homeDir, join }) => {
       homeDir().then(async home => {
-        const folder = await join(home, ".devsql", "connections");
+        const folder = await join(home, ".dbark", "connections");
         console.log("Connections folder:", folder);
         setConnectionsFolder(folder);
         loadConnections(folder);
@@ -5211,7 +5211,7 @@ function handleCellCommit(
             marginBottom: 8,
             fontFamily: "monospace",
           }}>
-            DevSql is locked
+            DbArk is locked
           </div>
           <div style={{
             fontSize: 13,
@@ -6138,7 +6138,7 @@ function handleCellCommit(
 
                 <SettingsRow
                   label="Audit log"
-                  description="Append every executed query to ~/.devsql/audit.log"
+                  description="Append every executed query to ~/.dbark/audit.log"
                 >
                   <input
                     type="checkbox"
@@ -6448,7 +6448,7 @@ function handleCellCommit(
           padding: "12px 14px", borderBottom: "1px solid var(--border)",
           display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0,
         }}>
-          <span style={{ color: "var(--accent)", fontWeight: 700, fontSize: 14, letterSpacing: ".02em" }}>DevSQL</span>
+          <span style={{ color: "var(--accent)", fontWeight: 700, fontSize: 14, letterSpacing: ".02em" }}>DbArk</span>
         </div>
 
         {showAddForm ? (
@@ -7800,7 +7800,7 @@ function handleCellCommit(
             onClick={() => {
               const next = !auditLogEnabled;
               setAuditLogEnabled(next);
-              localStorage.setItem("devsql_audit_log", String(next));
+              localStorage.setItem("dbark_audit_log", String(next));
             }}
             title={auditLogEnabled ? "Audit log ON — click to disable" : "Audit log OFF — click to enable"}
             style={{

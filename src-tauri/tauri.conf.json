@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DevSql",
+  "productName": "DbArk",
   "version": "0.1.0",
-  "identifier": "com.devsql.app",
+  "identifier": "com.toosmoove.dbark",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "DevSql",
+        "title": "DbArk",
         "width": 1400,
         "height": 900,
         "minWidth": 800,

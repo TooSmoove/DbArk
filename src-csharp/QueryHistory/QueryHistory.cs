@@ -35,7 +35,7 @@ public static class QueryHistoryLib
     private static string GetDbPath()
     {
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string dir = Path.Combine(home, ".devsql");
+        string dir = Path.Combine(home, ".dbark");
         if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
         return Path.Combine(dir, "state.db");
     }
