@@ -24,7 +24,6 @@ jobs:
             --exclude-dir=node_modules --exclude-dir=target \
             --exclude-dir=obj --exclude-dir=bin \
             --exclude-dir=.git --exclude-dir=.vs \
-            --exclude=main.rs \
             -e devsql \
             src src-tauri src-csharp index.html package.json || true)
           if [ -n "$matches" ]; then
