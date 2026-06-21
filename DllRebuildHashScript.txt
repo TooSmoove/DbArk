@@ -1,5 +1,0 @@
-# After any DLL rebuild, run this and update the constant in main.rs:
-Get-ChildItem src-tauri\natives\*.dll | ForEach-Object {
-    $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-    Write-Host "$($_.Name) = `"$hash`";"
-}

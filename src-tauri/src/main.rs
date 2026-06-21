@@ -165,15 +165,14 @@ fn verify_dll(path: &str, expected_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
-// DLL integrity hashes — regenerate after every DLL rebuild
-const HASH_CONNECTIONMANAGER: &str = "1c30e462c1747b517f2c098e0d6c44ed7021bbacf2226bee79522cf95d8c3f69";
-const HASH_FILEQUERYENGINE: &str = "8c928dba5606a18e3d3f6cb52a8537e356a7bc129f263e632cea6a69d6817098";
-const HASH_QUERYEXECUTOR: &str = "71d2c613c2245e32d132b1671a1fec6b0a4067dd4dd4833d724eeff75ace2faa";
-const HASH_QUERYHISTORY: &str = "85fe8144916c71dff309aac56889db9b7e83982811e20e5a764666ef2fa0e55b";
-const HASH_SCHEMAEXPLORER: &str = "4101e36ff5ea449544948a3d91e9299c09b099c9522c76f5cd20ecd56eb41e87";
-const HASH_SSHTUNNEL: &str = "bc034e811d78117819e8ac4d1df237f45276dbe5e2c8a4e1593c6871ff351b0c";
-const HASH_DUCKDB: &str = "b0625a29327c7c3dbd74b69a746deb60abaeaea698c48b73ebc3232a91f54150";
-const HASH_SQLCIPHER: &str = "895c0f5203352446f159d7780021b69b280dec6347c434c7a643ad6b7d0d883b";
+// DLL integrity hashes are generated at build time by build.rs into
+// $OUT_DIR/dll_hashes.rs as `DLL_HASHES: &[(&str, &str)]`, derived from the exact
+// libraries staged in natives/ when the app is compiled. A rebuilt native can
+// therefore never silently diverge from a frozen, hand-edited constant — which was
+// the failure mode in code audit C-3 (CI rebuilds the NativeAOT DLLs, whose output
+// is not bit-reproducible, so they no longer matched the committed hashes and the
+// app fatally failed its own integrity check on launch).
+include!(concat!(env!("OUT_DIR"), "/dll_hashes.rs"));
 
 static SSH_TUNNEL: OnceLock<libloading::Library> = OnceLock::new();
 static QUERY_EXECUTOR:     OnceLock<libloading::Library> = OnceLock::new();
@@ -2025,20 +2024,12 @@ fn main() {
     let t0 = Instant::now();                        
     mark(t0, "main() entered");                     
 
-     // Verify all native DLL integrity before loading
-    let dlls = [
-        ("ConnectionManager.dll", HASH_CONNECTIONMANAGER),
-        ("FileQueryEngine.dll",   HASH_FILEQUERYENGINE),
-        ("QueryExecutor.dll",     HASH_QUERYEXECUTOR),
-        ("QueryHistory.dll",      HASH_QUERYHISTORY),
-        ("SchemaExplorer.dll",    HASH_SCHEMAEXPLORER),
-        ("duckdb.dll",            HASH_DUCKDB),
-        ("SshTunnel.dll", HASH_SSHTUNNEL),
-        ("sqlcipher.dll",         HASH_SQLCIPHER),
-    ];
-
-   for (dll, expected) in &dlls {
-        let path = native_path(dll);
+     // Verify all native library integrity before loading. DLL_HASHES is generated
+     // by build.rs from the libraries actually staged in natives/ at build time, so
+     // the filenames already carry the correct per-platform extension and there is a
+     // single source of truth for both the file list and the expected hash.
+   for (lib, expected) in DLL_HASHES {
+        let path = native_path(lib);
         if let Err(reason) = verify_dll(&path, expected) {
             fatal::report_fatal("DLL integrity check", reason);
         }

@@ -31,6 +31,23 @@ harness (script + pass criterion) instead of skipping coverage entirely.
   `<Compile Include>`-linked file like `src-csharp/Shared/NativeString.cs`).
 - Don't commit build artifacts, binaries, or IDE caches.
 
+## DLL integrity hashes (audit C-3 — do not regress)
+
+The startup integrity check (`verify_dll` in `src-tauri/src/main.rs`) compares each
+native library in `natives/` against an expected SHA-256. Those expected hashes are
+**generated at build time** by `src-tauri/build.rs` into `$OUT_DIR/dll_hashes.rs`
+(`DLL_HASHES: &[(&str, &str)]`), computed from the exact bytes that will ship.
+
+- Never hand-edit hashes as `const HASH_*` in source. A frozen constant silently
+  diverges from CI-rebuilt NativeAOT libraries (whose output isn't bit-reproducible),
+  and the shipped app then fails its own integrity check on launch. CI has a guard
+  that fails the build if a `const HASH_*: &str` reappears.
+- To enforce a new native library, add its base name to `NATIVE_COMPONENTS` in
+  `build.rs` — one place. build.rs resolves the per-platform filename
+  (`Foo.dll` / `Foo.dylib` / `libFoo.so`) and fails the build if it's missing.
+- build.rs emits `cargo:rerun-if-changed` for every native, so a rebuilt DLL
+  re-triggers hash generation automatically. Don't reintroduce a manual hash step.
+
 ## FFI string ownership (audit C-1 — do not regress)
 
 Every `[UnmanagedCallersOnly]` entry point returns a buffer allocated with
