@@ -29,7 +29,19 @@ src-tauri/scripts/
 
 # Rust
 target/
-Cargo.lock
+
+# Third-party + built natives are fetched/published, never committed (code audit C-4)
+/src-tauri/duckdb.dll
+/src-tauri/natives/*.dll
+/src-tauri/natives/*.dylib
+/src-tauri/natives/*.so
+sqlcipher.zip
+
+# Visual Studio cache — leaks the local Copilot code index
+.vs/
+
+# Local/scratch SQLite DBs
+*.db
 
 # Node
 node_modules/

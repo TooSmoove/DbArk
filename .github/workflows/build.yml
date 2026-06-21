@@ -52,6 +52,17 @@ jobs:
           fi
           echo "OK: no hardcoded DLL integrity hashes (build.rs is the single source of truth)."
 
+      - name: Fail if native binaries are committed
+        shell: bash
+        run: |
+          hits=$(git ls-files | grep -iE '\.(dll|dylib|so)$|^sqlcipher\.zip$' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Native binaries must not be committed — they are staged by scripts/stage-natives.* (code audit C-4):"
+            echo "$hits"
+            exit 1
+          fi
+          echo "OK: no native binaries tracked in git."
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -112,6 +123,10 @@ jobs:
 
       - name: Check Tauri version alignment
         run: cargo tauri info
+
+      - name: Stage third-party natives (DuckDB + SQLCipher)
+        shell: pwsh
+        run: ./scripts/stage-natives.ps1
 
       - name: Build Tauri app
         run: cargo tauri build
@@ -175,16 +190,8 @@ jobs:
           cp src-csharp/SshTunnel/bin/Release/net10.0/osx-arm64/publish/*.dylib         src-tauri/natives/
           cp src-csharp/SchemaExplorer/bin/Release/net10.0/osx-arm64/publish/*.dylib    src-tauri/natives/
 
-      - name: Stage third-party native libs (DuckDB + SQLCipher)
-        run: |
-          set -euo pipefail
-          DUCKDB_VERSION=v1.5.0   # match the committed Windows duckdb.dll / FileQueryEngine.cs
-          curl -fL -o /tmp/libduckdb.zip \
-            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/libduckdb-osx-universal.zip"
-          unzip -o /tmp/libduckdb.zip libduckdb.dylib -d src-tauri/natives/
-          brew install sqlcipher
-          cp -L "$(brew --prefix sqlcipher)/lib/libsqlcipher.dylib" src-tauri/natives/
-          ls -la src-tauri/natives/
+      - name: Stage third-party natives (DuckDB + SQLCipher)
+        run: bash scripts/stage-natives.sh
 
       - name: Build Tauri app
         run: cargo tauri build --target aarch64-apple-darwin
