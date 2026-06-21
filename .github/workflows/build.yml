@@ -175,6 +175,17 @@ jobs:
           cp src-csharp/SshTunnel/bin/Release/net10.0/osx-arm64/publish/*.dylib         src-tauri/natives/
           cp src-csharp/SchemaExplorer/bin/Release/net10.0/osx-arm64/publish/*.dylib    src-tauri/natives/
 
+      - name: Stage third-party native libs (DuckDB + SQLCipher)
+        run: |
+          set -euo pipefail
+          DUCKDB_VERSION=v1.5.0   # match the committed Windows duckdb.dll / FileQueryEngine.cs
+          curl -fL -o /tmp/libduckdb.zip \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/libduckdb-osx-universal.zip"
+          unzip -o /tmp/libduckdb.zip libduckdb.dylib -d src-tauri/natives/
+          brew install sqlcipher
+          cp -L "$(brew --prefix sqlcipher)/lib/libsqlcipher.dylib" src-tauri/natives/
+          ls -la src-tauri/natives/
+
       - name: Build Tauri app
         run: cargo tauri build --target aarch64-apple-darwin
         env:
