@@ -459,7 +459,9 @@ public static class SchemaExplorerLib
             foreach (var tableName in tableNames)
             {
                 IntPtr fkStmt = IntPtr.Zero;
-                SqlitePrepareV2(db, $"PRAGMA foreign_key_list(\"{tableName}\")",
+                // PRAGMA arguments can't be bound parameters, so quote the identifier
+                // (doubling any embedded ") rather than interpolating it raw (audit H-1).
+                SqlitePrepareV2(db, $"PRAGMA foreign_key_list({SqlIdentifier.Quote("sqlite", tableName)})",
                     -1, ref fkStmt, IntPtr.Zero);
                 try
                 {
@@ -671,7 +673,9 @@ public static class SchemaExplorerLib
                 var table = new TableInfo { Name = tableName, Schema = "main" };
 
                 IntPtr colStmt = IntPtr.Zero;
-                SqlitePrepareV2(db, $"PRAGMA table_info(\"{tableName}\")",
+                // PRAGMA arguments can't be bound parameters, so quote the identifier
+                // (doubling any embedded ") rather than interpolating it raw (audit H-1).
+                SqlitePrepareV2(db, $"PRAGMA table_info({SqlIdentifier.Quote("sqlite", tableName)})",
                     -1, ref colStmt, IntPtr.Zero);
                 try
                 {
@@ -1245,17 +1249,18 @@ public static class SchemaExplorerLib
         string objectType, string schemaName)
     {
         // Audit H-1: objectName/schemaName arrive from the frontend over IPC and are
-        // untrusted. Escape them for the string literals in the catalog queries below
-        // (oLit/sLit), and quote them as identifiers in the generated DDL via
-        // SqlIdentifier.Quote. (Parameterizing SqlServerOdbc.Query is the stronger fix
-        // but needs ODBC param binding in that hand-rolled wrapper — tracked separately.)
-        var oLit = SqlIdentifier.EscapeLiteral(objectName);
-        var sLit = SqlIdentifier.EscapeLiteral(schemaName);
+        // untrusted. The catalog queries below bind them as ODBC '?' parameters via
+        // SqlServerParamQuery (never concatenated into SQL); the generated DDL quotes
+        // them as identifiers via SqlIdentifier.Quote. `qualified` is the schema-
+        // qualified name handed to OBJECT_ID(?) as a single bound argument.
+        var qualified = $"{schemaName}.{objectName}";
 
         if (objectType == "table")
         {
-            // Generate CREATE TABLE script from schema info
-            var cols = SqlServerOdbc.Query(connectionString, $@"
+            // Generate CREATE TABLE script from schema info. '?' params bind positionally
+            // in the order they appear: OBJECT_ID(qualified), then the PK subquery's
+            // name/schema, then the outer name/schema.
+            var cols = SqlServerParamQuery(connectionString, @"
             SELECT
                 c.COLUMN_NAME,
                 c.DATA_TYPE,
@@ -1263,7 +1268,7 @@ public static class SchemaExplorerLib
                 c.IS_NULLABLE,
                 c.COLUMN_DEFAULT,
                 CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK,
-                COLUMNPROPERTY(OBJECT_ID('{sLit}.{oLit}'),
+                COLUMNPROPERTY(OBJECT_ID(?),
                     c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY
             FROM INFORMATION_SCHEMA.COLUMNS c
             LEFT JOIN (
@@ -1271,13 +1276,14 @@ public static class SchemaExplorerLib
                 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
                 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
                     ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
-                WHERE tc.TABLE_NAME = '{oLit}'
-                    AND tc.TABLE_SCHEMA = '{sLit}'
+                WHERE tc.TABLE_NAME = ?
+                    AND tc.TABLE_SCHEMA = ?
                     AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
             ) pk ON pk.COLUMN_NAME = c.COLUMN_NAME
-            WHERE c.TABLE_NAME = '{oLit}'
-                AND c.TABLE_SCHEMA = '{sLit}'
-            ORDER BY c.ORDINAL_POSITION");
+            WHERE c.TABLE_NAME = ?
+                AND c.TABLE_SCHEMA = ?
+            ORDER BY c.ORDINAL_POSITION",
+                qualified, objectName, schemaName, objectName, schemaName);
 
             var sb = new System.Text.StringBuilder();
             sb.AppendLine($"CREATE TABLE {SqlIdentifier.Quote("sqlserver", schemaName)}.{SqlIdentifier.Quote("sqlserver", objectName)} (");
@@ -1322,8 +1328,8 @@ public static class SchemaExplorerLib
         // NOTE: OBJECT_DEFINITION returns NULL (not an error) in three different
         // cases — object missing, caller lacks VIEW DEFINITION, or object is
         // encrypted. Disambiguate so the message tells the user what to DO.
-        var rows = SqlServerOdbc.Query(connectionString,
-            $"SELECT OBJECT_DEFINITION(OBJECT_ID('{sLit}.{oLit}'))");
+        var rows = SqlServerParamQuery(connectionString,
+            "SELECT OBJECT_DEFINITION(OBJECT_ID(?))", qualified);
 
         var def = rows.FirstOrDefault()?[0];
         if (def != null)
@@ -1332,10 +1338,10 @@ public static class SchemaExplorerLib
         // Definition came back NULL — ask the server why so the error is actionable.
         // HAS_PERMS_BY_NAME answers the permission question for the *current* login
         // against *this* object, and a least-privilege user can call it on itself.
-        var diag = SqlServerOdbc.Query(connectionString, $@"
+        var diag = SqlServerParamQuery(connectionString, @"
             SELECT
-                CASE WHEN OBJECT_ID('{sLit}.{oLit}') IS NULL THEN 0 ELSE 1 END,
-                HAS_PERMS_BY_NAME('{sLit}.{oLit}', 'OBJECT', 'VIEW DEFINITION')")
+                CASE WHEN OBJECT_ID(?) IS NULL THEN 0 ELSE 1 END,
+                HAS_PERMS_BY_NAME(?, 'OBJECT', 'VIEW DEFINITION')", qualified, qualified)
             .FirstOrDefault();
 
         var objIdVisible = diag != null && diag[0] == "1";
@@ -1363,6 +1369,41 @@ public static class SchemaExplorerLib
         throw new Exception(
             $"The definition of '{schemaName}.{objectName}' is unavailable because the object " +
             "was created WITH ENCRYPTION. Encrypted definitions cannot be retrieved by any client.");
+    }
+
+    // Managed-ODBC parameterized query for SQL Server catalog lookups that take
+    // untrusted object/schema names (audit H-1). Positional '?' parameters are bound,
+    // so the names are never concatenated into SQL. DbArk's SQL Server connection string
+    // is an ODBC string, so OdbcConnection is the correct client here (the same managed-
+    // ODBC path FileQueryEngine uses); the hand-rolled SqlServerOdbc.Query offers no
+    // parameter binding, which is why it stays only on the no-user-input call sites.
+    // Returns the same List<string?[]> shape as SqlServerOdbc.Query — every column is
+    // read as its string form — so callers are unchanged. Args bind in the order the
+    // '?' placeholders appear in `sql`.
+    private static List<string?[]> SqlServerParamQuery(
+        string connectionString, string sql, params string?[] args)
+    {
+        using var conn = new System.Data.Odbc.OdbcConnection(connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var a in args)
+            cmd.Parameters.Add(new System.Data.Odbc.OdbcParameter
+            {
+                OdbcType = System.Data.Odbc.OdbcType.NVarChar,
+                Value = (object?)a ?? DBNull.Value,
+            });
+
+        using var reader = cmd.ExecuteReader();
+        var results = new List<string?[]>();
+        while (reader.Read())
+        {
+            var row = new string?[reader.FieldCount];
+            for (int i = 0; i < reader.FieldCount; i++)
+                row[i] = reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString();
+            results.Add(row);
+        }
+        return results;
     }
 
     // ---- MYSQL ----------------------------------------------------
@@ -1406,14 +1447,13 @@ public static class SchemaExplorerLib
         using var cmd = conn.CreateCommand();
 
         // Audit H-1: objectName/schemaName arrive from the frontend and are untrusted.
-        // oLit/sLit escape them for the string literals in the catalog queries below;
-        // SqlIdentifier.Quote("postgres", …) quotes them as identifiers in generated DDL.
-        var oLit = SqlIdentifier.EscapeLiteral(objectName);
-        var sLit = SqlIdentifier.EscapeLiteral(schemaName);
+        // The catalog queries below bind them as @parameters (never concatenated into
+        // SQL); SqlIdentifier.Quote("postgres", …) quotes them as identifiers in the
+        // generated DDL, where a parameter cannot stand in for an identifier.
 
         if (objectType == "table")
         {
-            cmd.CommandText = $@"
+            cmd.CommandText = @"
         SELECT
             c.column_name,
             c.data_type,
@@ -1427,13 +1467,15 @@ public static class SchemaExplorerLib
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage ku
                 ON tc.constraint_name = ku.constraint_name
-            WHERE tc.table_name = '{oLit}'
-                AND tc.table_schema = '{sLit}'
+            WHERE tc.table_name = @objectName
+                AND tc.table_schema = @schemaName
                 AND tc.constraint_type = 'PRIMARY KEY'
         ) pk ON pk.column_name = c.column_name
-        WHERE c.table_name = '{oLit}'
-            AND c.table_schema = '{sLit}'
+        WHERE c.table_name = @objectName
+            AND c.table_schema = @schemaName
         ORDER BY c.ordinal_position";
+            cmd.Parameters.AddWithValue("objectName", objectName);
+            cmd.Parameters.AddWithValue("schemaName", schemaName);
 
             using var reader = cmd.ExecuteReader();
             var sb = new System.Text.StringBuilder();
@@ -1470,11 +1512,13 @@ public static class SchemaExplorerLib
 
         if (objectType == "view")
         {
-            cmd.CommandText = $@"
+            cmd.CommandText = @"
         SELECT view_definition
         FROM information_schema.views
-        WHERE table_name = '{oLit}'
-            AND table_schema = '{sLit}'";
+        WHERE table_name = @objectName
+            AND table_schema = @schemaName";
+            cmd.Parameters.AddWithValue("objectName", objectName);
+            cmd.Parameters.AddWithValue("schemaName", schemaName);
 
             var def = cmd.ExecuteScalar()?.ToString()
                 ?? throw new Exception($"No definition found for view '{objectName}'");
@@ -1484,7 +1528,7 @@ public static class SchemaExplorerLib
 
         if (objectType == "trigger")
         {
-            cmd.CommandText = $@"
+            cmd.CommandText = @"
                     SELECT
                         t.tgname,
                         c.relname,
@@ -1508,8 +1552,9 @@ public static class SchemaExplorerLib
                     JOIN pg_class     c ON c.oid = t.tgrelid
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                     JOIN pg_proc      p ON p.oid = t.tgfoid
-                    WHERE t.tgname = '{oLit}'
+                    WHERE t.tgname = @objectName
                         AND NOT t.tgisinternal";
+            cmd.Parameters.AddWithValue("objectName", objectName);
 
             string triggerName, tableName, schemaN, functionName, timing, evt, orientation;
 
@@ -1530,13 +1575,15 @@ public static class SchemaExplorerLib
 
             // Use a separate command for the function definition
             using var cmd2 = conn.CreateCommand();
-            cmd2.CommandText = $@"
+            cmd2.CommandText = @"
                     SELECT pg_get_functiondef(p.oid)
                     FROM pg_proc p
                     JOIN pg_namespace n ON n.oid = p.pronamespace
-                    WHERE p.proname = '{SqlIdentifier.EscapeLiteral(functionName)}'
-                        AND n.nspname = '{SqlIdentifier.EscapeLiteral(schemaN)}'
+                    WHERE p.proname = @functionName
+                        AND n.nspname = @schemaN
                     LIMIT 1";
+            cmd2.Parameters.AddWithValue("functionName", functionName);
+            cmd2.Parameters.AddWithValue("schemaN", schemaN);
 
             var funcDef = cmd2.ExecuteScalar()?.ToString() ?? "";
 
@@ -1555,13 +1602,15 @@ public static class SchemaExplorerLib
         }
 
         // Procedures and functions — existing code unchanged
-        cmd.CommandText = $@"
+        cmd.CommandText = @"
         SELECT pg_get_functiondef(p.oid)
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE p.proname = '{oLit}'
-            AND n.nspname = '{sLit}'
+        WHERE p.proname = @objectName
+            AND n.nspname = @schemaName
         LIMIT 1";
+        cmd.Parameters.AddWithValue("objectName", objectName);
+        cmd.Parameters.AddWithValue("schemaName", schemaName);
 
         var result = cmd.ExecuteScalar()?.ToString()
             ?? throw new Exception($"No definition found for {objectName}");

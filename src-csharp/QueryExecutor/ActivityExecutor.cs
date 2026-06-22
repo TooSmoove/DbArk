@@ -370,7 +370,11 @@ public static class ActivityExecutor
         using var conn = new NpgsqlConnection(connectionString);
         conn.Open();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT pg_cancel_backend({pid})";
+        // pg_cancel_backend takes an integer argument — a normal value position, so
+        // bind it as a parameter rather than interpolating (pid is validated numeric
+        // upstream, but parameterizing keeps the query text input-free).
+        cmd.CommandText = "SELECT pg_cancel_backend(@pid)";
+        cmd.Parameters.AddWithValue("pid", int.Parse(pid));
         cmd.CommandTimeout = 10;
         var result = cmd.ExecuteScalar();
         // pg_cancel_backend returns true on success, false if pid wasn't found
@@ -384,6 +388,10 @@ public static class ActivityExecutor
         using var conn = new MySqlConnection(connectionString);
         conn.Open();
         using var cmd = conn.CreateCommand();
+        // KILL takes a literal connection id and cannot accept a bound parameter in
+        // MySQL or SQL Server, so pid stays interpolated — it is hard-validated as a
+        // number in KillSession (long.TryParse) before reaching here, which is the
+        // correct defense for a non-bindable position.
         cmd.CommandText = $"KILL {pid}";
         cmd.CommandTimeout = 10;
         cmd.ExecuteNonQuery();

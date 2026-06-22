@@ -154,14 +154,24 @@ public static class QueryHistoryLib
                 PurgeOldHistory(db);
 
                 string sql = string.IsNullOrEmpty(connectionId)
-                    ? $"SELECT id, connection_id, connection_name, sql, executed_at, duration_ms, row_count, success FROM query_history ORDER BY executed_at DESC LIMIT {limit}"
-                    : $"SELECT id, connection_id, connection_name, sql, executed_at, duration_ms, row_count, success FROM query_history WHERE connection_id = ? ORDER BY executed_at DESC LIMIT {limit}";
+                    ? "SELECT id, connection_id, connection_name, sql, executed_at, duration_ms, row_count, success FROM query_history ORDER BY executed_at DESC LIMIT ?"
+                    : "SELECT id, connection_id, connection_name, sql, executed_at, duration_ms, row_count, success FROM query_history WHERE connection_id = ? ORDER BY executed_at DESC LIMIT ?";
 
                 IntPtr stmt = IntPtr.Zero;
                 SqlitePrepareV2(db, sql, -1, ref stmt, IntPtr.Zero);
 
+                // Bind LIMIT (and connection_id when filtering) as parameters so the
+                // query text carries no interpolated values. '?' params bind 1-based in
+                // textual order: connection_id (when present) is 1, LIMIT follows.
                 if (!string.IsNullOrEmpty(connectionId))
+                {
                     SqliteBindText(stmt, 1, connectionId, -1, IntPtr.Zero);
+                    SqliteBindInt(stmt, 2, limit);
+                }
+                else
+                {
+                    SqliteBindInt(stmt, 1, limit);
+                }
 
                 var entries = new List<HistoryEntry>();
                 while (SqliteStep(stmt) == 100) // SQLITE_ROW
@@ -281,11 +291,13 @@ public static class QueryHistoryLib
     }
     private static void PurgeOldHistory(IntPtr db)
     {
-        // Delete entries older than 90 days
+        // Delete entries older than 90 days. cutoff is bound as a parameter (it is an
+        // internally-computed long, but binding keeps the query text value-free).
         long cutoff = DateTimeOffset.UtcNow.AddDays(-90).ToUnixTimeMilliseconds();
-        string sql = $"DELETE FROM query_history WHERE executed_at < {cutoff}";
+        string sql = "DELETE FROM query_history WHERE executed_at < ?";
         IntPtr stmt = IntPtr.Zero;
         SqlitePrepareV2(db, sql, -1, ref stmt, IntPtr.Zero);
+        SqliteBindInt64(stmt, 1, cutoff);
         SqliteStep(stmt);
         SqliteFinalize(stmt);
     }
