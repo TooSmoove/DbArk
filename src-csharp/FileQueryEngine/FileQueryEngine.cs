@@ -185,12 +185,8 @@ public static class FileQueryEngineLib
                     string normPath = filePath.Replace("\\", "/");
                     string ext = Path.GetExtension(filePath).ToLowerInvariant();
 
-                    string viewSql = ext switch
-                    {
-                        ".csv" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv_auto('{normPath}')",
-                        ".json" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_json_auto('{normPath}')",
-                        _ => $"CREATE OR REPLACE VIEW data AS SELECT * FROM '{normPath}'"
-                    };
+                    // Path is single-quote-escaped via DuckDbFileScan (audit H-1).
+                    string viewSql = $"CREATE OR REPLACE VIEW data AS SELECT * FROM {DuckDbFileScan.ScanExpr(ext, normPath)}";
 
                     string? setupErr = RunSetupQuery(conn, viewSql);
                     if (setupErr != null) return Error($"Failed to register file: {setupErr}");
@@ -218,12 +214,8 @@ public static class FileQueryEngineLib
             string normPath = filePath.Replace("\\", "/");
             string ext = Path.GetExtension(filePath).ToLowerInvariant();
 
-            string sql = ext switch
-            {
-                ".csv" => $"DESCRIBE SELECT * FROM read_csv_auto('{normPath}')",
-                ".json" => $"DESCRIBE SELECT * FROM read_json_auto('{normPath}')",
-                _ => $"DESCRIBE SELECT * FROM '{normPath}'"
-            };
+            // Path is single-quote-escaped via DuckDbFileScan (audit H-1).
+            string sql = $"DESCRIBE SELECT * FROM {DuckDbFileScan.ScanExpr(ext, normPath)}";
 
             int rc = duckdb_open(null, out IntPtr db);
             if (rc != DUCKDB_SUCCESS) return Error("Failed to open DuckDB");
@@ -321,12 +313,8 @@ public static class FileQueryEngineLib
                     // Register file as "data" view
                     string normPath = filePath.Replace("\\", "/");
                     string ext = Path.GetExtension(filePath).ToLowerInvariant();
-                    string viewSql = ext switch
-                    {
-                        ".csv" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv_auto('{normPath}')",
-                        ".json" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_json_auto('{normPath}')",
-                        _ => $"CREATE OR REPLACE VIEW data AS SELECT * FROM '{normPath}'"
-                    };
+                    // Path is single-quote-escaped via DuckDbFileScan (audit H-1).
+                    string viewSql = $"CREATE OR REPLACE VIEW data AS SELECT * FROM {DuckDbFileScan.ScanExpr(ext, normPath)}";
 
                     string? setupErr = RunSetupQuery(conn, viewSql);
                     if (setupErr != null) return Error($"Failed to register file: {setupErr}");

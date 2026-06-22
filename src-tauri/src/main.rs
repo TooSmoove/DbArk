@@ -1428,9 +1428,11 @@ async fn drop_object(
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
-    // Build DROP statement per engine and type
+    // Build DROP statement per engine and type. Identifiers are quoted per engine
+    // and the object type is validated against an allow-list (audit H-1), so a
+    // crafted object name or type can't break out into injected SQL.
     let drop_sql = build_drop_statement(
-        &engine, &object_type, &object_name, &schema, &table);
+        &engine, &object_type, &object_name, &schema, &table)?;
 
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -1459,45 +1461,140 @@ async fn drop_object(
     result
 }
 
+/// Quote a SQL identifier for `engine`, doubling that engine's closing delimiter so a
+/// crafted or compromised object name can't break out of the quotes (audit H-1).
+/// SQL Server uses `[..]` (`]`→`]]`), MySQL/MariaDB use `` `..` `` (`` ` ``→`` `` ``),
+/// and everything else (Postgres, CockroachDB, SQLite) uses the SQL-standard `".."`
+/// (`"`→`""`). Quoting Postgres/SQLite identifiers is also a correctness win: it
+/// preserves the exact catalog casing instead of letting an unquoted name case-fold.
+fn quote_ident(engine: &str, ident: &str) -> String {
+    match engine.to_lowercase().as_str() {
+        "sqlserver"          => format!("[{}]", ident.replace(']', "]]")),
+        "mysql" | "mariadb"  => format!("`{}`", ident.replace('`', "``")),
+        _                    => format!("\"{}\"", ident.replace('"', "\"\"")),
+    }
+}
+
+/// Build a DROP statement for a schema object. Every identifier is quoted per engine
+/// via [`quote_ident`], and `object_type` is validated against a fixed per-engine
+/// allow-list — an unrecognised type returns `Err` rather than being interpolated as a
+/// raw SQL keyword. Together these close the H-1 identifier-injection surface: the
+/// object name/schema/table all arrive from the frontend over IPC and must be treated
+/// as untrusted.
 fn build_drop_statement(
     engine: &str, object_type: &str,
     name: &str, schema: &str, table: &str,
-) -> String {
-    match engine.to_lowercase().as_str() {
+) -> Result<String, String> {
+    let eng = engine.to_lowercase();
+    let q = |ident: &str| quote_ident(&eng, ident);
+    let sql = match eng.as_str() {
         "sqlserver" => match object_type {
-            "procedure" => format!("DROP PROCEDURE [{schema}].[{name}]"),
-            "function"  => format!("DROP FUNCTION [{schema}].[{name}]"),
-            "view"      => format!("DROP VIEW [{schema}].[{name}]"),
-            "trigger"   => format!("DROP TRIGGER [{name}]"),
-            "index"     => format!("DROP INDEX [{name}] ON [{schema}].[{table}]"),
-            "table"     => format!("DROP TABLE [{schema}].[{name}]"),
-            _           => format!("DROP {object_type} [{name}]"),
+            "procedure" => format!("DROP PROCEDURE {}.{}", q(schema), q(name)),
+            "function"  => format!("DROP FUNCTION {}.{}", q(schema), q(name)),
+            "view"      => format!("DROP VIEW {}.{}", q(schema), q(name)),
+            "trigger"   => format!("DROP TRIGGER {}", q(name)),
+            "index"     => format!("DROP INDEX {} ON {}.{}", q(name), q(schema), q(table)),
+            "table"     => format!("DROP TABLE {}.{}", q(schema), q(name)),
+            other       => return Err(format!("Unsupported object type for sqlserver: {other}")),
         },
         "mysql" | "mariadb" => match object_type {
-            "procedure" => format!("DROP PROCEDURE `{name}`"),
-            "function"  => format!("DROP FUNCTION `{name}`"),
-            "view"      => format!("DROP VIEW `{name}`"),
-            "trigger"   => format!("DROP TRIGGER `{name}`"),
-            "index"     => format!("DROP INDEX `{name}` ON `{table}`"),
-            "table"     => format!("DROP TABLE `{name}`"),
-            _           => format!("DROP {object_type} `{name}`"),
+            "procedure" => format!("DROP PROCEDURE {}", q(name)),
+            "function"  => format!("DROP FUNCTION {}", q(name)),
+            "view"      => format!("DROP VIEW {}", q(name)),
+            "trigger"   => format!("DROP TRIGGER {}", q(name)),
+            "index"     => format!("DROP INDEX {} ON {}", q(name), q(table)),
+            "table"     => format!("DROP TABLE {}", q(name)),
+            other       => return Err(format!("Unsupported object type for {eng}: {other}")),
         },
         "postgres" | "cockroachdb" => match object_type {
-            "procedure" => format!("DROP PROCEDURE {schema}.{name}"),
-            "function"  => format!("DROP FUNCTION {schema}.{name}"),
-            "view"      => format!("DROP VIEW {schema}.{name}"),
-            "trigger"   => format!("DROP TRIGGER {name} ON {schema}.{table}"),
-            "index"     => format!("DROP INDEX {schema}.{name}"),
-            "table"     => format!("DROP TABLE {schema}.{name}"),
-            _           => format!("DROP {object_type} {name}"),
+            "procedure" => format!("DROP PROCEDURE {}.{}", q(schema), q(name)),
+            "function"  => format!("DROP FUNCTION {}.{}", q(schema), q(name)),
+            "view"      => format!("DROP VIEW {}.{}", q(schema), q(name)),
+            "trigger"   => format!("DROP TRIGGER {} ON {}.{}", q(name), q(schema), q(table)),
+            "index"     => format!("DROP INDEX {}.{}", q(schema), q(name)),
+            "table"     => format!("DROP TABLE {}.{}", q(schema), q(name)),
+            other       => return Err(format!("Unsupported object type for {eng}: {other}")),
         },
-        _ => match object_type { // SQLite
-            "view"    => format!("DROP VIEW {name}"),
-            "trigger" => format!("DROP TRIGGER {name}"),
-            "index"   => format!("DROP INDEX {name}"),
-            "table"   => format!("DROP TABLE {name}"),
-            _         => format!("DROP {object_type} {name}"),
+        _ => match object_type { // SQLite (no schema namespace, no procedures/functions)
+            "view"    => format!("DROP VIEW {}", q(name)),
+            "trigger" => format!("DROP TRIGGER {}", q(name)),
+            "index"   => format!("DROP INDEX {}", q(name)),
+            "table"   => format!("DROP TABLE {}", q(name)),
+            other     => return Err(format!("Unsupported object type for {eng}: {other}")),
         },
+    };
+    Ok(sql)
+}
+
+#[cfg(test)]
+mod drop_sql_tests {
+    use super::{build_drop_statement, quote_ident};
+
+    #[test]
+    fn quote_ident_doubles_sqlserver_bracket() {
+        // a `]` in the name must be doubled so it can't close the [..] quote early
+        assert_eq!(quote_ident("sqlserver", "ev]il"), "[ev]]il]");
+        assert_eq!(quote_ident("sqlserver", "users"), "[users]");
+    }
+
+    #[test]
+    fn quote_ident_doubles_mysql_backtick() {
+        assert_eq!(quote_ident("mysql", "ev`il"), "`ev``il`");
+        assert_eq!(quote_ident("mariadb", "t"), "`t`");
+    }
+
+    #[test]
+    fn quote_ident_doubles_standard_doublequote() {
+        // postgres / cockroachdb / sqlite / unknown all use SQL-standard ".."
+        assert_eq!(quote_ident("postgres", "ev\"il"), "\"ev\"\"il\"");
+        assert_eq!(quote_ident("sqlite", "weird name"), "\"weird name\"");
+        assert_eq!(quote_ident("cockroachdb", "t"), "\"t\"");
+    }
+
+    #[test]
+    fn drop_quotes_all_identifiers_sqlserver() {
+        assert_eq!(
+            build_drop_statement("sqlserver", "table", "Orders", "dbo", "").unwrap(),
+            "DROP TABLE [dbo].[Orders]");
+    }
+
+    #[test]
+    fn drop_neutralises_injection_in_object_name() {
+        // A name crafted to close the quote and append a second statement is rendered
+        // inert: the `]` is doubled, so the whole payload stays trapped inside one
+        // bracket-quoted identifier and the statement closes only at the very end.
+        let sql = build_drop_statement(
+            "sqlserver", "table", "x]; DROP TABLE secrets;--", "dbo", "").unwrap();
+        assert_eq!(sql, "DROP TABLE [dbo].[x]]; DROP TABLE secrets;--]");
+        assert!(sql.ends_with(']'));
+    }
+
+    #[test]
+    fn drop_quotes_postgres_schema_and_name() {
+        assert_eq!(
+            build_drop_statement("postgres", "view", "v", "public", "").unwrap(),
+            "DROP VIEW \"public\".\"v\"");
+    }
+
+    #[test]
+    fn drop_quotes_sqlite_name() {
+        assert_eq!(
+            build_drop_statement("sqlite", "table", "my tbl", "", "").unwrap(),
+            "DROP TABLE \"my tbl\"");
+    }
+
+    #[test]
+    fn drop_index_includes_table_sqlserver() {
+        assert_eq!(
+            build_drop_statement("sqlserver", "index", "ix_a", "dbo", "Orders").unwrap(),
+            "DROP INDEX [ix_a] ON [dbo].[Orders]");
+    }
+
+    #[test]
+    fn drop_rejects_unknown_object_type() {
+        // an object type the engine doesn't support errors out, never interpolates raw
+        assert!(build_drop_statement("sqlserver", "database", "x", "dbo", "").is_err());
+        assert!(build_drop_statement("sqlite", "procedure", "x", "", "").is_err());
     }
 }
 

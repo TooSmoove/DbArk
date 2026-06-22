@@ -1,0 +1,363 @@
+diff --git a/src-csharp/FileQueryEngine/FileQueryEngine.cs b/src-csharp/FileQueryEngine/FileQueryEngine.cs
+index 5fc9b5f..e558756 100644
+--- a/src-csharp/FileQueryEngine/FileQueryEngine.cs
++++ b/src-csharp/FileQueryEngine/FileQueryEngine.cs
+@@ -185,12 +185,8 @@ public static class FileQueryEngineLib
+                     string normPath = filePath.Replace("\\", "/");
+                     string ext = Path.GetExtension(filePath).ToLowerInvariant();
+ 
+-                    string viewSql = ext switch
+-                    {
+-                        ".csv" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv_auto('{normPath}')",
+-                        ".json" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_json_auto('{normPath}')",
+-                        _ => $"CREATE OR REPLACE VIEW data AS SELECT * FROM '{normPath}'"
+-                    };
++                    // Path is single-quote-escaped via DuckDbFileScan (audit H-1).
++                    string viewSql = $"CREATE OR REPLACE VIEW data AS SELECT * FROM {DuckDbFileScan.ScanExpr(ext, normPath)}";
+ 
+                     string? setupErr = RunSetupQuery(conn, viewSql);
+                     if (setupErr != null) return Error($"Failed to register file: {setupErr}");
+@@ -218,12 +214,8 @@ public static class FileQueryEngineLib
+             string normPath = filePath.Replace("\\", "/");
+             string ext = Path.GetExtension(filePath).ToLowerInvariant();
+ 
+-            string sql = ext switch
+-            {
+-                ".csv" => $"DESCRIBE SELECT * FROM read_csv_auto('{normPath}')",
+-                ".json" => $"DESCRIBE SELECT * FROM read_json_auto('{normPath}')",
+-                _ => $"DESCRIBE SELECT * FROM '{normPath}'"
+-            };
++            // Path is single-quote-escaped via DuckDbFileScan (audit H-1).
++            string sql = $"DESCRIBE SELECT * FROM {DuckDbFileScan.ScanExpr(ext, normPath)}";
+ 
+             int rc = duckdb_open(null, out IntPtr db);
+             if (rc != DUCKDB_SUCCESS) return Error("Failed to open DuckDB");
+@@ -321,12 +313,8 @@ public static class FileQueryEngineLib
+                     // Register file as "data" view
+                     string normPath = filePath.Replace("\\", "/");
+                     string ext = Path.GetExtension(filePath).ToLowerInvariant();
+-                    string viewSql = ext switch
+-                    {
+-                        ".csv" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv_auto('{normPath}')",
+-                        ".json" => $"CREATE OR REPLACE VIEW data AS SELECT * FROM read_json_auto('{normPath}')",
+-                        _ => $"CREATE OR REPLACE VIEW data AS SELECT * FROM '{normPath}'"
+-                    };
++                    // Path is single-quote-escaped via DuckDbFileScan (audit H-1).
++                    string viewSql = $"CREATE OR REPLACE VIEW data AS SELECT * FROM {DuckDbFileScan.ScanExpr(ext, normPath)}";
+ 
+                     string? setupErr = RunSetupQuery(conn, viewSql);
+                     if (setupErr != null) return Error($"Failed to register file: {setupErr}");
+diff --git a/src-csharp/FileQueryEngine/FileQueryEngine.csproj b/src-csharp/FileQueryEngine/FileQueryEngine.csproj
+index 2378019..a3ca48f 100644
+--- a/src-csharp/FileQueryEngine/FileQueryEngine.csproj
++++ b/src-csharp/FileQueryEngine/FileQueryEngine.csproj
+@@ -16,5 +16,6 @@
+   <ItemGroup>
+     <Compile Include="../Shared/NativeString.cs" Link="NativeString.cs" />
+     <Compile Include="../Shared/DuckDbTableBuilder.cs" Link="DuckDbTableBuilder.cs" />
++    <Compile Include="../Shared/DuckDbFileScan.cs" Link="DuckDbFileScan.cs" />
+   </ItemGroup>
+ </Project>
+diff --git a/src-csharp/QueryExecutor.Tests/DuckDbFileScanTests.cs b/src-csharp/QueryExecutor.Tests/DuckDbFileScanTests.cs
+new file mode 100644
+index 0000000..7f114bf
+--- /dev/null
++++ b/src-csharp/QueryExecutor.Tests/DuckDbFileScanTests.cs
+@@ -0,0 +1,51 @@
++﻿using Xunit;
++
++namespace QueryExecutorTests.Tests;
++
++/// <summary>
++/// Audit H-1 regression guard for the flat-file scan path. The DuckDB file path used
++/// to be interpolated raw into read_csv_auto('{path}') / FROM '{path}', so a path
++/// containing an apostrophe broke the statement and was an injection seam. All three
++/// former call sites now route through DuckDbFileScan.ScanExpr, which single-quote-
++/// escapes the path. These tests pin that escaping without a DuckDB harness.
++/// </summary>
++public class DuckDbFileScanTests
++{
++    [Fact]
++    public void Csv_uses_read_csv_auto_with_quoted_path()
++        => Assert.Equal("read_csv_auto('/data/x.csv')",
++                        DuckDbFileScan.ScanExpr(".csv", "/data/x.csv"));
++
++    [Fact]
++    public void Json_uses_read_json_auto_with_quoted_path()
++        => Assert.Equal("read_json_auto('/data/x.json')",
++                        DuckDbFileScan.ScanExpr(".json", "/data/x.json"));
++
++    [Fact]
++    public void Other_extension_is_a_bare_quoted_path()
++        => Assert.Equal("'/data/x.xlsx'",
++                        DuckDbFileScan.ScanExpr(".xlsx", "/data/x.xlsx"));
++
++    [Fact]
++    public void Apostrophe_in_path_is_doubled_not_broken_out()
++    {
++        // /Users/O'Brien/data.csv used to break the literal early (audit H-1).
++        var expr = DuckDbFileScan.ScanExpr(".csv", "/Users/O'Brien/data.csv");
++        Assert.Equal("read_csv_auto('/Users/O''Brien/data.csv')", expr);
++    }
++
++    [Fact]
++    public void Injection_attempt_in_path_stays_inside_the_literal()
++    {
++        // A path crafted to close the literal and append SQL is neutralised: every
++        // ' is doubled, so the payload stays a single quoted-string argument.
++        var expr = DuckDbFileScan.ScanExpr(".csv", "x'); DROP TABLE data;--");
++        Assert.Equal("read_csv_auto('x''); DROP TABLE data;--')", expr);
++    }
++
++    [Theory]
++    [InlineData(".CSV")]
++    [InlineData(".Csv")]
++    public void Extension_match_is_case_insensitive(string ext)
++        => Assert.StartsWith("read_csv_auto(", DuckDbFileScan.ScanExpr(ext, "/x.csv"));
++}
+diff --git a/src-csharp/QueryExecutor.Tests/QueryExecutorTests.Tests.csproj b/src-csharp/QueryExecutor.Tests/QueryExecutorTests.Tests.csproj
+index 021c96b..8073943 100644
+--- a/src-csharp/QueryExecutor.Tests/QueryExecutorTests.Tests.csproj
++++ b/src-csharp/QueryExecutor.Tests/QueryExecutorTests.Tests.csproj
+@@ -17,5 +17,6 @@
+   <ItemGroup>
+     <ProjectReference Include="../QueryExecutor/QueryExecutor.csproj" />
+     <Compile Include="../Shared/DuckDbTableBuilder.cs" Link="DuckDbTableBuilder.cs" />
++    <Compile Include="../Shared/DuckDbFileScan.cs" Link="DuckDbFileScan.cs" />
+   </ItemGroup>
+ </Project>
+diff --git a/src-csharp/Shared/DuckDbFileScan.cs b/src-csharp/Shared/DuckDbFileScan.cs
+new file mode 100644
+index 0000000..a95d3e3
+--- /dev/null
++++ b/src-csharp/Shared/DuckDbFileScan.cs
+@@ -0,0 +1,41 @@
++#nullable enable
++
++/// <summary>
++/// Builds the DuckDB relation expression that exposes a flat file as a table, with the
++/// file path safely single-quote-escaped (audit H-1).
++///
++/// THE BUG THIS FIXES: the path used to be interpolated raw —
++/// <c>read_csv_auto('{normPath}')</c> / <c>SELECT * FROM '{normPath}'</c>. A path
++/// containing an apostrophe (e.g. <c>/Users/O'Brien/data.csv</c>) closed the literal
++/// early: it broke the statement and was a SQL-injection seam reachable through the
++/// file picker. Three separate call sites duplicated that switch; they all now route
++/// through this one helper, so the escaping lives in exactly one tested place (DRY).
++///
++/// Pure and P/Invoke-free on purpose, so it unit-tests with no DuckDB harness — the
++/// same Shared-file pattern as <see cref="NativeString"/> / <see cref="DuckDbTableBuilder"/>.
++/// It is &lt;Compile Include&gt;-linked into FileQueryEngine (which uses it) and into the
++/// test project (which tests it).
++/// </summary>
++public static class DuckDbFileScan
++{
++    /// <summary>
++    /// Returns a DuckDB relation expression for the file at <paramref name="normPath"/>
++    /// (forward-slash normalised), chosen by the lowercased <paramref name="ext"/>:
++    /// <c>read_csv_auto(...)</c> for <c>.csv</c>, <c>read_json_auto(...)</c> for
++    /// <c>.json</c>, and a bare quoted path (DuckDB infers the reader from the
++    /// extension) for anything else. The path is single-quote-escaped in every branch.
++    /// Intended to be dropped in after <c>FROM</c>:
++    /// <c>$"SELECT * FROM {DuckDbFileScan.ScanExpr(ext, normPath)}"</c>.
++    /// </summary>
++    public static string ScanExpr(string ext, string normPath)
++    {
++        // Reuse the one escaping routine so file paths and staged values can't drift.
++        string path = DuckDbTableBuilder.QuoteLiteral(normPath ?? "");
++        return (ext ?? "").ToLowerInvariant() switch
++        {
++            ".csv"  => $"read_csv_auto({path})",
++            ".json" => $"read_json_auto({path})",
++            _       => path,
++        };
++    }
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index 9434e02..17e7e3e 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -1428,9 +1428,11 @@ async fn drop_object(
+         _ => return Err(format!("Unsupported engine: {}", engine)),
+     };
+ 
+-    // Build DROP statement per engine and type
++    // Build DROP statement per engine and type. Identifiers are quoted per engine
++    // and the object type is validated against an allow-list (audit H-1), so a
++    // crafted object name or type can't break out into injected SQL.
+     let drop_sql = build_drop_statement(
+-        &engine, &object_type, &object_name, &schema, &table);
++        &engine, &object_type, &object_name, &schema, &table)?;
+ 
+     let result = unsafe {
+         let func: libloading::Symbol<unsafe extern "C" fn(
+@@ -1459,45 +1461,140 @@ async fn drop_object(
+     result
+ }
+ 
++/// Quote a SQL identifier for `engine`, doubling that engine's closing delimiter so a
++/// crafted or compromised object name can't break out of the quotes (audit H-1).
++/// SQL Server uses `[..]` (`]`→`]]`), MySQL/MariaDB use `` `..` `` (`` ` ``→`` `` ``),
++/// and everything else (Postgres, CockroachDB, SQLite) uses the SQL-standard `".."`
++/// (`"`→`""`). Quoting Postgres/SQLite identifiers is also a correctness win: it
++/// preserves the exact catalog casing instead of letting an unquoted name case-fold.
++fn quote_ident(engine: &str, ident: &str) -> String {
++    match engine.to_lowercase().as_str() {
++        "sqlserver"          => format!("[{}]", ident.replace(']', "]]")),
++        "mysql" | "mariadb"  => format!("`{}`", ident.replace('`', "``")),
++        _                    => format!("\"{}\"", ident.replace('"', "\"\"")),
++    }
++}
++
++/// Build a DROP statement for a schema object. Every identifier is quoted per engine
++/// via [`quote_ident`], and `object_type` is validated against a fixed per-engine
++/// allow-list — an unrecognised type returns `Err` rather than being interpolated as a
++/// raw SQL keyword. Together these close the H-1 identifier-injection surface: the
++/// object name/schema/table all arrive from the frontend over IPC and must be treated
++/// as untrusted.
+ fn build_drop_statement(
+     engine: &str, object_type: &str,
+     name: &str, schema: &str, table: &str,
+-) -> String {
+-    match engine.to_lowercase().as_str() {
++) -> Result<String, String> {
++    let eng = engine.to_lowercase();
++    let q = |ident: &str| quote_ident(&eng, ident);
++    let sql = match eng.as_str() {
+         "sqlserver" => match object_type {
+-            "procedure" => format!("DROP PROCEDURE [{schema}].[{name}]"),
+-            "function"  => format!("DROP FUNCTION [{schema}].[{name}]"),
+-            "view"      => format!("DROP VIEW [{schema}].[{name}]"),
+-            "trigger"   => format!("DROP TRIGGER [{name}]"),
+-            "index"     => format!("DROP INDEX [{name}] ON [{schema}].[{table}]"),
+-            "table"     => format!("DROP TABLE [{schema}].[{name}]"),
+-            _           => format!("DROP {object_type} [{name}]"),
++            "procedure" => format!("DROP PROCEDURE {}.{}", q(schema), q(name)),
++            "function"  => format!("DROP FUNCTION {}.{}", q(schema), q(name)),
++            "view"      => format!("DROP VIEW {}.{}", q(schema), q(name)),
++            "trigger"   => format!("DROP TRIGGER {}", q(name)),
++            "index"     => format!("DROP INDEX {} ON {}.{}", q(name), q(schema), q(table)),
++            "table"     => format!("DROP TABLE {}.{}", q(schema), q(name)),
++            other       => return Err(format!("Unsupported object type for sqlserver: {other}")),
+         },
+         "mysql" | "mariadb" => match object_type {
+-            "procedure" => format!("DROP PROCEDURE `{name}`"),
+-            "function"  => format!("DROP FUNCTION `{name}`"),
+-            "view"      => format!("DROP VIEW `{name}`"),
+-            "trigger"   => format!("DROP TRIGGER `{name}`"),
+-            "index"     => format!("DROP INDEX `{name}` ON `{table}`"),
+-            "table"     => format!("DROP TABLE `{name}`"),
+-            _           => format!("DROP {object_type} `{name}`"),
++            "procedure" => format!("DROP PROCEDURE {}", q(name)),
++            "function"  => format!("DROP FUNCTION {}", q(name)),
++            "view"      => format!("DROP VIEW {}", q(name)),
++            "trigger"   => format!("DROP TRIGGER {}", q(name)),
++            "index"     => format!("DROP INDEX {} ON {}", q(name), q(table)),
++            "table"     => format!("DROP TABLE {}", q(name)),
++            other       => return Err(format!("Unsupported object type for {eng}: {other}")),
+         },
+         "postgres" | "cockroachdb" => match object_type {
+-            "procedure" => format!("DROP PROCEDURE {schema}.{name}"),
+-            "function"  => format!("DROP FUNCTION {schema}.{name}"),
+-            "view"      => format!("DROP VIEW {schema}.{name}"),
+-            "trigger"   => format!("DROP TRIGGER {name} ON {schema}.{table}"),
+-            "index"     => format!("DROP INDEX {schema}.{name}"),
+-            "table"     => format!("DROP TABLE {schema}.{name}"),
+-            _           => format!("DROP {object_type} {name}"),
++            "procedure" => format!("DROP PROCEDURE {}.{}", q(schema), q(name)),
++            "function"  => format!("DROP FUNCTION {}.{}", q(schema), q(name)),
++            "view"      => format!("DROP VIEW {}.{}", q(schema), q(name)),
++            "trigger"   => format!("DROP TRIGGER {} ON {}.{}", q(name), q(schema), q(table)),
++            "index"     => format!("DROP INDEX {}.{}", q(schema), q(name)),
++            "table"     => format!("DROP TABLE {}.{}", q(schema), q(name)),
++            other       => return Err(format!("Unsupported object type for {eng}: {other}")),
+         },
+-        _ => match object_type { // SQLite
+-            "view"    => format!("DROP VIEW {name}"),
+-            "trigger" => format!("DROP TRIGGER {name}"),
+-            "index"   => format!("DROP INDEX {name}"),
+-            "table"   => format!("DROP TABLE {name}"),
+-            _         => format!("DROP {object_type} {name}"),
++        _ => match object_type { // SQLite (no schema namespace, no procedures/functions)
++            "view"    => format!("DROP VIEW {}", q(name)),
++            "trigger" => format!("DROP TRIGGER {}", q(name)),
++            "index"   => format!("DROP INDEX {}", q(name)),
++            "table"   => format!("DROP TABLE {}", q(name)),
++            other     => return Err(format!("Unsupported object type for {eng}: {other}")),
+         },
++    };
++    Ok(sql)
++}
++
++#[cfg(test)]
++mod drop_sql_tests {
++    use super::{build_drop_statement, quote_ident};
++
++    #[test]
++    fn quote_ident_doubles_sqlserver_bracket() {
++        // a `]` in the name must be doubled so it can't close the [..] quote early
++        assert_eq!(quote_ident("sqlserver", "ev]il"), "[ev]]il]");
++        assert_eq!(quote_ident("sqlserver", "users"), "[users]");
++    }
++
++    #[test]
++    fn quote_ident_doubles_mysql_backtick() {
++        assert_eq!(quote_ident("mysql", "ev`il"), "`ev``il`");
++        assert_eq!(quote_ident("mariadb", "t"), "`t`");
++    }
++
++    #[test]
++    fn quote_ident_doubles_standard_doublequote() {
++        // postgres / cockroachdb / sqlite / unknown all use SQL-standard ".."
++        assert_eq!(quote_ident("postgres", "ev\"il"), "\"ev\"\"il\"");
++        assert_eq!(quote_ident("sqlite", "weird name"), "\"weird name\"");
++        assert_eq!(quote_ident("cockroachdb", "t"), "\"t\"");
++    }
++
++    #[test]
++    fn drop_quotes_all_identifiers_sqlserver() {
++        assert_eq!(
++            build_drop_statement("sqlserver", "table", "Orders", "dbo", "").unwrap(),
++            "DROP TABLE [dbo].[Orders]");
++    }
++
++    #[test]
++    fn drop_neutralises_injection_in_object_name() {
++        // A name crafted to close the quote and append a second statement is rendered
++        // inert: the `]` is doubled, so the whole payload stays trapped inside one
++        // bracket-quoted identifier and the statement closes only at the very end.
++        let sql = build_drop_statement(
++            "sqlserver", "table", "x]; DROP TABLE secrets;--", "dbo", "").unwrap();
++        assert_eq!(sql, "DROP TABLE [dbo].[x]]; DROP TABLE secrets;--]");
++        assert!(sql.ends_with(']'));
++    }
++
++    #[test]
++    fn drop_quotes_postgres_schema_and_name() {
++        assert_eq!(
++            build_drop_statement("postgres", "view", "v", "public", "").unwrap(),
++            "DROP VIEW \"public\".\"v\"");
++    }
++
++    #[test]
++    fn drop_quotes_sqlite_name() {
++        assert_eq!(
++            build_drop_statement("sqlite", "table", "my tbl", "", "").unwrap(),
++            "DROP TABLE \"my tbl\"");
++    }
++
++    #[test]
++    fn drop_index_includes_table_sqlserver() {
++        assert_eq!(
++            build_drop_statement("sqlserver", "index", "ix_a", "dbo", "Orders").unwrap(),
++            "DROP INDEX [ix_a] ON [dbo].[Orders]");
++    }
++
++    #[test]
++    fn drop_rejects_unknown_object_type() {
++        // an object type the engine doesn't support errors out, never interpolates raw
++        assert!(build_drop_statement("sqlserver", "database", "x", "dbo", "").is_err());
++        assert!(build_drop_statement("sqlite", "procedure", "x", "", "").is_err());
+     }
+ }
+ 
