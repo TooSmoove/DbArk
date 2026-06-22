@@ -16,5 +16,6 @@
 
   <ItemGroup>
     <ProjectReference Include="../QueryExecutor/QueryExecutor.csproj" />
+    <Compile Include="../Shared/DuckDbTableBuilder.cs" Link="DuckDbTableBuilder.cs" />
   </ItemGroup>
 </Project>

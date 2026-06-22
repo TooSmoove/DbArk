@@ -15,5 +15,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../Shared/NativeString.cs" Link="NativeString.cs" />
+    <Compile Include="../Shared/DuckDbTableBuilder.cs" Link="DuckDbTableBuilder.cs" />
   </ItemGroup>
 </Project>

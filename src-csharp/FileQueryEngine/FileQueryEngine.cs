@@ -16,6 +16,17 @@ public static class FileQueryEngineLib
     private const int DUCKDB_RESULT_SIZE = 64;
     private const int DUCKDB_SUCCESS = 0;
 
+    // Row caps. Both were a silent hardcoded 1000 (audit C-5).
+    //  - LiveTableRowCap bounds how many rows we pull from a live DB table to stage for
+    //    a join. The old 1000 silently truncated larger tables, so the join saw a partial
+    //    table and produced wrong/incomplete results with no signal. Raised here and the
+    //    truncation is now surfaced as a warning on the result.
+    //  - ResultRowCap bounds how many rows we serialise back to the UI grid (which
+    //    virtualises ~10k). TotalRows already reports the true count; Truncated now makes
+    //    the cut explicit.
+    private const int LiveTableRowCap = 50_000;
+    private const int ResultRowCap = 10_000;
+
     // Resolve duckdb.dll from the app's natives\ folder regardless of the process
     // working directory. Bare-name DllImport searches the exe dir + PATH but NOT the
     // natives\ subfolder, so an installed app (CWD = System32) failed to load it.
@@ -118,7 +129,7 @@ public static class FileQueryEngineLib
     }
 
     /// <summary>Run a data query, serialise results, return JSON IntPtr.</summary>
-    private static IntPtr RunDataQuery(IntPtr conn, string sql)
+    private static IntPtr RunDataQuery(IntPtr conn, string sql, List<string>? warnings = null)
     {
         IntPtr resultBuf = Marshal.AllocHGlobal(DUCKDB_RESULT_SIZE);
         try
@@ -137,7 +148,7 @@ public static class FileQueryEngineLib
                 return Error(errMsg);
             }
 
-            IntPtr serialised = SerialiseResult(resultBuf);
+            IntPtr serialised = SerialiseResult(resultBuf, warnings);
             duckdb_destroy_result(resultBuf);
             return serialised;
         }
@@ -320,17 +331,26 @@ public static class FileQueryEngineLib
                     string? setupErr = RunSetupQuery(conn, viewSql);
                     if (setupErr != null) return Error($"Failed to register file: {setupErr}");
 
-                    // Pull each checked table from the live DB and register in DuckDB
+                    // Pull each checked table from the live DB and register it in DuckDB
+                    // WITH ITS REAL COLUMN TYPES (audit C-5), so joins/comparisons against
+                    // the file side use numeric/date semantics instead of text.
+                    var warnings = new List<string>();
                     foreach (var tableName in tableNames)
                     {
                         var fetchSql = $"SELECT * FROM {tableName}";
                         var jsonResult = ExecuteDbQuery(connectionString, engine, fetchSql);
-                        var rows = ParseJsonRows(jsonResult);
-                        if (rows != null && rows.Count > 0)
-                            RegisterTableInDuckDb(conn, $"db_{tableName}", rows);
+                        var live = ParseLiveTable(jsonResult);
+                        if (live != null && live.Rows.Count > 0)
+                        {
+                            RegisterTableInDuckDb(conn, $"db_{tableName}", live);
+                            if (live.Truncated)
+                                warnings.Add(
+                                    $"Live table '{tableName}' was truncated to {LiveTableRowCap:N0} rows; " +
+                                    "join results may be incomplete.");
+                        }
                     }
 
-                    return RunDataQuery(conn, sql);
+                    return RunDataQuery(conn, sql, warnings);
                 }
                 finally { duckdb_disconnect(ref conn); }
             }
@@ -410,21 +430,38 @@ public static class FileQueryEngineLib
                 for (int i = 0; i < colCount; i++)
                     columns.Add(Marshal.PtrToStringUTF8(SqliteColumnName(stmt, i)) ?? $"col{i}");
 
+                // SQLite is dynamically typed: the storage class is per-value, not per-column.
+                // Infer each column's DuckDB type from the first non-NULL value we see; default
+                // VARCHAR. Storage classes: 1=INTEGER, 2=FLOAT, 3=TEXT, 4=BLOB, 5=NULL. BLOB is
+                // read here via column_text, so it is staged as VARCHAR.
+                var duckTypes = new DuckDbTableBuilder.DuckType?[colCount];
+
                 var rows = new List<List<string?>>();
+                bool truncated = false;
                 while (SqliteStep(stmt) == 100) // SQLITE_ROW
                 {
+                    if (rows.Count >= LiveTableRowCap) { truncated = true; break; }
                     var row = new List<string?>();
                     for (int i = 0; i < colCount; i++)
                     {
                         int colType = SqliteColumnType(stmt, i);
-                        row.Add(colType == 5 ? null
-                            : Marshal.PtrToStringUTF8(SqliteColumnText(stmt, i)));
+                        if (colType == 5) { row.Add(null); continue; } // SQLITE_NULL
+                        duckTypes[i] ??= colType switch
+                        {
+                            1 => DuckDbTableBuilder.DuckType.Bigint,
+                            2 => DuckDbTableBuilder.DuckType.Double,
+                            _ => DuckDbTableBuilder.DuckType.Varchar,
+                        };
+                        row.Add(Marshal.PtrToStringUTF8(SqliteColumnText(stmt, i)));
                     }
                     rows.Add(row);
-                    if (rows.Count >= 1000) break;
                 }
 
-                var result = new DbQueryResult { columns = columns, rows = rows };
+                var types = duckTypes
+                    .Select(t => DuckDbTableBuilder.TypeName(t ?? DuckDbTableBuilder.DuckType.Varchar))
+                    .ToList();
+
+                var result = new DbQueryResult { columns = columns, types = types, rows = rows, truncated = truncated };
                 return JsonSerializer.Serialize(result, FileQueryJsonContext.Default.DbQueryResult);
             }
             finally { SqliteFinalize(stmt); }
@@ -432,83 +469,109 @@ public static class FileQueryEngineLib
         finally { SqliteClose(db); }
     }
 
+    private static Type? SafeFieldType(System.Data.IDataReader reader, int i)
+    {
+        // Some providers throw GetFieldType for certain columns; VARCHAR is a safe default.
+        try { return reader.GetFieldType(i); } catch { return null; }
+    }
+
     private static string ReaderToJson(System.Data.IDataReader reader)
     {
         var columns = new List<string>();
+        var types = new List<string>();
         for (int i = 0; i < reader.FieldCount; i++)
-            columns.Add(reader.GetName(i));
-
-        var rows = new List<List<string?>>();
-        int rowCount = 0;
-        while (reader.Read() && rowCount < 1000)
         {
-            var row = new List<string?>();
-            for (int i = 0; i < reader.FieldCount; i++)
-                row.Add(reader.IsDBNull(i) ? null : reader.GetValue(i)?.ToString());
-            rows.Add(row);
-            rowCount++;
+            columns.Add(reader.GetName(i));
+            types.Add(DuckDbTableBuilder.TypeName(
+                DuckDbTableBuilder.MapClrType(SafeFieldType(reader, i))));
         }
 
-        var result = new DbQueryResult { columns = columns, rows = rows };
+        var rows = new List<List<string?>>();
+        bool truncated = false;
+        while (reader.Read())
+        {
+            if (rows.Count >= LiveTableRowCap) { truncated = true; break; }
+            var row = new List<string?>();
+            for (int i = 0; i < reader.FieldCount; i++)
+                row.Add(reader.IsDBNull(i) ? null : DuckDbTableBuilder.FormatClrValue(reader.GetValue(i)));
+            rows.Add(row);
+        }
+
+        var result = new DbQueryResult { columns = columns, types = types, rows = rows, truncated = truncated };
         return JsonSerializer.Serialize(result, FileQueryJsonContext.Default.DbQueryResult);
     }
 
     // ---- DuckDB in-memory table registration -----------------
 
-    private static List<Dictionary<string, string?>>? ParseJsonRows(string jsonResult)
+    /// <summary>A live-DB table staged for a join, with its real per-column DuckDB types.</summary>
+    private sealed class LiveTable
+    {
+        public List<string> Columns = new();
+        public List<DuckDbTableBuilder.DuckType> Types = new();
+        public List<List<string?>> Rows = new();
+        public bool Truncated;
+    }
+
+    /// <summary>
+    /// Parses the intermediate <see cref="DbQueryResult"/> JSON (produced by the engine
+    /// readers) into a typed <see cref="LiveTable"/>. Returns null if the JSON carries an
+    /// error. The "types" array carries the DuckDB column types so the staged table is built
+    /// correctly typed (audit C-5) rather than all-TEXT.
+    /// </summary>
+    private static LiveTable? ParseLiveTable(string jsonResult)
     {
         var doc = JsonDocument.Parse(jsonResult);
         if (doc.RootElement.TryGetProperty("error", out _)) return null;
 
-        var columns = doc.RootElement.GetProperty("columns")
-            .EnumerateArray().Select(c => c.GetString()!).ToList();
+        var lt = new LiveTable
+        {
+            Columns = doc.RootElement.GetProperty("columns")
+                .EnumerateArray().Select(c => c.GetString()!).ToList()
+        };
 
-        var rows = new List<Dictionary<string, string?>>();
+        if (doc.RootElement.TryGetProperty("types", out var typesEl))
+            lt.Types = typesEl.EnumerateArray()
+                .Select(t => DuckDbTableBuilder.TypeFromName(t.GetString())).ToList();
+        // Pad/guard so Types is always at least as long as Columns.
+        while (lt.Types.Count < lt.Columns.Count)
+            lt.Types.Add(DuckDbTableBuilder.DuckType.Varchar);
+
+        if (doc.RootElement.TryGetProperty("truncated", out var trEl) && trEl.ValueKind == JsonValueKind.True)
+            lt.Truncated = true;
+
         foreach (var row in doc.RootElement.GetProperty("rows").EnumerateArray())
         {
-            var dict = new Dictionary<string, string?>();
-            var vals = row.EnumerateArray().ToList();
-            for (int i = 0; i < columns.Count && i < vals.Count; i++)
-                dict[columns[i]] = vals[i].ValueKind == JsonValueKind.Null
-                    ? null
-                    : vals[i].GetString() ?? vals[i].ToString();
-            rows.Add(dict);
+            var vals = new List<string?>();
+            foreach (var v in row.EnumerateArray())
+                vals.Add(v.ValueKind == JsonValueKind.Null ? null : (v.GetString() ?? v.ToString()));
+            lt.Rows.Add(vals);
         }
-        return rows;
+        return lt;
     }
 
-    private static void RegisterTableInDuckDb(
-        IntPtr conn, string duckTableName, List<Dictionary<string, string?>> rows)
+    private static void RegisterTableInDuckDb(IntPtr conn, string duckTableName, LiveTable table)
     {
-        if (rows.Count == 0) return;
-        var columns = rows[0].Keys.ToList();
-        var colDefs = string.Join(", ", columns.Select(c => $"\"{c}\" TEXT"));
-        RunSetupQuery(conn, $"CREATE TABLE \"{duckTableName}\" ({colDefs})");
+        if (table.Rows.Count == 0) return;
+
+        RunSetupQuery(conn,
+            DuckDbTableBuilder.BuildCreateTable(duckTableName, table.Columns, table.Types));
 
         const int batchSize = 500;
-        for (int i = 0; i < rows.Count; i += batchSize)
+        for (int i = 0; i < table.Rows.Count; i += batchSize)
         {
-            var batch = rows.Skip(i).Take(batchSize);
-            var values = batch.Select(row =>
-            {
-                var vals = columns.Select(c =>
-                {
-                    var v = row.TryGetValue(c, out var val) ? val : null;
-                    return v == null ? "NULL" : $"'{v.Replace("'", "''")}'";
-                });
-                return $"({string.Join(", ", vals)})";
-            });
-            RunSetupQuery(conn, $"INSERT INTO \"{duckTableName}\" VALUES {string.Join(",\n", values)}");
+            var batch = table.Rows.Skip(i).Take(batchSize);
+            RunSetupQuery(conn,
+                DuckDbTableBuilder.BuildInsert(duckTableName, table.Columns, table.Types, batch));
         }
     }
 
     // ---- DuckDB result serialiser ----------------------------
 
-    private static IntPtr SerialiseResult(IntPtr resultBuf)
+    private static IntPtr SerialiseResult(IntPtr resultBuf, List<string>? warnings = null)
     {
         long colCount = duckdb_column_count(resultBuf);
         long rowCount = duckdb_row_count(resultBuf);
-        int rowLimit = 1000;
+        int rowLimit = ResultRowCap;
 
         var columns = new List<string>();
         for (long c = 0; c < colCount; c++)
@@ -550,12 +613,19 @@ public static class FileQueryEngineLib
             rows.Add(row);
         }
 
+        bool truncated = rowCount > rowLimit;
+        var allWarnings = warnings ?? new List<string>();
+        if (truncated)
+            allWarnings.Add($"Result truncated to {rowLimit:N0} of {rowCount:N0} rows.");
+
         var queryResult = new FileQueryResult
         {
             Columns = columns,
             Rows = rows,
             RowCount = (int)limit,
-            TotalRows = (int)rowCount
+            TotalRows = (int)rowCount,
+            Truncated = truncated || allWarnings.Count > 0,
+            Warnings = allWarnings
         };
 
         return Marshal.StringToCoTaskMemUTF8(
@@ -615,6 +685,10 @@ public class FileQueryResult
     public List<List<string?>> Rows { get; set; } = new();
     public int RowCount { get; set; }
     public int TotalRows { get; set; }
+    // True when results were capped or a joined live table was truncated (audit C-5):
+    // the UI can show Warnings instead of silently presenting a partial result.
+    public bool Truncated { get; set; }
+    public List<string> Warnings { get; set; } = new();
 }
 
 public class FileQueryError
@@ -625,7 +699,11 @@ public class FileQueryError
 public class DbQueryResult
 {
     public List<string> columns { get; set; } = new();
+    // DuckDB type keyword per column (BIGINT/DOUBLE/DATE/…), used to stage the live
+    // table with real types so joins/comparisons don't degrade to text (audit C-5).
+    public List<string> types { get; set; } = new();
     public List<List<string?>> rows { get; set; } = new();
+    public bool truncated { get; set; }
 }
 
 public class TableListResult
