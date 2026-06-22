@@ -23,7 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 setup_DbArk_SchemaTest_A.sql
-update-hashes.ps1
 DllRebuildHashScript.txt
 src-tauri/scripts/
 

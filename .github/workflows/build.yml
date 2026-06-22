@@ -33,6 +33,12 @@ jobs:
           fi
           echo "OK: no stale devsql naming in shipped source (migration shim in main.rs excepted)."
 
+      - name: No binaries or IDE cache in tree
+        run: |
+          if git ls-files | grep -Ei '\.(dll|dylib|so|pdb|zip|db)$|/\.vs/|/bin/|/obj/'; then
+            echo "::error::Build artifact or IDE cache committed — see audit C-4"; exit 1
+          fi
+
       - name: Fail on hardcoded DLL integrity hashes
         shell: bash
         run: |
