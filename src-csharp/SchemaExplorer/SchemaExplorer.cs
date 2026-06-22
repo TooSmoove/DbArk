@@ -1244,6 +1244,14 @@ public static class SchemaExplorerLib
         string connectionString, string objectName,
         string objectType, string schemaName)
     {
+        // Audit H-1: objectName/schemaName arrive from the frontend over IPC and are
+        // untrusted. Escape them for the string literals in the catalog queries below
+        // (oLit/sLit), and quote them as identifiers in the generated DDL via
+        // SqlIdentifier.Quote. (Parameterizing SqlServerOdbc.Query is the stronger fix
+        // but needs ODBC param binding in that hand-rolled wrapper — tracked separately.)
+        var oLit = SqlIdentifier.EscapeLiteral(objectName);
+        var sLit = SqlIdentifier.EscapeLiteral(schemaName);
+
         if (objectType == "table")
         {
             // Generate CREATE TABLE script from schema info
@@ -1255,7 +1263,7 @@ public static class SchemaExplorerLib
                 c.IS_NULLABLE,
                 c.COLUMN_DEFAULT,
                 CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK,
-                COLUMNPROPERTY(OBJECT_ID('{schemaName}.{objectName}'),
+                COLUMNPROPERTY(OBJECT_ID('{sLit}.{oLit}'),
                     c.COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY
             FROM INFORMATION_SCHEMA.COLUMNS c
             LEFT JOIN (
@@ -1263,16 +1271,16 @@ public static class SchemaExplorerLib
                 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
                 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
                     ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
-                WHERE tc.TABLE_NAME = '{objectName}'
-                    AND tc.TABLE_SCHEMA = '{schemaName}'
+                WHERE tc.TABLE_NAME = '{oLit}'
+                    AND tc.TABLE_SCHEMA = '{sLit}'
                     AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
             ) pk ON pk.COLUMN_NAME = c.COLUMN_NAME
-            WHERE c.TABLE_NAME = '{objectName}'
-                AND c.TABLE_SCHEMA = '{schemaName}'
+            WHERE c.TABLE_NAME = '{oLit}'
+                AND c.TABLE_SCHEMA = '{sLit}'
             ORDER BY c.ORDINAL_POSITION");
 
             var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"CREATE TABLE [{schemaName}].[{objectName}] (");
+            sb.AppendLine($"CREATE TABLE {SqlIdentifier.Quote("sqlserver", schemaName)}.{SqlIdentifier.Quote("sqlserver", objectName)} (");
             var colDefs = new List<string>();
             var pkCols = new List<string>();
 
@@ -1292,18 +1300,18 @@ public static class SchemaExplorerLib
                         ? $"{dataType}(MAX)"
                         : dataType;
 
-                var colDef = $"    [{colName}] {typeStr.ToUpper()}";
+                var colDef = $"    {SqlIdentifier.Quote("sqlserver", colName)} {typeStr.ToUpper()}";
                 if (isIdentity) colDef += " IDENTITY(1,1)";
                 if (!nullable) colDef += " NOT NULL";
                 if (nullable) colDef += " NULL";
                 if (defaultVal != null) colDef += $" DEFAULT {defaultVal}";
 
                 colDefs.Add(colDef);
-                if (isPk) pkCols.Add($"[{colName}]");
+                if (isPk) pkCols.Add(SqlIdentifier.Quote("sqlserver", colName));
             }
 
             if (pkCols.Count > 0)
-                colDefs.Add($"    CONSTRAINT [PK_{objectName}] PRIMARY KEY ({string.Join(", ", pkCols)})");
+                colDefs.Add($"    CONSTRAINT {SqlIdentifier.Quote("sqlserver", "PK_" + objectName)} PRIMARY KEY ({string.Join(", ", pkCols)})");
 
             sb.Append(string.Join(",\n", colDefs));
             sb.AppendLine("\n);");
@@ -1315,7 +1323,7 @@ public static class SchemaExplorerLib
         // cases — object missing, caller lacks VIEW DEFINITION, or object is
         // encrypted. Disambiguate so the message tells the user what to DO.
         var rows = SqlServerOdbc.Query(connectionString,
-            $"SELECT OBJECT_DEFINITION(OBJECT_ID('{schemaName}.{objectName}'))");
+            $"SELECT OBJECT_DEFINITION(OBJECT_ID('{sLit}.{oLit}'))");
 
         var def = rows.FirstOrDefault()?[0];
         if (def != null)
@@ -1326,8 +1334,8 @@ public static class SchemaExplorerLib
         // against *this* object, and a least-privilege user can call it on itself.
         var diag = SqlServerOdbc.Query(connectionString, $@"
             SELECT
-                CASE WHEN OBJECT_ID('{schemaName}.{objectName}') IS NULL THEN 0 ELSE 1 END,
-                HAS_PERMS_BY_NAME('{schemaName}.{objectName}', 'OBJECT', 'VIEW DEFINITION')")
+                CASE WHEN OBJECT_ID('{sLit}.{oLit}') IS NULL THEN 0 ELSE 1 END,
+                HAS_PERMS_BY_NAME('{sLit}.{oLit}', 'OBJECT', 'VIEW DEFINITION')")
             .FirstOrDefault();
 
         var objIdVisible = diag != null && diag[0] == "1";
@@ -1365,13 +1373,15 @@ public static class SchemaExplorerLib
         conn.Open();
         using var cmd = conn.CreateCommand();
 
+        // Audit H-1: objectName is an untrusted identifier from the schema tree.
+        var q = SqlIdentifier.Quote("mysql", objectName);
         cmd.CommandText = objectType switch
         {
-            "procedure" => $"SHOW CREATE PROCEDURE `{objectName}`",
-            "function" => $"SHOW CREATE FUNCTION `{objectName}`",
-            "view" => $"SHOW CREATE VIEW `{objectName}`",
-            "trigger" => $"SHOW CREATE TRIGGER `{objectName}`",
-            "table" => $"SHOW CREATE TABLE `{objectName}`",
+            "procedure" => $"SHOW CREATE PROCEDURE {q}",
+            "function" => $"SHOW CREATE FUNCTION {q}",
+            "view" => $"SHOW CREATE VIEW {q}",
+            "trigger" => $"SHOW CREATE TRIGGER {q}",
+            "table" => $"SHOW CREATE TABLE {q}",
             _ => throw new Exception($"Unsupported object type: {objectType}")
         };
 
@@ -1395,6 +1405,12 @@ public static class SchemaExplorerLib
         conn.Open();
         using var cmd = conn.CreateCommand();
 
+        // Audit H-1: objectName/schemaName arrive from the frontend and are untrusted.
+        // oLit/sLit escape them for the string literals in the catalog queries below;
+        // SqlIdentifier.Quote("postgres", …) quotes them as identifiers in generated DDL.
+        var oLit = SqlIdentifier.EscapeLiteral(objectName);
+        var sLit = SqlIdentifier.EscapeLiteral(schemaName);
+
         if (objectType == "table")
         {
             cmd.CommandText = $@"
@@ -1411,12 +1427,12 @@ public static class SchemaExplorerLib
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage ku
                 ON tc.constraint_name = ku.constraint_name
-            WHERE tc.table_name = '{objectName}'
-                AND tc.table_schema = '{schemaName}'
+            WHERE tc.table_name = '{oLit}'
+                AND tc.table_schema = '{sLit}'
                 AND tc.constraint_type = 'PRIMARY KEY'
         ) pk ON pk.column_name = c.column_name
-        WHERE c.table_name = '{objectName}'
-            AND c.table_schema = '{schemaName}'
+        WHERE c.table_name = '{oLit}'
+            AND c.table_schema = '{sLit}'
         ORDER BY c.ordinal_position";
 
             using var reader = cmd.ExecuteReader();
@@ -1424,7 +1440,7 @@ public static class SchemaExplorerLib
             var colDefs = new List<string>();
             var pkCols = new List<string>();
 
-            sb.AppendLine($"CREATE TABLE {schemaName}.{objectName} (");
+            sb.AppendLine($"CREATE TABLE {SqlIdentifier.Quote("postgres", schemaName)}.{SqlIdentifier.Quote("postgres", objectName)} (");
 
             while (reader.Read())
             {
@@ -1436,12 +1452,12 @@ public static class SchemaExplorerLib
                 var isPk = reader.GetBoolean(5);
 
                 var typeStr = maxLen != null ? $"{dataType}({maxLen})" : dataType;
-                var colDef = $"    {colName} {typeStr}";
+                var colDef = $"    {SqlIdentifier.Quote("postgres", colName)} {typeStr}";
                 if (!nullable) colDef += " NOT NULL";
                 if (defaultVal != null) colDef += $" DEFAULT {defaultVal}";
 
                 colDefs.Add(colDef);
-                if (isPk) pkCols.Add(colName);
+                if (isPk) pkCols.Add(SqlIdentifier.Quote("postgres", colName));
             }
 
             if (pkCols.Count > 0)
@@ -1457,13 +1473,13 @@ public static class SchemaExplorerLib
             cmd.CommandText = $@"
         SELECT view_definition
         FROM information_schema.views
-        WHERE table_name = '{objectName}'
-            AND table_schema = '{schemaName}'";
+        WHERE table_name = '{oLit}'
+            AND table_schema = '{sLit}'";
 
             var def = cmd.ExecuteScalar()?.ToString()
                 ?? throw new Exception($"No definition found for view '{objectName}'");
 
-            return $"CREATE OR REPLACE VIEW {schemaName}.{objectName} AS\n{def}";
+            return $"CREATE OR REPLACE VIEW {SqlIdentifier.Quote("postgres", schemaName)}.{SqlIdentifier.Quote("postgres", objectName)} AS\n{def}";
         }
 
         if (objectType == "trigger")
@@ -1492,7 +1508,7 @@ public static class SchemaExplorerLib
                     JOIN pg_class     c ON c.oid = t.tgrelid
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                     JOIN pg_proc      p ON p.oid = t.tgfoid
-                    WHERE t.tgname = '{objectName}'
+                    WHERE t.tgname = '{oLit}'
                         AND NOT t.tgisinternal";
 
             string triggerName, tableName, schemaN, functionName, timing, evt, orientation;
@@ -1518,18 +1534,24 @@ public static class SchemaExplorerLib
                     SELECT pg_get_functiondef(p.oid)
                     FROM pg_proc p
                     JOIN pg_namespace n ON n.oid = p.pronamespace
-                    WHERE p.proname = '{functionName}'
-                        AND n.nspname = '{schemaN}'
+                    WHERE p.proname = '{SqlIdentifier.EscapeLiteral(functionName)}'
+                        AND n.nspname = '{SqlIdentifier.EscapeLiteral(schemaN)}'
                     LIMIT 1";
 
             var funcDef = cmd2.ExecuteScalar()?.ToString() ?? "";
 
+            // Quote into locals first: nested " inside an interpolation hole of a
+            // verbatim ($@) string is version-sensitive, so keep the holes simple.
+            var qTrig   = SqlIdentifier.Quote("postgres", triggerName);
+            var qSchema = SqlIdentifier.Quote("postgres", schemaN);
+            var qTable  = SqlIdentifier.Quote("postgres", tableName);
+            var qFunc   = SqlIdentifier.Quote("postgres", functionName);
             return $@"{funcDef}
 
             -- Trigger definition
-            CREATE OR REPLACE TRIGGER {triggerName}
-            {timing} {evt} ON {schemaN}.{tableName}
-            {orientation} EXECUTE FUNCTION {functionName}();";
+            CREATE OR REPLACE TRIGGER {qTrig}
+            {timing} {evt} ON {qSchema}.{qTable}
+            {orientation} EXECUTE FUNCTION {qFunc}();";
         }
 
         // Procedures and functions — existing code unchanged
@@ -1537,8 +1559,8 @@ public static class SchemaExplorerLib
         SELECT pg_get_functiondef(p.oid)
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE p.proname = '{objectName}'
-            AND n.nspname = '{schemaName}'
+        WHERE p.proname = '{oLit}'
+            AND n.nspname = '{sLit}'
         LIMIT 1";
 
         var result = cmd.ExecuteScalar()?.ToString()
