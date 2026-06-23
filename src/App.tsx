@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ipc, toIpcError } from "./ipc";
 import { useState, useCallback, useRef, useEffect, useMemo, Fragment, lazy, Suspense } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
@@ -655,10 +656,14 @@ function AddConnectionForm({
         sshKeyPath:  form.sshKeyPath,
       };
 
-      const result = await invoke<string>("save_connection", {
-        requestJson: JSON.stringify(request),
-      });
-      if (result.startsWith("ERROR")) { setError(result); return; }
+      try {
+        await ipc("save_connection", {
+          requestJson: JSON.stringify(request),
+        });
+      } catch (e) {
+        setError(toIpcError(e).message);
+        return;
+      }
 
       const newRef = `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
 
@@ -695,7 +700,7 @@ function AddConnectionForm({
 
       onSave();
     } catch (e) {
-      setError(String(e));
+      setError(toIpcError(e).message);
     } finally {
       setSaving(false);
     }
@@ -3001,17 +3006,22 @@ function App() {
             sshKeyPath:  "",
           };
 
-          const saveResult = await invoke<string>("save_connection", {
-            requestJson: JSON.stringify(request),
-          });
-
-          if (!saveResult.startsWith("ERROR") && conn.password) {
-            const credRef = `dbark:${conn.name.toLowerCase().replace(/\s+/g, "-")}:${conn.username}`;
-            await invoke("store_credential", {
-              target:   credRef,
-              username: conn.username,
-              password: conn.password,
+          try {
+            await ipc("save_connection", {
+              requestJson: JSON.stringify(request),
             });
+
+            if (conn.password) {
+              const credRef = `dbark:${conn.name.toLowerCase().replace(/\s+/g, "-")}:${conn.username}`;
+              await invoke("store_credential", {
+                target:   credRef,
+                username: conn.username,
+                password: conn.password,
+              });
+            }
+          } catch (e) {
+            // One bad connection shouldn't abort the whole import batch.
+            console.warn(`Skipped importing "${conn.name}": ${toIpcError(e).message}`);
           }
         }
         loadConnections(connectionsFolder);
@@ -5603,7 +5613,7 @@ function handleCellCommit(
               <button
                 onClick={async () => {
                   try {
-                    await invoke("delete_connection", { filePath: deletingConnection.filePath });
+                    await ipc("delete_connection", { filePath: deletingConnection.filePath });
                     await invoke("delete_credential", { target: deletingConnection.credentialRef });
                     // Clear from tabs if active
                     setTabs(prev => prev.map(t =>
@@ -7961,10 +7971,14 @@ function handleCellCommit(
               </span>
               <button
                 onClick={async () => {
-                  await invoke("clear_history", {
-                    connectionId: activeTab.connection?.id ?? ""
-                  });
-                  setHistory([]);
+                  try {
+                    await ipc("clear_history", {
+                      connectionId: activeTab.connection?.id ?? ""
+                    });
+                    setHistory([]);
+                  } catch (e) {
+                    console.error("Clear history failed:", toIpcError(e).message);
+                  }
                 }}
                 style={{
                   background: "none", border: "none", color: "var(--text-tertiary)",

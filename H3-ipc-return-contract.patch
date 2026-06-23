@@ -1,0 +1,559 @@
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index e8680c5..18d3b1d 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -58,6 +58,10 @@ jobs:
+           fi
+           echo "OK: no hardcoded DLL integrity hashes (build.rs is the single source of truth)."
+ 
++      - name: Fail on bare String/bool IPC commands
++        shell: bash
++        run: bash scripts/check-ipc-contract.sh
++
+       - name: Fail if native binaries are committed
+         shell: bash
+         run: |
+diff --git a/AGENTS.md b/AGENTS.md
+index f4827e9..3a5b5e6 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -64,3 +64,33 @@ runtime that allocated it).
+   pointer and drop it un-freed — that is the exact C-1 leak.
+ - The `free_string` passed to Rust must come from the library that produced the
+   pointer. Don't free a `FileQueryEngine` pointer through `QueryExecutor`, etc.
++
++## IPC return contract (audit H-3 — do not regress)
++
++Fallible Tauri commands return the canonical envelope `Result<T, IpcError>`
++(`IpcError { code, message }`, defined in `src-tauri/src/main.rs`). Tauri puts
++`Err(IpcError)` on the promise-rejection channel, so the frontend has **exactly
++one** error path. Do not reintroduce the old ambiguity:
++
++- **Never** return a bare `String` that is JSON on success and a `"ERROR: ..."`
++  string on failure, and **never** return a `bool` as a success/failure flag.
++  Both hide the failure reason and force call sites to sniff the payload (the
++  `startsWith("ERROR")` / `SyntaxError: Unexpected token` class of bug). A `bool`
++  is allowed only when it is a genuine value (e.g. `is_tunnel_open`), not a
++  status. `scripts/check-ipc-contract.sh` (wired into CI) fails the build on a
++  new bare `String`/`bool` command; the permitted-legacy baseline lives in
++  `scripts/ipc-contract-allowlist.txt` and shrinks as commands migrate.
++- A successful payload carries **no** error channel of its own. The one
++  exception is a multi-statement *result set*, where a per-statement error is
++  **data** (one statement failed, the batch did not) — that stays inside the
++  payload and is not a command failure.
++- Legacy `Result<_, String>` bodies migrate mechanically: change the signature
++  to `Result<_, IpcError>` and let `?` / `.into()` bridge bare-string errors via
++  `From<String> for IpcError` (becomes an `internal` code).
++- Frontend: call commands through `ipc()` / `ipcJson()` in `src/ipc.ts`, never
++  `invoke` directly. `try { await ipc(...) } catch (e) { /* e is IpcError */ }`
++  is the only pattern; surface `toIpcError(e).message`, never `String(e)`.
++- The `IpcErrorCode` wire values (`validation`/`native`/`not_found`/`io`/
++  `internal`) are pinned by `ipc_error_tests` in `main.rs` and mirrored in the
++  `IpcErrorCode` type in `src/ipc.ts`. Change both together, or the single parse
++  path breaks silently.
+diff --git a/scripts/check-ipc-contract.sh b/scripts/check-ipc-contract.sh
+new file mode 100755
+index 0000000..d63edd7
+--- /dev/null
++++ b/scripts/check-ipc-contract.sh
+@@ -0,0 +1,51 @@
++#!/usr/bin/env bash
++# check-ipc-contract.sh — audit H-3 guard.
++#
++# Fallible Tauri commands must return the canonical `Result<T, IpcError>`
++# envelope so the frontend has exactly one error path. A command that returns a
++# bare `String` (JSON *or* a "ERROR:" string) or a `bool` success flag is the
++# ambiguity H-3 set out to remove.
++#
++# This guard fails if a `#[tauri::command]` returns bare `String`/`bool` and is
++# not in scripts/ipc-contract-allowlist.txt. The allowlist is the documented
++# migration baseline; adding a NEW bare String/bool command fails CI, migrating
++# one off the list (deleting its line) is always fine.
++#
++# Mirrors the existing C-3 (hardcoded-hash) and devsql grep gates in build.yml.
++
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++MAIN_RS="$ROOT/src-tauri/src/main.rs"
++ALLOWLIST="$ROOT/scripts/ipc-contract-allowlist.txt"
++
++# Allowed command names (strip comments / blanks).
++allowed="$(grep -vE '^\s*(#|$)' "$ALLOWLIST" | tr -d ' ' || true)"
++
++# Find every `#[tauri::command]` whose fn signature returns bare String or bool,
++# and capture the fn name. (-A2 covers the optional `async fn` line wrap.)
++offenders="$(
++  grep -A2 '#\[tauri::command\]' "$MAIN_RS" \
++    | grep -E 'fn ' \
++    | grep -E '\-> (String|bool) ?\{' \
++    | sed -E 's/.*fn ([a-z_]+).*-> (String|bool).*/\1 \2/' || true
++)"
++
++fail=0
++while read -r name rtype; do
++  [ -z "${name:-}" ] && continue
++  if ! grep -qx "$name" <<<"$allowed"; then
++    if [ "$fail" -eq 0 ]; then
++      echo "::error::New bare '$rtype'-returning Tauri command(s) found — return Result<T, IpcError> instead (audit H-3):"
++    fi
++    echo "  - $name (-> $rtype)"
++    fail=1
++  fi
++done <<<"$offenders"
++
++if [ "$fail" -ne 0 ]; then
++  echo "If a bare bool is a genuine value (not a success flag), add it to scripts/ipc-contract-allowlist.txt with a comment."
++  exit 1
++fi
++
++echo "OK: every fallible IPC command returns Result<_, IpcError> (allowlisted legacy commands excepted)."
+diff --git a/scripts/ipc-contract-allowlist.txt b/scripts/ipc-contract-allowlist.txt
+new file mode 100644
+index 0000000..01c1142
+--- /dev/null
++++ b/scripts/ipc-contract-allowlist.txt
+@@ -0,0 +1,26 @@
++# IPC contract allowlist (audit H-3)
++#
++# Commands listed here are still permitted to return a bare `String` or `bool`
++# instead of the canonical `Result<T, IpcError>` envelope. Every entry except
++# `is_tunnel_open` is *legacy debt* scheduled for migration — see the H-3
++# migration checklist. Removing an entry (after migrating it) is always fine.
++# ADDING a new bare String/bool command makes scripts/check-ipc-contract.sh fail.
++#
++# Format: one command name per line. Blank lines and # comments ignored.
++
++# --- genuine boolean value (NOT a success flag) — permanently allowed ---
++is_tunnel_open
++
++# --- legacy String payloads (JSON-as-string) — migrate to Result<String, IpcError> ---
++execute_query
++list_connections
++query_file
++get_file_schema
++get_history
++import_dbeaver_connections
++get_activity
++kill_session
++
++# --- legacy bool success flags — migrate to Result<(), IpcError> (symmetric pair) ---
++store_credential
++delete_credential
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index 0336390..8ef6cf2 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -57,6 +57,122 @@ unsafe fn read_and_free(lib: &libloading::Library, ptr: *const c_char) -> String
+     owned
+ }
+ 
++/// Canonical error envelope for fallible IPC commands (audit H-3).
++///
++/// Every fallible `#[tauri::command]` returns `Result<T, IpcError>`. Tauri
++/// serializes `Err(IpcError)` onto the promise-rejection channel, so the
++/// frontend has exactly one error path (`catch`) and never has to sniff a
++/// success payload for a bare `"ERROR:"` string or an in-band `{"error": ...}`
++/// field. Successful payloads carry no error channel of their own.
++///
++/// `code` is a stable, machine-readable tag the UI can branch on without
++/// parsing `message`; `message` is human-readable and safe to surface directly.
++#[derive(serde::Serialize, Debug, Clone, PartialEq)]
++pub struct IpcError {
++    pub code: IpcErrorCode,
++    pub message: String,
++}
++
++#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum IpcErrorCode {
++    /// Caller-supplied input failed a validation rule.
++    Validation,
++    /// A native (C#/FFI) call failed or returned no/non-ok response.
++    Native,
++    /// A requested entity (file, connection, saved query) does not exist.
++    NotFound,
++    /// Filesystem / IO failure.
++    Io,
++    /// Anything not covered above.
++    Internal,
++}
++
++impl IpcError {
++    pub fn validation(msg: impl Into<String>) -> Self {
++        Self { code: IpcErrorCode::Validation, message: msg.into() }
++    }
++    pub fn native(msg: impl Into<String>) -> Self {
++        Self { code: IpcErrorCode::Native, message: msg.into() }
++    }
++    #[allow(dead_code)]
++    pub fn not_found(msg: impl Into<String>) -> Self {
++        Self { code: IpcErrorCode::NotFound, message: msg.into() }
++    }
++    #[allow(dead_code)]
++    pub fn io(msg: impl Into<String>) -> Self {
++        Self { code: IpcErrorCode::Io, message: msg.into() }
++    }
++    #[allow(dead_code)]
++    pub fn internal(msg: impl Into<String>) -> Self {
++        Self { code: IpcErrorCode::Internal, message: msg.into() }
++    }
++}
++
++/// Bridges legacy `Result<_, String>` bodies into the envelope with a plain `?`
++/// or `.into()`: a bare error string becomes a structured `internal` error
++/// rather than silently changing the wire shape. This lets the remaining
++/// `Result<String, String>` commands migrate mechanically (see the H-3
++/// migration checklist) without rewriting their error sites by hand.
++impl From<String> for IpcError {
++    fn from(message: String) -> Self {
++        Self { code: IpcErrorCode::Internal, message }
++    }
++}
++impl From<&str> for IpcError {
++    fn from(message: &str) -> Self {
++        Self::from(message.to_string())
++    }
++}
++
++impl std::fmt::Display for IpcError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "{:?}: {}", self.code, self.message)
++    }
++}
++
++#[cfg(test)]
++mod ipc_error_tests {
++    use super::{IpcError, IpcErrorCode};
++
++    // The frontend `ipc()` wrapper branches on `code` and surfaces `message`
++    // verbatim. These tests pin the exact wire shape so a rename or a serde
++    // attribute change can't silently break that single parse path (audit H-3).
++
++    #[test]
++    fn serializes_to_stable_code_and_message() {
++        let json = serde_json::to_string(&IpcError::validation("bad color")).unwrap();
++        assert_eq!(json, r#"{"code":"validation","message":"bad color"}"#);
++    }
++
++    #[test]
++    fn every_code_serializes_snake_case() {
++        let cases = [
++            (IpcErrorCode::Validation, "validation"),
++            (IpcErrorCode::Native, "native"),
++            (IpcErrorCode::NotFound, "not_found"),
++            (IpcErrorCode::Io, "io"),
++            (IpcErrorCode::Internal, "internal"),
++        ];
++        for (code, wire) in cases {
++            let err = IpcError { code, message: String::new() };
++            let json = serde_json::to_string(&err).unwrap();
++            assert!(
++                json.contains(&format!(r#""code":"{wire}""#)),
++                "code {code:?} should serialize as {wire:?}, got {json}"
++            );
++        }
++    }
++
++    #[test]
++    fn bare_string_bridges_to_internal() {
++        // legacy `Result<_, String>` error sites become structured `internal`
++        let err: IpcError = "something went wrong".to_string().into();
++        assert_eq!(err.code, IpcErrorCode::Internal);
++        assert_eq!(err.message, "something went wrong");
++    }
++}
++
+ /// The SQL Server ODBC driver name to use in connection strings, detected once
+ /// from what is actually installed. Avoids hardcoding a single version (a clean
+ /// machine may have Driver 18 but not 17, which throws ODBC IM002).
+@@ -393,17 +509,19 @@ fn list_connections(folder_path: String) -> String {
+ }
+ 
+ #[tauri::command]
+-fn save_connection(request_json: String) -> String {
++fn save_connection(request_json: String) -> Result<(), IpcError> {
+     // ── Validate group and color before passing to C# ────────────────────────
+     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&request_json) {
+         // group: alphanumeric, spaces, hyphens only, max 50 chars
+         if let Some(group) = val.get("group").and_then(|v| v.as_str()) {
+             if !group.is_empty() {
+                 if group.len() > 50 {
+-                    return "ERROR: Group name must be 50 characters or fewer".to_string();
++                    return Err(IpcError::validation("Group name must be 50 characters or fewer"));
+                 }
+                 if !group.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '-') {
+-                    return "ERROR: Group name may only contain letters, numbers, spaces, and hyphens".to_string();
++                    return Err(IpcError::validation(
++                        "Group name may only contain letters, numbers, spaces, and hyphens",
++                    ));
+                 }
+             }
+         }
+@@ -415,30 +533,47 @@ fn save_connection(request_json: String) -> String {
+                     && color.starts_with('#')
+                     && color[1..].chars().all(|c| c.is_ascii_hexdigit());
+                 if !valid {
+-                    return "ERROR: Color must be a valid hex color in #RRGGBB format".to_string();
++                    return Err(IpcError::validation(
++                        "Color must be a valid hex color in #RRGGBB format",
++                    ));
+                 }
+             }
+         }
+     }
+     // ── End validation ───────────────────────────────────────────────────────
+ 
+-    unsafe {
++    let response = unsafe {
+         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
+             get_connection_manager().get(b"save_connection").expect("save_connection");
+         let c_req = CString::new(request_json).unwrap_or_default();
+         let ptr = func(c_req.as_ptr());
+-        if ptr.is_null() { "ERROR: null response".to_string() }
+-        else { read_and_free(get_connection_manager(), ptr) }
++        if ptr.is_null() {
++            return Err(IpcError::native("Connection manager returned no response"));
++        }
++        read_and_free(get_connection_manager(), ptr)
++    };
++
++    // The C# side reports failure as an "ERROR: <reason>" string; translate that
++    // into the structured error channel so the frontend never has to sniff the
++    // success payload (audit H-3).
++    match response.strip_prefix("ERROR:") {
++        Some(reason) => Err(IpcError::native(reason.trim())),
++        None => Ok(()),
+     }
+ }
+ 
+ #[tauri::command]
+-fn delete_connection(file_path: String) -> bool {
+-    unsafe {
++fn delete_connection(file_path: String) -> Result<(), IpcError> {
++    let rc = unsafe {
+         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
+             get_connection_manager().get(b"delete_connection").expect("delete_connection");
+         let c_path = CString::new(file_path).unwrap_or_default();
+-        func(c_path.as_ptr()) == 1
++        func(c_path.as_ptr())
++    };
++    if rc == 1 {
++        Ok(())
++    } else {
++        Err(IpcError::native("Failed to delete connection file"))
+     }
+ }
+ 
+@@ -852,12 +987,17 @@ async fn get_history(connection_id: String, limit: i32) -> String {
+ }
+ 
+ #[tauri::command]
+-async fn clear_history(connection_id: String) -> bool {
+-    unsafe {
++async fn clear_history(connection_id: String) -> Result<(), IpcError> {
++    let rc = unsafe {
+         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
+             get_query_history().get(b"clear_history").expect("clear_history");
+-        let c_id = CString::new(connection_id).unwrap();
+-        func(c_id.as_ptr()) == 1
++        let c_id = CString::new(connection_id).unwrap_or_default();
++        func(c_id.as_ptr())
++    };
++    if rc == 1 {
++        Ok(())
++    } else {
++        Err(IpcError::native("Failed to clear query history"))
+     }
+ }
+ 
+diff --git a/src/App.tsx b/src/App.tsx
+index 2962273..35210b2 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,4 +1,5 @@
+ import { invoke } from "@tauri-apps/api/core";
++import { ipc, toIpcError } from "./ipc";
+ import { useState, useCallback, useRef, useEffect, useMemo, Fragment, lazy, Suspense } from "react";
+ import type { OnMount } from "@monaco-editor/react";
+ import type * as monacoEditor from "monaco-editor";
+@@ -655,10 +656,14 @@ function AddConnectionForm({
+         sshKeyPath:  form.sshKeyPath,
+       };
+ 
+-      const result = await invoke<string>("save_connection", {
+-        requestJson: JSON.stringify(request),
+-      });
+-      if (result.startsWith("ERROR")) { setError(result); return; }
++      try {
++        await ipc("save_connection", {
++          requestJson: JSON.stringify(request),
++        });
++      } catch (e) {
++        setError(toIpcError(e).message);
++        return;
++      }
+ 
+       const newRef = `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
+ 
+@@ -695,7 +700,7 @@ function AddConnectionForm({
+ 
+       onSave();
+     } catch (e) {
+-      setError(String(e));
++      setError(toIpcError(e).message);
+     } finally {
+       setSaving(false);
+     }
+@@ -3001,17 +3006,22 @@ function App() {
+             sshKeyPath:  "",
+           };
+ 
+-          const saveResult = await invoke<string>("save_connection", {
+-            requestJson: JSON.stringify(request),
+-          });
+-
+-          if (!saveResult.startsWith("ERROR") && conn.password) {
+-            const credRef = `dbark:${conn.name.toLowerCase().replace(/\s+/g, "-")}:${conn.username}`;
+-            await invoke("store_credential", {
+-              target:   credRef,
+-              username: conn.username,
+-              password: conn.password,
++          try {
++            await ipc("save_connection", {
++              requestJson: JSON.stringify(request),
+             });
++
++            if (conn.password) {
++              const credRef = `dbark:${conn.name.toLowerCase().replace(/\s+/g, "-")}:${conn.username}`;
++              await invoke("store_credential", {
++                target:   credRef,
++                username: conn.username,
++                password: conn.password,
++              });
++            }
++          } catch (e) {
++            // One bad connection shouldn't abort the whole import batch.
++            console.warn(`Skipped importing "${conn.name}": ${toIpcError(e).message}`);
+           }
+         }
+         loadConnections(connectionsFolder);
+@@ -5603,7 +5613,7 @@ function handleCellCommit(
+               <button
+                 onClick={async () => {
+                   try {
+-                    await invoke("delete_connection", { filePath: deletingConnection.filePath });
++                    await ipc("delete_connection", { filePath: deletingConnection.filePath });
+                     await invoke("delete_credential", { target: deletingConnection.credentialRef });
+                     // Clear from tabs if active
+                     setTabs(prev => prev.map(t =>
+@@ -7961,10 +7971,14 @@ function handleCellCommit(
+               </span>
+               <button
+                 onClick={async () => {
+-                  await invoke("clear_history", {
+-                    connectionId: activeTab.connection?.id ?? ""
+-                  });
+-                  setHistory([]);
++                  try {
++                    await ipc("clear_history", {
++                      connectionId: activeTab.connection?.id ?? ""
++                    });
++                    setHistory([]);
++                  } catch (e) {
++                    console.error("Clear history failed:", toIpcError(e).message);
++                  }
+                 }}
+                 style={{
+                   background: "none", border: "none", color: "var(--text-tertiary)",
+diff --git a/src/ipc.ts b/src/ipc.ts
+new file mode 100644
+index 0000000..665f893
+--- /dev/null
++++ b/src/ipc.ts
+@@ -0,0 +1,85 @@
++// Single entry point for every Tauri command (audit H-3).
++//
++// Before this, command results came back in five different shapes — a JSON
++// string, a bare "ERROR: ..." string, a `bool` success flag, a rejected
++// `Result<_, String>`, or a JSON object with an in-band `error` field — and
++// each call site invented its own way of telling success from failure
++// (`startsWith("ERROR")`, `if (parsed.error)`, ignoring the bool entirely).
++// That ad-hoc sniffing is exactly what produced the
++// `SyntaxError: Unexpected token 'E'` crash and the silent-failure class the
++// audit flagged.
++//
++// The contract now: fallible commands return `Result<T, IpcError>` on the Rust
++// side, so Tauri rejects the promise with a structured error. Callers use one
++// path — `try { await ipc(...) } catch (e) { /* e is IpcError */ }` — and never
++// branch on the success payload to discover a failure.
++
++import { invoke } from "@tauri-apps/api/core";
++import type { InvokeArgs } from "@tauri-apps/api/core";
++
++/** Stable machine-readable error codes, mirrored from the Rust `IpcErrorCode`. */
++export type IpcErrorCode =
++  | "validation"
++  | "native"
++  | "not_found"
++  | "io"
++  | "internal"
++  | "transport"; // frontend-only: the invoke call itself failed to round-trip
++
++/** The single shape every IPC failure is normalized to. */
++export interface IpcError {
++  code: IpcErrorCode;
++  message: string;
++}
++
++function isIpcError(x: unknown): x is IpcError {
++  return (
++    typeof x === "object" &&
++    x !== null &&
++    "code" in x &&
++    "message" in x &&
++    typeof (x as { message: unknown }).message === "string"
++  );
++}
++
++/**
++ * Normalize anything thrown by `invoke` into one `IpcError`:
++ *  - a structured `Err(IpcError)` from a migrated command — passed through;
++ *  - a bare string from a legacy `Result<_, String>` command — wrapped;
++ *  - a transport/`Error` — tagged `transport`.
++ * This is what makes `String(e)` ("[object Object]") impossible at call sites.
++ */
++export function toIpcError(e: unknown): IpcError {
++  if (isIpcError(e)) return e;
++  if (typeof e === "string") return { code: "internal", message: e };
++  if (e instanceof Error) return { code: "transport", message: e.message };
++  return { code: "internal", message: String(e) };
++}
++
++/**
++ * Invoke a Tauri command. Resolves with the payload, or throws a normalized
++ * `IpcError`. Use this for every command instead of importing `invoke`
++ * directly — it guarantees the single error path.
++ */
++export async function ipc<T = void>(cmd: string, args?: InvokeArgs): Promise<T> {
++  try {
++    return await invoke<T>(cmd, args);
++  } catch (e) {
++    throw toIpcError(e);
++  }
++}
++
++/**
++ * For commands whose successful payload is itself a JSON string (the legacy
++ * `-> String` / `Result<String, _>` shape). Parses in exactly one place; a
++ * payload that fails to parse becomes a normalized error instead of an uncaught
++ * `SyntaxError: Unexpected token` at the call site.
++ */
++export async function ipcJson<T>(cmd: string, args?: InvokeArgs): Promise<T> {
++  const raw = await ipc<string>(cmd, args);
++  try {
++    return JSON.parse(raw) as T;
++  } catch {
++    throw { code: "internal", message: `Malformed response from ${cmd}` } as IpcError;
++  }
++}

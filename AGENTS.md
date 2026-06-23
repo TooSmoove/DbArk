@@ -64,3 +64,33 @@ runtime that allocated it).
   pointer and drop it un-freed — that is the exact C-1 leak.
 - The `free_string` passed to Rust must come from the library that produced the
   pointer. Don't free a `FileQueryEngine` pointer through `QueryExecutor`, etc.
+
+## IPC return contract (audit H-3 — do not regress)
+
+Fallible Tauri commands return the canonical envelope `Result<T, IpcError>`
+(`IpcError { code, message }`, defined in `src-tauri/src/main.rs`). Tauri puts
+`Err(IpcError)` on the promise-rejection channel, so the frontend has **exactly
+one** error path. Do not reintroduce the old ambiguity:
+
+- **Never** return a bare `String` that is JSON on success and a `"ERROR: ..."`
+  string on failure, and **never** return a `bool` as a success/failure flag.
+  Both hide the failure reason and force call sites to sniff the payload (the
+  `startsWith("ERROR")` / `SyntaxError: Unexpected token` class of bug). A `bool`
+  is allowed only when it is a genuine value (e.g. `is_tunnel_open`), not a
+  status. `scripts/check-ipc-contract.sh` (wired into CI) fails the build on a
+  new bare `String`/`bool` command; the permitted-legacy baseline lives in
+  `scripts/ipc-contract-allowlist.txt` and shrinks as commands migrate.
+- A successful payload carries **no** error channel of its own. The one
+  exception is a multi-statement *result set*, where a per-statement error is
+  **data** (one statement failed, the batch did not) — that stays inside the
+  payload and is not a command failure.
+- Legacy `Result<_, String>` bodies migrate mechanically: change the signature
+  to `Result<_, IpcError>` and let `?` / `.into()` bridge bare-string errors via
+  `From<String> for IpcError` (becomes an `internal` code).
+- Frontend: call commands through `ipc()` / `ipcJson()` in `src/ipc.ts`, never
+  `invoke` directly. `try { await ipc(...) } catch (e) { /* e is IpcError */ }`
+  is the only pattern; surface `toIpcError(e).message`, never `String(e)`.
+- The `IpcErrorCode` wire values (`validation`/`native`/`not_found`/`io`/
+  `internal`) are pinned by `ipc_error_tests` in `main.rs` and mirrored in the
+  `IpcErrorCode` type in `src/ipc.ts`. Change both together, or the single parse
+  path breaks silently.

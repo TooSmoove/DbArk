@@ -58,6 +58,10 @@ jobs:
           fi
           echo "OK: no hardcoded DLL integrity hashes (build.rs is the single source of truth)."
 
+      - name: Fail on bare String/bool IPC commands
+        shell: bash
+        run: bash scripts/check-ipc-contract.sh
+
       - name: Fail if native binaries are committed
         shell: bash
         run: |
