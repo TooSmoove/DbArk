@@ -470,15 +470,17 @@ function JoinTablesPanel({
     setLoading(true);
     setError(null);
     invoke<string>("list_db_tables", {
-      credentialRef: activeConnection.credentialRef,
-      engine: activeConnection.engine,
-      host: activeConnection.host,
-      port: activeConnection.port,
-      database: activeConnection.database,
-      username: activeConnection.username,
-      sslMode: activeConnection.sslMode ?? "prefer",
-      sqlInstance: activeConnection.sqlInstance ?? "",
-      windowsAuth: activeConnection.windowsAuth ?? false,
+      params: {
+        credentialRef: activeConnection.credentialRef,
+        engine: activeConnection.engine,
+        host: activeConnection.host,
+        port: activeConnection.port,
+        database: activeConnection.database,
+        username: activeConnection.username,
+        sslMode: activeConnection.sslMode ?? "prefer",
+        sqlInstance: activeConnection.sqlInstance ?? "",
+        windowsAuth: activeConnection.windowsAuth ?? false,
+      },
     })
       .then((result) => {
         if (cancelled) return;
@@ -986,16 +988,18 @@ function AddConnectionForm({
             setTestMessage("");
             try {
               const msg = await invoke<string>("test_connection", {
-                credentialRef: editingConnection?.credentialRef ??
-                  `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`,
-                engine:      form.engine,
-                host:        form.host,
-                port:        parseInt(form.port) || defaultPort[form.engine] || 3306,
-                database:    form.database,
-                username:    form.username,
-                sslMode:     form.sslMode,
-                sqlInstance: form.sqlInstance,
-                windowsAuth: form.windowsAuth,
+                params: {
+                  credentialRef: editingConnection?.credentialRef ??
+                    `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`,
+                  engine:      form.engine,
+                  host:        form.host,
+                  port:        parseInt(form.port) || defaultPort[form.engine] || 3306,
+                  database:    form.database,
+                  username:    form.username,
+                  sslMode:     form.sslMode,
+                  sqlInstance: form.sqlInstance,
+                  windowsAuth: form.windowsAuth,
+                },
               });
               setTestResult("success");
               setTestMessage(msg);
@@ -3037,14 +3041,16 @@ function App() {
       } catch { /* no SSH password stored — key-only auth */ }
 
       const localPort = await invoke<number>("open_tunnel", {
-        tunnelId:    conn.id,
-        sshHost:     conn.sshHost,
-        sshPort:     conn.sshPort ?? 22,
-        sshUser:     conn.sshUser,
-        sshKeyPath:  conn.sshKeyPath ?? "",
-        sshPassword: sshPassword,
-        dbHost:      "127.0.0.1",
-        dbPort:      conn.port,
+        params: {
+          tunnelId:    conn.id,
+          sshHost:     conn.sshHost,
+          sshPort:     conn.sshPort ?? 22,
+          sshUser:     conn.sshUser,
+          sshKeyPath:  conn.sshKeyPath ?? "",
+          sshPassword: sshPassword,
+          dbHost:      "127.0.0.1",
+          dbPort:      conn.port,
+        },
       });
 
       console.log("open_tunnel invoke result:", localPort);
@@ -3354,18 +3360,20 @@ function App() {
   ) {
     // Get the CREATE definition first
     const raw = await invoke<string>("get_object_definition", {
-      credentialRef: conn.credentialRef,
-      engine:        conn.engine,
-      host:          conn.host,
-      port:          conn.port,
-      database:      conn.database,
-      username:      conn.username,
-      sslMode:       conn.sslMode ?? "prefer",
-      sqlInstance:   conn.sqlInstance ?? "",
-      windowsAuth:   conn.windowsAuth ?? false,
       objectName:    name,
       objectType:    type,
       schemaName:    schema || "dbo",
+      params: {
+        credentialRef: conn.credentialRef,
+        engine:        conn.engine,
+        host:          conn.host,
+        port:          conn.port,
+        database:      conn.database,
+        username:      conn.username,
+        sslMode:       conn.sslMode ?? "prefer",
+        sqlInstance:   conn.sqlInstance ?? "",
+        windowsAuth:   conn.windowsAuth ?? false,
+      },
     });
 
     const parsed: { definition?: string; error?: string } = JSON.parse(raw);
@@ -3609,16 +3617,18 @@ function App() {
           raw = await invoke<string>("query_file_with_db", {
             filePath:   tab.file.path,
             sql,
-            credentialRef: conn.credentialRef,
-            engine:     conn.engine,
-            host:       conn.host,
-            port:       conn.port,
-            database:   conn.database,
-            username:   conn.username,
             tableNames: tab.joinTables.join(","),
-            sslMode:    conn.sslMode ?? "prefer",
-            sqlInstance: conn.sqlInstance ?? "",
-            windowsAuth: conn.windowsAuth ?? false,
+            params: {
+              credentialRef: conn.credentialRef,
+              engine:     conn.engine,
+              host:       conn.host,
+              port:       conn.port,
+              database:   conn.database,
+              username:   conn.username,
+              sslMode:    conn.sslMode ?? "prefer",
+              sqlInstance: conn.sqlInstance ?? "",
+              windowsAuth: conn.windowsAuth ?? false,
+            },
           });
         } else {
           raw = await invoke<string>("query_file", {
@@ -3654,19 +3664,21 @@ function App() {
           const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
 
           const connectionString = await invoke<string>("build_connection_string", {
-            credentialRef: conn.credentialRef,
-            engine:        conn.engine,
-            host:          conn.host,
-            port:          conn.port,
-            // Run against the database the user is browsing in the sidebar, not
-            // necessarily the connection's saved default. Lets one connection
-            // query any database on its server without a separate connection.
-            database:      tab.activeDatabase ?? conn.database,
-            username:      conn.username,
-            sslMode:       effectiveSslMode,
-            sqlInstance:   conn.sqlInstance ?? "",
-            windowsAuth:   conn.windowsAuth ?? false,
-            tunnelPort:    tunnelPort,  // ← pass tunnel port
+            params: {
+              credentialRef: conn.credentialRef,
+              engine:        conn.engine,
+              host:          conn.host,
+              port:          conn.port,
+              // Run against the database the user is browsing in the sidebar, not
+              // necessarily the connection's saved default. Lets one connection
+              // query any database on its server without a separate connection.
+              database:      tab.activeDatabase ?? conn.database,
+              username:      conn.username,
+              sslMode:       effectiveSslMode,
+              sqlInstance:   conn.sqlInstance ?? "",
+              windowsAuth:   conn.windowsAuth ?? false,
+              tunnelPort:    tunnelPort,  // ← pass tunnel port
+            },
           });
 
         raw = await invoke<string>("execute_query", {
@@ -4287,15 +4299,17 @@ function App() {
       const effectiveSsl  = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
 
       const raw = await invoke<string>("get_schema", {
-        credentialRef: conn.credentialRef,
-        engine:        conn.engine,
-        host:          effectiveHost,
-        port:          effectivePort,
-        database:      db,
-        username:      conn.username,
-        sslMode:       effectiveSsl,
-        sqlInstance:   conn.sqlInstance ?? "",
-        windowsAuth:   conn.windowsAuth ?? false,
+        params: {
+          credentialRef: conn.credentialRef,
+          engine:        conn.engine,
+          host:          effectiveHost,
+          port:          effectivePort,
+          database:      db,
+          username:      conn.username,
+          sslMode:       effectiveSsl,
+          sqlInstance:   conn.sqlInstance ?? "",
+          windowsAuth:   conn.windowsAuth ?? false,
+        },
       });
 
       const parsed: SchemaResult = JSON.parse(raw);
@@ -4401,15 +4415,17 @@ function App() {
       const effectiveSsl  = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
 
       const raw = await invoke<string>("list_databases", {
-        credentialRef: conn.credentialRef,
-        engine:        conn.engine,
-        host:          effectiveHost,
-        port:          effectivePort,
-        database:      defaultDb,
-        username:      conn.username,
-        sslMode:       effectiveSsl,
-        sqlInstance:   conn.sqlInstance ?? "",
-        windowsAuth:   conn.windowsAuth ?? false,
+        params: {
+          credentialRef: conn.credentialRef,
+          engine:        conn.engine,
+          host:          effectiveHost,
+          port:          effectivePort,
+          database:      defaultDb,
+          username:      conn.username,
+          sslMode:       effectiveSsl,
+          sqlInstance:   conn.sqlInstance ?? "",
+          windowsAuth:   conn.windowsAuth ?? false,
+        },
       });
 
       const parsed: { databases?: string[]; error?: string } = JSON.parse(raw);
@@ -4566,16 +4582,18 @@ function App() {
       const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
 
       const connectionString = await invoke<string>("build_connection_string", {
-        credentialRef: conn.credentialRef,
-        engine:        conn.engine,
-        host:          conn.host,
-        port:          conn.port,
-        database:      conn.database,
-        username:      conn.username,
-        sslMode:       effectiveSslMode,
-        sqlInstance:   conn.sqlInstance ?? "",
-        windowsAuth:   conn.windowsAuth ?? false,
-        tunnelPort:    tunnelPort,
+        params: {
+          credentialRef: conn.credentialRef,
+          engine:        conn.engine,
+          host:          conn.host,
+          port:          conn.port,
+          database:      conn.database,
+          username:      conn.username,
+          sslMode:       effectiveSslMode,
+          sqlInstance:   conn.sqlInstance ?? "",
+          windowsAuth:   conn.windowsAuth ?? false,
+          tunnelPort:    tunnelPort,
+        },
       });
 
       const raw = await invoke<string>("get_activity", {
@@ -4620,16 +4638,18 @@ function App() {
       const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
 
       const connectionString = await invoke<string>("build_connection_string", {
-        credentialRef: conn.credentialRef,
-        engine:        conn.engine,
-        host:          conn.host,
-        port:          conn.port,
-        database:      conn.database,
-        username:      conn.username,
-        sslMode:       effectiveSslMode,
-        sqlInstance:   conn.sqlInstance ?? "",
-        windowsAuth:   conn.windowsAuth ?? false,
-        tunnelPort:    tunnelPort,
+        params: {
+          credentialRef: conn.credentialRef,
+          engine:        conn.engine,
+          host:          conn.host,
+          port:          conn.port,
+          database:      conn.database,
+          username:      conn.username,
+          sslMode:       effectiveSslMode,
+          sqlInstance:   conn.sqlInstance ?? "",
+          windowsAuth:   conn.windowsAuth ?? false,
+          tunnelPort:    tunnelPort,
+        },
       });
 
       const raw = await invoke<string>("kill_session", {
@@ -4950,18 +4970,20 @@ function App() {
   ) {
     try {
       const raw = await invoke<string>("get_object_definition", {
-        credentialRef: conn.credentialRef,
-        engine:        conn.engine,
-        host:          conn.host,
-        port:          conn.port,
-        database:      conn.database,
-        username:      conn.username,
-        sslMode:       conn.sslMode ?? "prefer",
-        sqlInstance:   conn.sqlInstance ?? "",
-        windowsAuth:   conn.windowsAuth ?? false,
         objectName:    name,
         objectType:    type,
         schemaName:    schema || "dbo",
+        params: {
+          credentialRef: conn.credentialRef,
+          engine:        conn.engine,
+          host:          conn.host,
+          port:          conn.port,
+          database:      conn.database,
+          username:      conn.username,
+          sslMode:       conn.sslMode ?? "prefer",
+          sqlInstance:   conn.sqlInstance ?? "",
+          windowsAuth:   conn.windowsAuth ?? false,
+        },
       });
 
       const parsed: { definition?: string; error?: string } = JSON.parse(raw);
@@ -5084,15 +5106,17 @@ function handleCellCommit(
 
       try {
         const connStr = await invoke<string>("build_connection_string", {
-          credentialRef: conn.credentialRef,
-          engine:        conn.engine,
-          host:          conn.host,
-          port:          conn.port,
-          database:      conn.database,
-          username:      conn.username,
-          sslMode:       conn.sslMode ?? "prefer",
-          sqlInstance:   conn.sqlInstance ?? "",
-          windowsAuth:   conn.windowsAuth ?? false,
+          params: {
+            credentialRef: conn.credentialRef,
+            engine:        conn.engine,
+            host:          conn.host,
+            port:          conn.port,
+            database:      conn.database,
+            username:      conn.username,
+            sslMode:       conn.sslMode ?? "prefer",
+            sqlInstance:   conn.sqlInstance ?? "",
+            windowsAuth:   conn.windowsAuth ?? false,
+          },
         });
 
         const raw = await invoke<string>("execute_query", {
@@ -5462,18 +5486,20 @@ function handleCellCommit(
                 onClick={async () => {
                   const conn = schemaContextMenu.connection;
                   const raw  = await invoke<string>("get_object_definition", {
-                    credentialRef: conn.credentialRef,
-                    engine:        conn.engine,
-                    host:          conn.host,
-                    port:          conn.port,
-                    database:      conn.database,
-                    username:      conn.username,
-                    sslMode:       conn.sslMode ?? "prefer",
-                    sqlInstance:   conn.sqlInstance ?? "",
-                    windowsAuth:   conn.windowsAuth ?? false,
                     objectName:    schemaContextMenu.name,
                     objectType:    schemaContextMenu.type,
                     schemaName:    schemaContextMenu.schema || "dbo",
+                    params: {
+                      credentialRef: conn.credentialRef,
+                      engine:        conn.engine,
+                      host:          conn.host,
+                      port:          conn.port,
+                      database:      conn.database,
+                      username:      conn.username,
+                      sslMode:       conn.sslMode ?? "prefer",
+                      sqlInstance:   conn.sqlInstance ?? "",
+                      windowsAuth:   conn.windowsAuth ?? false,
+                    },
                   });
 
                   const parsed: { definition?: string; error?: string } =
@@ -5670,19 +5696,21 @@ function handleCellCommit(
                   try {
                     const conn = dropConfirm.connection;
                     await invoke("drop_object", {
-                      credentialRef: conn.credentialRef,
-                      engine:        conn.engine,
-                      host:          conn.host,
-                      port:          conn.port,
-                      database:      conn.database,
-                      username:      conn.username,
-                      sslMode:       conn.sslMode ?? "prefer",
-                      sqlInstance:   conn.sqlInstance ?? "",
-                      windowsAuth:   conn.windowsAuth ?? false,
                       objectName:    dropConfirm.name,
                       objectType:    dropConfirm.type,
                       schemaName:    dropConfirm.schema,
                       tableName:     dropConfirm.tableName,
+                      params: {
+                        credentialRef: conn.credentialRef,
+                        engine:        conn.engine,
+                        host:          conn.host,
+                        port:          conn.port,
+                        database:      conn.database,
+                        username:      conn.username,
+                        sslMode:       conn.sslMode ?? "prefer",
+                        sqlInstance:   conn.sqlInstance ?? "",
+                        windowsAuth:   conn.windowsAuth ?? false,
+                      },
                     });
 
                     // Invalidate schema cache and reload

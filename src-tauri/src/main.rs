@@ -90,20 +90,64 @@ fn sqlserver_odbc_driver() -> &'static str {
     .as_str()
 }
 
+/// Shared connection parameters for the database command IPC boundary.
+/// Replaces the long flat argument lists that tripped clippy::too_many_arguments
+/// (audit A-2). Deserialised from the frontend's camelCase `invoke` payload under
+/// a `params` key; omitted optionals (notably `tunnel_port`, sent only by
+/// build_connection_string) deserialise to `None`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionParams {
+    credential_ref: String,
+    engine: String,
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    ssl_mode: Option<String>,
+    sql_instance: Option<String>,
+    windows_auth: Option<bool>,
+    tunnel_port: Option<u16>,
+}
+
+/// SSH tunnel parameters for `open_tunnel` (a different shape from a DB
+/// connection, so it gets its own parameter object — audit A-2).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TunnelParams {
+    tunnel_id: String,
+    ssh_host: String,
+    ssh_port: i32,
+    ssh_user: String,
+    ssh_key_path: String,
+    ssh_password: String,
+    db_host: String,
+    db_port: i32,
+}
+
+/// Resolved inputs for `build_sqlserver_odbc`, grouped to keep the builder under
+/// the argument-count limit and to keep the IPC `ConnectionParams` type out of
+/// the internal ODBC layer. All fields are `Copy`, so the builder destructures
+/// by value and its body is unchanged.
+struct SqlServerOdbcArgs<'a> {
+    host: &'a str,
+    port: u16,
+    instance: &'a str,
+    database: &'a str,
+    username: &'a str,
+    password: &'a str,
+    win_auth: bool,
+    ssl_mode: &'a str,
+}
+
 /// Builds the ODBC connection string for a SQL Server connection.
 /// SINGLE SOURCE OF TRUTH — every SQL Server call site must use this so the
 /// driver name, instance/port form, auth mode, and Encrypt/SSL handling can
 /// never drift between code paths again.
-fn build_sqlserver_odbc(
-    host: &str,
-    port: u16,
-    instance: &str,
-    database: &str,
-    username: &str,
-    password: &str,
-    win_auth: bool,
-    ssl_mode: &str,
-) -> String {
+fn build_sqlserver_odbc(args: &SqlServerOdbcArgs) -> String {
+    let &SqlServerOdbcArgs {
+        host, port, instance, database, username, password, win_auth, ssl_mode,
+    } = args;
     // Named instance => host\instance; otherwise host,port (ODBC comma form).
     let server = if !instance.is_empty() {
         format!("{}\\{}", host, instance)
@@ -116,17 +160,94 @@ fn build_sqlserver_odbc(
         _             => "no",
     };
     let driver = sqlserver_odbc_driver();
+    // Server is composed from allow-list-validated host/port/instance, so it is
+    // brace-safe as-is. Database/UID/PWD can carry special characters (the
+    // password is free-form in the keychain) and MUST be ODBC-escaped, or a
+    // value containing `;`, `}`, `=`, etc. corrupts the connection string
+    // (audit H-2).
     if win_auth {
         format!(
             "Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
-            driver, server, database, encrypt
+            driver, server, escape_odbc_value(database), encrypt
         )
     } else {
         format!(
             "Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
-            driver, server, database, username, password, encrypt
+            driver, server, escape_odbc_value(database), escape_odbc_value(username), escape_odbc_value(password), encrypt
         )
     }
+}
+
+/// Escapes a value for an ODBC connection string (SQL Server via SQLDriverConnect).
+/// ODBC rule: if the value contains a delimiter from `[]{}(),;?*=!@`, whitespace,
+/// or is empty-significant, enclose it in braces; any `}` inside the braced value
+/// is escaped by doubling it (`}}`). A `{` needs no escaping inside the braces.
+/// Empty values are returned unchanged (`PWD=;` is harmless and unambiguous).
+fn escape_odbc_value(v: &str) -> String {
+    if v.is_empty() {
+        return String::new();
+    }
+    let needs_brace = v.starts_with(char::is_whitespace)
+        || v.ends_with(char::is_whitespace)
+        || v.contains([
+            '[', ']', '{', '}', '(', ')', ',', ';', '?', '*', '=', '!', '@', ' ',
+        ]);
+    if !needs_brace {
+        return v.to_string();
+    }
+    format!("{{{}}}", v.replace('}', "}}"))
+}
+
+/// Escapes a value for an ADO.NET keyword/value connection string
+/// (Npgsql, MySqlConnector — both follow DbConnectionStringBuilder semantics).
+/// A value containing `;`, `'`, `"`, `=`, or with significant leading/trailing
+/// whitespace must be quoted. Prefer double-quote enclosure; fall back to single
+/// quotes when the value contains a double quote; if it contains both quote
+/// kinds, enclose in double quotes and double each embedded double quote.
+/// Empty values are returned unchanged so the existing `Password=;` form (used
+/// by insecure CockroachDB) is preserved exactly.
+fn escape_kv_value(v: &str) -> String {
+    if v.is_empty() {
+        return String::new();
+    }
+    let needs_quote = v.starts_with(char::is_whitespace)
+        || v.ends_with(char::is_whitespace)
+        || v.contains([';', '\'', '"', '=']);
+    if !needs_quote {
+        return v.to_string();
+    }
+    if !v.contains('"') {
+        format!("\"{v}\"")
+    } else if !v.contains('\'') {
+        format!("'{v}'")
+    } else {
+        format!("\"{}\"", v.replace('"', "\"\""))
+    }
+}
+
+/// Builds a MySQL/MariaDB (MySqlConnector) keyword/value connection string with
+/// every free-text field ODBC/ADO.NET-escaped. `suffix` carries the call site's
+/// own SSL/timeout/AllowUserVariables tail verbatim, so per-site behaviour is
+/// unchanged — only the escaping is centralised here (audit H-2 / A-3).
+fn build_mysql_conn(host: &str, port: u16, database: &str, username: &str, password: &str, suffix: &str) -> String {
+    format!(
+        "Server={};Port={};Database={};Uid={};Pwd={};{}",
+        host, port,
+        escape_kv_value(database), escape_kv_value(username), escape_kv_value(password),
+        suffix
+    )
+}
+
+/// Builds a PostgreSQL/CockroachDB (Npgsql) keyword/value connection string with
+/// every free-text field escaped. `suffix` carries the call site's SSL/timeout
+/// tail verbatim (audit H-2 / A-3).
+fn build_pg_conn(host: &str, port: u16, database: &str, username: &str, password: &str, suffix: &str) -> String {
+    format!(
+        "Host={};Port={};Database={};Username={};Password={};{}",
+        host, port,
+        escape_kv_value(database), escape_kv_value(username), escape_kv_value(password),
+        suffix
+    )
 }
 
 #[cfg(windows)]
@@ -340,18 +461,11 @@ fn delete_credential(target: String) -> bool {
 }
 
 #[tauri::command]
-fn build_connection_string(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssl_mode: Option<String>,
-    sql_instance: Option<String>,
-    windows_auth: Option<bool>,
-    tunnel_port: Option<u16>, // ← add this
-) -> Result<String, String> {
+fn build_connection_string(params: ConnectionParams) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, tunnel_port,
+    } = params;
     let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
@@ -393,8 +507,8 @@ fn build_connection_string(
                 "verify-full" => "SslMode=VerifyFull;",
                 _             => if tunnel_port.is_some() { "SslMode=None;" } else { "SslMode=Preferred;" },
             };
-            format!("Server={};Port={};Database={};Uid={};Pwd={};{};AllowUserVariables=true;",
-                effective_host, effective_port, database, username, password, ssl_param)
+            build_mysql_conn(&effective_host, effective_port, &database, &username, &password,
+                &format!("{};AllowUserVariables=true;", ssl_param))
         },
         "postgres" => {
             let ssl_param = match ssl.as_str() {
@@ -403,8 +517,7 @@ fn build_connection_string(
                 "verify-full" => "SSL Mode=VerifyFull;",
                 _             => "SSL Mode=Prefer;",
             };
-            format!("Host={};Port={};Database={};Username={};Password={};{}",
-                effective_host, effective_port, database, username, password, ssl_param)
+            build_pg_conn(&effective_host, effective_port, &database, &username, &password, ssl_param)
         },
         // CockroachDB speaks the Postgres wire protocol — uses Npgsql.
         // ssl_mode="none" means insecure single-node dev cluster: omit the SSL
@@ -422,12 +535,12 @@ fn build_connection_string(
                 "verify-full" => "SSL Mode=VerifyFull;",
                 _             => "SSL Mode=Prefer;Trust Server Certificate=true;",
             };
-            format!("Host={};Port={};Database={};Username={};Password={};{}",
-                effective_host, effective_port, database, username, password, ssl_param)
+            build_pg_conn(&effective_host, effective_port, &database, &username, &password, ssl_param)
         },
-        "sqlserver" => build_sqlserver_odbc(
-            &effective_host, effective_port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &effective_host, port: effective_port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         "sqlite" => format!("Data Source={}", database),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
@@ -462,11 +575,11 @@ async fn get_file_schema(file_path: String) -> String {
 }
 
 #[tauri::command]
-async fn list_db_tables(
-    credential_ref: String, engine: String, host: String,
-    port: u16, database: String, username: String,
-    ssl_mode: Option<String>, sql_instance: Option<String>, windows_auth: Option<bool>,
-) -> Result<String, String> {
+async fn list_db_tables(params: ConnectionParams) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, ..
+    } = params;
     let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
@@ -479,12 +592,13 @@ async fn list_db_tables(
         entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
     };
     let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
-        "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
+        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Prefer;"),
         "sqlite"                   => format!("Data Source={}", database),
-        "sqlserver"                => build_sqlserver_odbc(
-            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "sqlserver"                => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &host, port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         _                          => return Err(format!("Unsupported engine: {}", engine)),
     };
     let result = unsafe {
@@ -506,11 +620,12 @@ async fn list_db_tables(
 
 #[tauri::command]
 async fn query_file_with_db(
-    file_path: String, sql: String, credential_ref: String,
-    engine: String, host: String, port: u16,
-    database: String, username: String, table_names: String,
-    ssl_mode: Option<String>, sql_instance: Option<String>, windows_auth: Option<bool>,
+    params: ConnectionParams, file_path: String, sql: String, table_names: String,
 ) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, ..
+    } = params;
     let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
@@ -525,12 +640,13 @@ async fn query_file_with_db(
         entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
     };
     let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;", host, port, database, username, password),
-        "postgres" | "cockroachdb" => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;", host, port, database, username, password),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
+        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Prefer;"),
         "sqlite"                   => format!("Data Source={}", database),
-        "sqlserver"                => build_sqlserver_odbc(
-            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "sqlserver"                => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &host, port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         _                          => return Err(format!("Unsupported engine: {}", engine)),
     };
     let result = unsafe {
@@ -561,17 +677,11 @@ async fn query_file_with_db(
 }
 
 #[tauri::command]
-async fn get_schema(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssl_mode: Option<String>,
-    sql_instance: Option<String>,
-    windows_auth: Option<bool>,
-) -> Result<String, String> {
+async fn get_schema(params: ConnectionParams) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, ..
+    } = params;
     let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
@@ -601,18 +711,16 @@ async fn get_schema(
     };
 
     let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};",
-            host, port, database, username, password),
-        "postgres"    => format!("Host={};Port={};Database={};Username={};Password={};",
-            host, port, database, username, password),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, ""),
+        "postgres"    => build_pg_conn(&host, port, &database, &username, &password, ""),
         // CockroachDB insecure: add SSL Mode=Allow so Npgsql connects plain
         // without sending an SSLRequest (avoids 30-second connection timeout).
-        "cockroachdb"  => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Allow;",
-            host, port, database, username, password),
+        "cockroachdb"  => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Allow;"),
         "sqlite"   => format!("Data Source={}", database),
-        "sqlserver" => build_sqlserver_odbc(
-            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &host, port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -645,17 +753,11 @@ async fn get_schema(
 // frontend calls this once when a connection is selected to populate the
 // database list, then calls get_schema(database = <chosen db>) on expand.
 #[tauri::command]
-async fn list_databases(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssl_mode: Option<String>,
-    sql_instance: Option<String>,
-    windows_auth: Option<bool>,
-) -> Result<String, String> {
+async fn list_databases(params: ConnectionParams) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, ..
+    } = params;
     let ssl      = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
@@ -685,15 +787,13 @@ async fn list_databases(
     };
 
     let mut connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => format!("Server={};Port={};Database={};Uid={};Pwd={};",
-            host, port, database, username, password),
-        "postgres"    => format!("Host={};Port={};Database={};Username={};Password={};",
-            host, port, database, username, password),
-        "cockroachdb"  => format!("Host={};Port={};Database={};Username={};Password={};SSL Mode=Allow;",
-            host, port, database, username, password),
-        "sqlserver" => build_sqlserver_odbc(
-            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, ""),
+        "postgres"    => build_pg_conn(&host, port, &database, &username, &password, ""),
+        "cockroachdb"  => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Allow;"),
+        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &host, port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -762,17 +862,11 @@ async fn clear_history(connection_id: String) -> bool {
 }
 
 #[tauri::command]
-async fn test_connection(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssl_mode: Option<String>,
-    sql_instance: Option<String>,
-    windows_auth: Option<bool>,
-) -> Result<String, String> {
+async fn test_connection(params: ConnectionParams) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, ..
+    } = params;
     let ssl  = ssl_mode.unwrap_or_else(|| "prefer".to_string());
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
@@ -790,25 +884,24 @@ async fn test_connection(
     };
 
     let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => format!(
-            "Server={};Port={};Database={};Uid={};Pwd={};SslMode=Preferred;ConnectionTimeout=5;",
-            host, port, database, username, password),
-        "postgres" => format!(
-            "Host={};Port={};Database={};Username={};Password={};SSL Mode=Prefer;Timeout=5;",
-            host, port, database, username, password),
+        "mysql" | "mariadb" => build_mysql_conn(&host, port, &database, &username, &password,
+            "SslMode=Preferred;ConnectionTimeout=5;"),
+        "postgres" => build_pg_conn(&host, port, &database, &username, &password,
+            "SSL Mode=Prefer;Timeout=5;"),
         "cockroachdb" => {
             let ssl_param = if ssl == "none" {
                 "SSL Mode=Allow;"
             } else {
                 "SSL Mode=Prefer;Trust Server Certificate=true;"
             };
-            format!("Host={};Port={};Database={};Username={};Password={};{}Timeout=5;",
-                host, port, database, username, password, ssl_param)
+            build_pg_conn(&host, port, &database, &username, &password,
+                &format!("{}Timeout=5;", ssl_param))
         },
         "sqlite" => format!("Data Source={}", database),
-        "sqlserver" => build_sqlserver_odbc(
-            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &host, port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -887,16 +980,10 @@ pub(crate) fn dbark_dir() -> std::path::PathBuf {
 }
 
 #[tauri::command]
-async fn open_tunnel(
-    tunnel_id: String,
-    ssh_host: String,
-    ssh_port: i32,
-    ssh_user: String,
-    ssh_key_path: String,
-    ssh_password: String,
-    db_host: String,
-    db_port: i32,
-) -> Result<i32, String> {
+async fn open_tunnel(params: TunnelParams) -> Result<i32, String> {
+    let TunnelParams {
+        tunnel_id, ssh_host, ssh_port, ssh_user, ssh_key_path, ssh_password, db_host, db_port,
+    } = params;
 
     // ── SSH key path validation ──────────────────────────────────────────────
     // Only validate if a key path was actually provided (password-only auth
@@ -1164,19 +1251,12 @@ fn append_audit_log(
 
 #[tauri::command]
 async fn get_object_definition(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssl_mode: Option<String>,
-    sql_instance: Option<String>,
-    windows_auth: Option<bool>,
-    object_name: String,
-    object_type: String,
-    schema_name: Option<String>,
+    params: ConnectionParams, object_name: String, object_type: String, schema_name: Option<String>,
 ) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, ..
+    } = params;
     let instance = sql_instance.unwrap_or_default();
     let win_auth = windows_auth.unwrap_or(false);
     let schema   = schema_name.unwrap_or_else(|| "dbo".to_string());
@@ -1267,15 +1347,12 @@ async fn get_object_definition(
     };
 
     let mut conn_str = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"       => format!(
-            "Server={};Port={};Database={};Uid={};Pwd={};",
-            host, port, database, username, password),
-        "postgres" | "cockroachdb" => format!(
-            "Host={};Port={};Database={};Username={};Password={};",
-            host, port, database, username, password),
-        "sqlserver" => build_sqlserver_odbc(
-            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "mysql" | "mariadb"       => build_mysql_conn(&host, port, &database, &username, &password, ""),
+        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, ""),
+        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &host, port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -1323,10 +1400,10 @@ fn scrub_sql_for_log(sql: &str) -> String {
             let after_keyword = &lower[abs_idx + keyword.len()..];
             // Look for = 'value' pattern
             let trimmed = after_keyword.trim_start();
-            if trimmed.starts_with('=') {
-                let after_eq = trimmed[1..].trim_start();
-                if after_eq.starts_with('\'') {
-                    if let Some(end_quote) = after_eq[1..].find('\'') {
+            if let Some(after_eq_raw) = trimmed.strip_prefix('=') {
+                let after_eq = after_eq_raw.trim_start();
+                if let Some(after_quote) = after_eq.strip_prefix('\'') {
+                    if let Some(end_quote) = after_quote.find('\'') {
                         let full_match_len = keyword.len()
                             + (after_keyword.len() - trimmed.len())
                             + 1
@@ -1385,20 +1462,13 @@ async fn get_sqlite_objects(database: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn drop_object(
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssl_mode: Option<String>,
-    sql_instance: Option<String>,
-    windows_auth: Option<bool>,
-    object_name: String,
-    object_type: String,
-    schema_name: Option<String>,
-    table_name: Option<String>, // for triggers and indexes
+    params: ConnectionParams, object_name: String, object_type: String,
+    schema_name: Option<String>, table_name: Option<String>,
 ) -> Result<String, String> {
+    let ConnectionParams {
+        credential_ref, engine, host, port, database, username,
+        ssl_mode, sql_instance, windows_auth, ..
+    } = params;
     let instance   = sql_instance.unwrap_or_default();
     let win_auth   = windows_auth.unwrap_or(false);
     let schema     = schema_name.unwrap_or_else(|| "dbo".to_string());
@@ -1415,16 +1485,13 @@ async fn drop_object(
     };
 
     let mut conn_str = match engine.to_lowercase().as_str() {
-        "mysql"    => format!(
-            "Server={};Port={};Database={};Uid={};Pwd={};",
-            host, port, database, username, password),
-        "postgres" => format!(
-            "Host={};Port={};Database={};Username={};Password={};",
-            host, port, database, username, password),
+        "mysql"    => build_mysql_conn(&host, port, &database, &username, &password, ""),
+        "postgres" => build_pg_conn(&host, port, &database, &username, &password, ""),
         "sqlite"   => format!("Data Source={}", database),
-        "sqlserver" => build_sqlserver_odbc(
-            &host, port, &instance, &database, &username, &password, win_auth, ssl.as_str(),
-        ),
+        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: &host, port, instance: &instance, database: &database,
+            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+        }),
         _ => return Err(format!("Unsupported engine: {}", engine)),
     };
 
@@ -2221,4 +2288,109 @@ fn main() {
             log_ready_time])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+#[cfg(test)]
+mod conn_string_tests {
+    use super::{
+        build_mysql_conn, build_pg_conn, build_sqlserver_odbc, escape_kv_value, escape_odbc_value,
+        SqlServerOdbcArgs,
+    };
+
+    // ---- escape_kv_value (Npgsql / MySqlConnector) ----
+
+    #[test]
+    fn kv_passes_plain_values_through_unquoted() {
+        assert_eq!(escape_kv_value("plainpw"), "plainpw");
+        assert_eq!(escape_kv_value("p@ssw0rd"), "p@ssw0rd"); // @ is not special in ADO.NET
+    }
+
+    #[test]
+    fn kv_quotes_semicolon_so_password_cannot_break_out() {
+        // Without quoting, `;` ends the Password field early and the rest of the
+        // password is parsed as bogus keywords — the core audit H-2 bug.
+        assert_eq!(escape_kv_value("pa;ss"), "\"pa;ss\"");
+        assert_eq!(escape_kv_value("a;b=c"), "\"a;b=c\"");
+    }
+
+    #[test]
+    fn kv_quotes_equals_and_trailing_whitespace() {
+        assert_eq!(escape_kv_value("base64=="), "\"base64==\"");
+        assert_eq!(escape_kv_value("trailing "), "\"trailing \"");
+        assert_eq!(escape_kv_value(" leading"), "\" leading\"");
+    }
+
+    #[test]
+    fn kv_picks_safe_enclosure_for_quote_chars() {
+        // double quote present, no single quote -> enclose in single quotes
+        assert_eq!(escape_kv_value("pw\"x"), "'pw\"x'");
+        // single quote present, no double quote -> enclose in double quotes
+        assert_eq!(escape_kv_value("pw'x"), "\"pw'x\"");
+        // both present -> double-quote enclosure with embedded " doubled
+        assert_eq!(escape_kv_value("a'b\"c"), "\"a'b\"\"c\"");
+    }
+
+    #[test]
+    fn kv_empty_value_is_unchanged() {
+        // preserves the `Password=;` form that insecure CockroachDB relies on
+        assert_eq!(escape_kv_value(""), "");
+    }
+
+    // ---- escape_odbc_value (SQL Server via SQLDriverConnect) ----
+
+    #[test]
+    fn odbc_braces_special_chars_and_doubles_close_brace() {
+        assert_eq!(escape_odbc_value("pa;ss"), "{pa;ss}");
+        assert_eq!(escape_odbc_value("p@ss"), "{p@ss}"); // @ IS an ODBC delimiter
+        assert_eq!(escape_odbc_value("brace}here"), "{brace}}here}");
+        // a `{` inside needs no escaping; only `}` is doubled
+        assert_eq!(escape_odbc_value("a{b}c"), "{a{b}}c}");
+    }
+
+    #[test]
+    fn odbc_passes_plain_values_through() {
+        assert_eq!(escape_odbc_value("plainpw"), "plainpw");
+        assert_eq!(escape_odbc_value(""), "");
+    }
+
+    // ---- builders embed escaping at the only place a string is assembled ----
+
+    #[test]
+    fn mysql_builder_escapes_password_in_full_string() {
+        let s = build_mysql_conn("h", 3306, "db", "user", "p;w", "SslMode=Preferred;");
+        assert_eq!(
+            s,
+            "Server=h;Port=3306;Database=db;Uid=user;Pwd=\"p;w\";SslMode=Preferred;"
+        );
+        // the injected `;` is now inside quotes, so it can't terminate the field
+        assert!(s.contains("Pwd=\"p;w\";"));
+    }
+
+    #[test]
+    fn pg_builder_escapes_password_in_full_string() {
+        let s = build_pg_conn("h", 5432, "db", "user", "p;w", "");
+        assert_eq!(
+            s,
+            "Host=h;Port=5432;Database=db;Username=user;Password=\"p;w\";"
+        );
+    }
+
+    #[test]
+    fn pg_builder_preserves_empty_password_form() {
+        let s = build_pg_conn("h", 26257, "db", "root", "", "SSL Mode=Allow;");
+        assert_eq!(
+            s,
+            "Host=h;Port=26257;Database=db;Username=root;Password=;SSL Mode=Allow;"
+        );
+    }
+
+    #[test]
+    fn sqlserver_odbc_escapes_password() {
+        let s = build_sqlserver_odbc(&SqlServerOdbcArgs {
+            host: "h", port: 1433, instance: "", database: "db",
+            username: "sa", password: "p;w}x", win_auth: false, ssl_mode: "require",
+        });
+        // password ends up brace-quoted with the `}` doubled
+        assert!(s.contains("PWD={p;w}}x};"), "got: {}", s);
+        assert!(s.contains("Database=db;"));
+    }
 }
