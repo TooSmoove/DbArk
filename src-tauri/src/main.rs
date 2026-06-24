@@ -10,9 +10,21 @@ use std::time::Instant;
 
 use std::path::PathBuf;
 
+use zeroize::Zeroizing;
+
 fn natives_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    exe.parent().expect("exe parent").join("natives")
+    // Load-path failure: if we cannot locate our own executable we cannot find a
+    // single native library, so route through report_fatal for a named dialog +
+    // log line and a clean exit rather than a bare panic (code audit H-4).
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|e| fatal::report_fatal("Locating the executable", e));
+    let parent = exe.parent().unwrap_or_else(|| {
+        fatal::report_fatal(
+            "Locating the executable",
+            format!("{} has no parent directory", exe.display()),
+        )
+    });
+    parent.join("natives")
 }
 
 fn native_path(dll: &str) -> String {
@@ -411,6 +423,106 @@ fn verify_dll(path: &str, expected_hex: &str) -> Result<(), String> {
 // app fatally failed its own integrity check on launch).
 include!(concat!(env!("OUT_DIR"), "/dll_hashes.rs"));
 
+/// Resolve a logical native component (e.g. `QueryExecutor`) to the exact file
+/// name that was staged and hashed at build time, by reading the build-generated
+/// `DLL_HASHES` manifest. The loader and the startup integrity check therefore
+/// share ONE source of truth for the file name — including its per-platform
+/// extension (`.dll` / `.dylib` / `.so`) and any unix `lib` prefix — so the two
+/// can never disagree.
+///
+/// Code audit H-4: the loaders previously hard-coded `QueryExecutor.dll`, which
+/// could not load the `QueryExecutor.dylib` the macOS build actually stages and
+/// verifies — silently breaking the cross-platform claim. Pure inner helper kept
+/// separate from the global manifest so it is unit-testable with a fixture and no
+/// harness (AGENTS.md: regression tests required where no complex harness is needed).
+fn resolve_native_file<'a>(manifest: &[(&'a str, &str)], base: &str) -> Option<&'a str> {
+    manifest.iter().map(|(file, _)| *file).find(|file| {
+        let stem = std::path::Path::new(file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        stem == base || stem.strip_prefix("lib") == Some(base)
+    })
+}
+
+fn native_file_for(base: &str) -> Option<&'static str> {
+    resolve_native_file(DLL_HASHES, base)
+}
+
+/// Load a native component by base name, routing every failure through
+/// `report_fatal` so a load problem yields a named dialog + log line and a clean
+/// exit — instead of panicking out of a lazy `OnceLock::get_or_init`, which left
+/// the user with an opaque crash (code audit H-4: load-path `.expect()`s).
+///
+/// The startup integrity check in `main` has already verified the *bytes* of every
+/// component before any loader runs, so reaching here with a load (not hash)
+/// failure means a missing transitive dependency — e.g. the VC++ runtime DuckDB
+/// needs, or a missing ODBC driver — which the dialog now names, instead of
+/// vanishing silently in a `windows_subsystem` release build.
+fn load_native(base: &str) -> libloading::Library {
+    let file = native_file_for(base).unwrap_or_else(|| {
+        fatal::report_fatal(
+            "Native library load",
+            format!(
+                "No staged file for component `{base}` in the build manifest — \
+                 this install is incomplete. Reinstall DbArk."
+            ),
+        )
+    });
+    let path = native_path(file);
+    // SAFETY: `file` is a build-staged native whose SHA-256 was verified at startup
+    // before any load is attempted.
+    unsafe {
+        libloading::Library::new(&path).unwrap_or_else(|e| {
+            fatal::report_fatal(
+                "Native library load",
+                format!("Could not load {file}\n  path: {path}\n  {e}"),
+            )
+        })
+    }
+}
+
+#[cfg(test)]
+mod native_resolve_tests {
+    use super::resolve_native_file;
+
+    // Fixtures mirror what build.rs emits into DLL_HASHES per platform; the hash
+    // column is irrelevant to name resolution, so the values are placeholders.
+    const WIN: &[(&str, &str)] = &[("QueryExecutor.dll", "h"), ("sqlcipher.dll", "h")];
+    const MAC: &[(&str, &str)] = &[("QueryExecutor.dylib", "h"), ("sqlcipher.dylib", "h")];
+    const LIN: &[(&str, &str)] = &[("libQueryExecutor.so", "h"), ("libsqlcipher.so", "h")];
+
+    #[test]
+    fn resolves_windows_dll() {
+        assert_eq!(resolve_native_file(WIN, "QueryExecutor"), Some("QueryExecutor.dll"));
+    }
+
+    #[test]
+    fn resolves_macos_dylib() {
+        assert_eq!(resolve_native_file(MAC, "QueryExecutor"), Some("QueryExecutor.dylib"));
+    }
+
+    #[test]
+    fn resolves_linux_lib_prefixed_so() {
+        // The exact case the hard-coded `.dll` loader (audit H-4) could never satisfy.
+        assert_eq!(
+            resolve_native_file(LIN, "QueryExecutor"),
+            Some("libQueryExecutor.so")
+        );
+    }
+
+    #[test]
+    fn unknown_component_is_none() {
+        assert_eq!(resolve_native_file(WIN, "DoesNotExist"), None);
+    }
+
+    #[test]
+    fn does_not_partial_match_a_longer_name() {
+        // `Query` must not resolve to `QueryExecutor.dll`.
+        assert_eq!(resolve_native_file(WIN, "Query"), None);
+    }
+}
+
 static SSH_TUNNEL: OnceLock<libloading::Library> = OnceLock::new();
 static QUERY_EXECUTOR:     OnceLock<libloading::Library> = OnceLock::new();
 static CONNECTION_MANAGER: OnceLock<libloading::Library> = OnceLock::new();
@@ -419,59 +531,38 @@ static SCHEMA_EXPLORER:    OnceLock<libloading::Library> = OnceLock::new();
 static QUERY_HISTORY:      OnceLock<libloading::Library> = OnceLock::new();
 
 fn get_query_executor() -> &'static libloading::Library {
-    QUERY_EXECUTOR.get_or_init(|| unsafe {
-        libloading::Library::new(native_path("QueryExecutor.dll"))
-            .expect("Failed to load QueryExecutor.dll")
-    })
+    QUERY_EXECUTOR.get_or_init(|| load_native("QueryExecutor"))
 }
 
 fn get_connection_manager() -> &'static libloading::Library {
-    CONNECTION_MANAGER.get_or_init(|| unsafe {
-        libloading::Library::new(native_path("ConnectionManager.dll"))
-            .expect("Failed to load ConnectionManager.dll")
-    })
+    CONNECTION_MANAGER.get_or_init(|| load_native("ConnectionManager"))
 }
 
 fn get_file_query_engine() -> &'static libloading::Library {
-    FILE_QUERY_ENGINE.get_or_init(|| unsafe {
-        libloading::Library::new(native_path("FileQueryEngine.dll"))
-            .expect("Failed to load FileQueryEngine.dll")
-    })
+    FILE_QUERY_ENGINE.get_or_init(|| load_native("FileQueryEngine"))
 }
 
 fn get_schema_explorer() -> &'static libloading::Library {
-    SCHEMA_EXPLORER.get_or_init(|| unsafe {
-        libloading::Library::new(native_path("SchemaExplorer.dll"))
-            .expect("Failed to load SchemaExplorer.dll")
-    })
+    SCHEMA_EXPLORER.get_or_init(|| load_native("SchemaExplorer"))
 }
 
 fn get_query_history() -> &'static libloading::Library {
-    QUERY_HISTORY.get_or_init(|| unsafe {
-        libloading::Library::new(native_path("QueryHistory.dll"))
-            .expect("Failed to load QueryHistory.dll")
-    })
+    QUERY_HISTORY.get_or_init(|| load_native("QueryHistory"))
 }
 
 fn get_ssh_tunnel() -> &'static libloading::Library {
-    SSH_TUNNEL.get_or_init(|| unsafe {
-        libloading::Library::new(native_path("SshTunnel.dll"))
-            .expect("Failed to load SshTunnel.dll")
-    })
+    SSH_TUNNEL.get_or_init(|| load_native("SshTunnel"))
 }
 
 static SQLCIPHER: OnceLock<libloading::Library> = OnceLock::new();
 
-// Add this function:
 fn get_sqlcipher() -> &'static libloading::Library {
-    SQLCIPHER.get_or_init(|| unsafe {
-        libloading::Library::new(native_path("sqlcipher.dll"))
-            .expect("Failed to load sqlcipher.dll")
-    })
+    SQLCIPHER.get_or_init(|| load_native("sqlcipher"))
 }
 
 #[tauri::command]
-async fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>, row_limit: Option<u32>) -> Result<String, IpcError> {
+async fn execute_query(connection_string: String, sql: String, engine: String, read_only: Option<bool>, row_limit: Option<u32>) -> Result<String, IpcError> {
+    let connection_string = Zeroizing::new(connection_string);
     let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
     // Row cap from the user's resultRowLimit setting; passed as a string over FFI
     // (like read_only). C# clamps a zero/garbage value to its default.
@@ -479,7 +570,7 @@ async fn execute_query(mut connection_string: String, sql: String, engine: Strin
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, *const c_char, *const c_char, *const c_char,
-        ) -> *const c_char> = get_query_executor().get(b"execute_query").expect("execute_query");
+        ) -> *const c_char> = get_query_executor().get(b"execute_query").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `execute_query`: {e}")));
         let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
         let c_sql    = CString::new(sql).unwrap_or_default();
         let c_engine = CString::new(engine).unwrap_or_default();
@@ -493,11 +584,6 @@ async fn execute_query(mut connection_string: String, sql: String, engine: Strin
         if ptr.is_null() { Err(IpcError::native("Query executor returned no response")) }
         else { Ok(read_and_free(get_query_executor(), ptr)) }
     };
-    // Zero the connection string in memory after use — must run on both paths.
-    unsafe {
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
     result
 }
 
@@ -505,7 +591,7 @@ async fn execute_query(mut connection_string: String, sql: String, engine: Strin
 fn list_connections(folder_path: String) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
-            get_connection_manager().get(b"list_connections").expect("list_connections");
+            get_connection_manager().get(b"list_connections").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `list_connections`: {e}")));
         let c_path = CString::new(folder_path).unwrap_or_default();
         let ptr = func(c_path.as_ptr());
         if ptr.is_null() {
@@ -552,7 +638,7 @@ fn save_connection(request_json: String) -> Result<(), IpcError> {
 
     let response = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
-            get_connection_manager().get(b"save_connection").expect("save_connection");
+            get_connection_manager().get(b"save_connection").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `save_connection`: {e}")));
         let c_req = CString::new(request_json).unwrap_or_default();
         let ptr = func(c_req.as_ptr());
         if ptr.is_null() {
@@ -574,7 +660,7 @@ fn save_connection(request_json: String) -> Result<(), IpcError> {
 fn delete_connection(file_path: String) -> Result<(), IpcError> {
     let rc = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
-            get_connection_manager().get(b"delete_connection").expect("delete_connection");
+            get_connection_manager().get(b"delete_connection").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `delete_connection`: {e}")));
         let c_path = CString::new(file_path).unwrap_or_default();
         func(c_path.as_ptr())
     };
@@ -703,7 +789,7 @@ async fn query_file(file_path: String, sql: String) -> Result<String, IpcError> 
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
-        ) -> *const c_char> = get_file_query_engine().get(b"query_file").expect("query_file");
+        ) -> *const c_char> = get_file_query_engine().get(b"query_file").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `query_file`: {e}")));
         let c_path = CString::new(file_path).unwrap_or_default();
         let c_sql  = CString::new(sql).unwrap_or_default();
         let ptr = func(c_path.as_ptr(), c_sql.as_ptr());
@@ -719,7 +805,7 @@ async fn query_file(file_path: String, sql: String) -> Result<String, IpcError> 
 async fn get_file_schema(file_path: String) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
-            get_file_query_engine().get(b"get_file_schema").expect("get_file_schema");
+            get_file_query_engine().get(b"get_file_schema").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_file_schema`: {e}")));
         let c_path = CString::new(file_path).unwrap_or_default();
         let ptr = func(c_path.as_ptr());
         if ptr.is_null() {
@@ -747,7 +833,7 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
             .map_err(|e| e.to_string())?;
         entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     };
-    let mut connection_string = match engine.to_lowercase().as_str() {
+    let connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
         "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Prefer;"),
         "sqlite"                   => format!("Data Source={}", database),
@@ -757,20 +843,17 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
         }),
         _                          => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
+    let connection_string = Zeroizing::new(connection_string);
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
-        ) -> *const c_char> = get_file_query_engine().get(b"ListTables").expect("ListTables");
-        let cs  = CString::new(connection_string.as_str()).unwrap();
-        let eng = CString::new(engine).unwrap();
+        ) -> *const c_char> = get_file_query_engine().get(b"ListTables").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `ListTables`: {e}")));
+        let cs  = CString::new(connection_string.as_str()).unwrap_or_default();
+        let eng = CString::new(engine).unwrap_or_default();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_file_query_engine(), ptr))
     };
-    unsafe {
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
     result
 }
 
@@ -795,7 +878,7 @@ async fn query_file_with_db(
             .map_err(|e| e.to_string())?;
         entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     };
-    let mut connection_string = match engine.to_lowercase().as_str() {
+    let connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
         "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Prefer;"),
         "sqlite"                   => format!("Data Source={}", database),
@@ -805,17 +888,18 @@ async fn query_file_with_db(
         }),
         _                          => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
+    let connection_string = Zeroizing::new(connection_string);
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, *const c_char,
             *const c_char, *const c_char,
-        ) -> *const c_char> = get_file_query_engine().get(b"QueryFileWithDb").expect("QueryFileWithDb");
+        ) -> *const c_char> = get_file_query_engine().get(b"QueryFileWithDb").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `QueryFileWithDb`: {e}")));
         let strings = (
-            CString::new(file_path).unwrap(),
-            CString::new(sql).unwrap(),
-            CString::new(connection_string.as_str()).unwrap(),
-            CString::new(engine).unwrap(),
-            CString::new(table_names).unwrap(),
+            CString::new(file_path).unwrap_or_default(),
+            CString::new(sql).unwrap_or_default(),
+            CString::new(connection_string.as_str()).unwrap_or_default(),
+            CString::new(engine).unwrap_or_default(),
+            CString::new(table_names).unwrap_or_default(),
         );
         let ptr = func(
             strings.0.as_ptr(), strings.1.as_ptr(),
@@ -825,10 +909,6 @@ async fn query_file_with_db(
         if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_file_query_engine(), ptr))
     };
-    unsafe {
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
     result
 }
 
@@ -866,7 +946,7 @@ async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
         String::new()
     };
 
-    let mut connection_string = match engine.to_lowercase().as_str() {
+    let connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, ""),
         "postgres"    => build_pg_conn(&host, port, &database, &username, &password, ""),
         // CockroachDB insecure: add SSL Mode=Allow so Npgsql connects plain
@@ -879,25 +959,21 @@ async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
+    let connection_string = Zeroizing::new(connection_string);
 
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
         ) -> *const c_char> = get_schema_explorer()
             .get(b"get_schema")
-            .expect("get_schema");
-        let cs  = CString::new(connection_string.as_str()).unwrap();
-        let eng = CString::new(engine).unwrap();
+            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_schema`: {e}")));
+        let cs  = CString::new(connection_string.as_str()).unwrap_or_default();
+        let eng = CString::new(engine).unwrap_or_default();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
-    // Zero out connection string
-    unsafe {
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
 
     result
 }
@@ -942,7 +1018,7 @@ async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
         String::new()
     };
 
-    let mut connection_string = match engine.to_lowercase().as_str() {
+    let connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, ""),
         "postgres"    => build_pg_conn(&host, port, &database, &username, &password, ""),
         "cockroachdb"  => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Allow;"),
@@ -952,25 +1028,21 @@ async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
+    let connection_string = Zeroizing::new(connection_string);
 
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
         ) -> *const c_char> = get_schema_explorer()
             .get(b"list_databases")
-            .expect("list_databases");
-        let cs  = CString::new(connection_string.as_str()).unwrap();
-        let eng = CString::new(engine).unwrap();
+            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `list_databases`: {e}")));
+        let cs  = CString::new(connection_string.as_str()).unwrap_or_default();
+        let eng = CString::new(engine).unwrap_or_default();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
-    // Zero out connection string
-    unsafe {
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
 
     result
 }
@@ -982,7 +1054,7 @@ async fn add_history_entry(
 ) -> bool {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
-            get_query_history().get(b"add_history_entry").expect("add_history_entry");
+            get_query_history().get(b"add_history_entry").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `add_history_entry`: {e}")));
         let json = format!(
             r#"{{"connectionId":"{}","connectionName":"{}","sql":"{}","executedAt":{},"durationMs":{},"rowCount":{},"success":{}}}"#,
             connection_id.replace('"', "\\\""),
@@ -990,7 +1062,12 @@ async fn add_history_entry(
             sql.replace('"', "\\\"").replace('\n', "\\n").replace('\r', ""),
             executed_at, duration_ms, row_count, success
         );
-        let c_json = CString::new(json).unwrap();
+        let c_json = match CString::new(json) {
+            Ok(c) => c,
+            // Interior NUL in the history JSON is pathological; skip logging rather
+            // than crash a fire-and-forget telemetry write.
+            Err(_) => return false,
+        };
         func(c_json.as_ptr()) == 1
     }
 }
@@ -999,7 +1076,7 @@ async fn add_history_entry(
 async fn get_history(connection_id: String, limit: i32) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char, i32) -> *const c_char> =
-            get_query_history().get(b"get_history").expect("get_history");
+            get_query_history().get(b"get_history").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_history`: {e}")));
         let c_id = CString::new(connection_id).unwrap_or_default();
         let ptr  = func(c_id.as_ptr(), limit);
         if ptr.is_null() {
@@ -1014,7 +1091,7 @@ async fn get_history(connection_id: String, limit: i32) -> Result<String, IpcErr
 async fn clear_history(connection_id: String) -> Result<(), IpcError> {
     let rc = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
-            get_query_history().get(b"clear_history").expect("clear_history");
+            get_query_history().get(b"clear_history").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `clear_history`: {e}")));
         let c_id = CString::new(connection_id).unwrap_or_default();
         func(c_id.as_ptr())
     };
@@ -1068,6 +1145,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
+    let conn_str = Zeroizing::new(conn_str);
 
     // Run a minimal test query
     let test_sql = match engine.to_lowercase().as_str() {
@@ -1085,10 +1163,10 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
             .get(b"execute_query")
             .map_err(|e| e.to_string())?;
 
-        let c_conn   = CString::new(conn_str).unwrap();
-        let c_sql    = CString::new(test_sql).unwrap();
-        let c_engine = CString::new(engine).unwrap();
-        let c_ro     = CString::new("false").unwrap();
+        let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_sql    = CString::new(test_sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_engine = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_ro     = CString::new("false").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
 
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
@@ -1215,12 +1293,12 @@ async fn open_tunnel(params: TunnelParams) -> Result<i32, IpcError> {
             .map_err(|e| e.to_string())?;
 
         let strings = (
-            CString::new(tunnel_id).unwrap(),
-            CString::new(ssh_host).unwrap(),
-            CString::new(ssh_user).unwrap(),
-            CString::new(ssh_key_path).unwrap(),
-            CString::new(ssh_password).unwrap(),
-            CString::new(db_host).unwrap(),
+            CString::new(tunnel_id).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(ssh_host).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(ssh_user).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(ssh_key_path).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(ssh_password).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(db_host).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
         );
 
         let ptr = func(
@@ -1254,8 +1332,9 @@ fn close_tunnel(tunnel_id: String) {
         if let Ok(func) = get_ssh_tunnel()
             .get::<unsafe extern "C" fn(*const c_char)>(b"close_tunnel")
         {
-            let c_id = CString::new(tunnel_id).unwrap();
-            func(c_id.as_ptr());
+            if let Ok(c_id) = CString::new(tunnel_id) {
+                func(c_id.as_ptr());
+            }
         }
     }
 }
@@ -1268,7 +1347,10 @@ fn is_tunnel_open(tunnel_id: String) -> bool {
                 Ok(f) => f,
                 Err(_) => return false,
             };
-        let c_id = CString::new(tunnel_id).unwrap();
+        let c_id = match CString::new(tunnel_id) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
         func(c_id.as_ptr()) == 1
     }
 }
@@ -1288,8 +1370,8 @@ async fn export_results(
     rows: Vec<Vec<Option<String>>>,
 ) -> Result<(), IpcError> {
     match format.as_str() {
-        "csv"  => export_csv(&path, &columns, &rows).map_err(|e| IpcError::io(e)),
-        "json" => export_json(&path, &columns, &rows).map_err(|e| IpcError::io(e)),
+        "csv"  => export_csv(&path, &columns, &rows).map_err(IpcError::io),
+        "json" => export_json(&path, &columns, &rows).map_err(IpcError::io),
         _      => Err(IpcError::validation(format!("Unsupported format: {}", format))),
     }
 }
@@ -1455,10 +1537,10 @@ async fn get_object_definition(
                 .get(b"execute_query")
                 .map_err(|e| e.to_string())?;
 
-            let c_conn   = CString::new(conn_str.as_str()).unwrap();
-            let c_sql    = CString::new(sql.as_str()).unwrap();
-            let c_engine = CString::new("sqlite").unwrap();
-            let c_ro     = CString::new("true").unwrap();
+            let c_conn   = CString::new(conn_str.as_str()).unwrap_or_default();
+            let c_sql    = CString::new(sql.as_str()).unwrap_or_default();
+            let c_engine = CString::new("sqlite").unwrap_or_default();
+            let c_ro     = CString::new("true").unwrap_or_default();
 
             let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                            c_engine.as_ptr(), c_ro.as_ptr());
@@ -1510,7 +1592,7 @@ async fn get_object_definition(
         String::new()
     };
 
-    let mut conn_str = match engine.to_lowercase().as_str() {
+    let conn_str = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"       => build_mysql_conn(&host, port, &database, &username, &password, ""),
         "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, ""),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
@@ -1519,6 +1601,7 @@ async fn get_object_definition(
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
+    let conn_str = Zeroizing::new(conn_str);
 
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -1529,11 +1612,11 @@ async fn get_object_definition(
             .get(b"get_object_definition")
             .map_err(|e| e.to_string())?;
 
-        let c_conn   = CString::new(conn_str.as_str()).unwrap();
-        let c_engine = CString::new(engine).unwrap();
-        let c_name   = CString::new(object_name).unwrap();
-        let c_type   = CString::new(object_type).unwrap();
-        let c_schema = CString::new(schema).unwrap();
+        let c_conn   = CString::new(conn_str.as_str()).unwrap_or_default();
+        let c_engine = CString::new(engine).unwrap_or_default();
+        let c_name   = CString::new(object_name).unwrap_or_default();
+        let c_type   = CString::new(object_type).unwrap_or_default();
+        let c_schema = CString::new(schema).unwrap_or_default();
 
         let ptr = func(
             c_conn.as_ptr(), c_engine.as_ptr(),
@@ -1545,10 +1628,6 @@ async fn get_object_definition(
         Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
-    unsafe {
-        let bytes = conn_str.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
 
     result
 }
@@ -1610,10 +1689,10 @@ async fn get_sqlite_objects(database: String) -> Result<String, IpcError> {
             .get(b"execute_query")
             .map_err(|e| e.to_string())?;
 
-        let c_conn   = CString::new(conn_str.as_str()).unwrap();
-        let c_sql    = CString::new(sql).unwrap();
-        let c_engine = CString::new("sqlite").unwrap();
-        let c_ro     = CString::new("true").unwrap();
+        let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_sql    = CString::new(sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_engine = CString::new("sqlite").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_ro     = CString::new("true").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
 
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
@@ -1648,7 +1727,7 @@ async fn drop_object(
         String::new()
     };
 
-    let mut conn_str = match engine.to_lowercase().as_str() {
+    let conn_str = match engine.to_lowercase().as_str() {
         "mysql"    => build_mysql_conn(&host, port, &database, &username, &password, ""),
         "postgres" => build_pg_conn(&host, port, &database, &username, &password, ""),
         "sqlite"   => format!("Data Source={}", database),
@@ -1658,6 +1737,7 @@ async fn drop_object(
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
+    let conn_str = Zeroizing::new(conn_str);
 
     // Build DROP statement per engine and type. Identifiers are quoted per engine
     // and the object type is validated against an allow-list (audit H-1), so a
@@ -1673,10 +1753,10 @@ async fn drop_object(
             .get(b"execute_query")
             .map_err(|e| e.to_string())?;
 
-        let c_conn   = CString::new(conn_str.as_str()).unwrap();
-        let c_sql    = CString::new(drop_sql.as_str()).unwrap();
-        let c_engine = CString::new(engine.as_str()).unwrap();
-        let c_ro     = CString::new("false").unwrap();
+        let c_conn   = CString::new(conn_str.as_str()).unwrap_or_default();
+        let c_sql    = CString::new(drop_sql.as_str()).unwrap_or_default();
+        let c_engine = CString::new(engine.as_str()).unwrap_or_default();
+        let c_ro     = CString::new("false").unwrap_or_default();
 
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
@@ -1684,10 +1764,6 @@ async fn drop_object(
         Ok(read_and_free(get_query_executor(), ptr))
     };
 
-    unsafe {
-        let bytes = conn_str.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
 
     result
 }
@@ -2251,21 +2327,22 @@ fn import_dbeaver_connections() -> Result<String, IpcError> {
 
 // Two new Tauri commands for the Activity panel.
 // Both follow the existing execute_query pattern:
-//   - mut connection_string so we can zero it after use
+//   - connection_string wrapped in a Zeroizing guard (scrubbed on every exit path)
 //   - libloading::Symbol resolves the C# entry point
 //   - C-string round-trip across the FFI boundary
 //   - Null-pointer guard returns a JSON error envelope
-//   - Zero the connection string in memory immediately after the call
+//   - the Zeroizing guard zeroes the connection string from memory on drop
 
 // ── get_activity ─────────────────────────────────────────────────────────────
 #[tauri::command]
-async fn get_activity(mut connection_string: String, engine: String) -> Result<String, IpcError> {
+async fn get_activity(connection_string: String, engine: String) -> Result<String, IpcError> {
+    let connection_string = Zeroizing::new(connection_string);
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor()
             .get(b"get_activity")
-            .expect("get_activity");
+            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_activity`: {e}")));
         let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
         let c_engine = CString::new(engine).unwrap_or_default();
         let ptr = func(c_conn.as_ptr(), c_engine.as_ptr());
@@ -2275,25 +2352,20 @@ async fn get_activity(mut connection_string: String, engine: String) -> Result<S
             Ok(read_and_free(get_query_executor(), ptr))
         }
     };
-    // Zero the connection string in memory after use — same pattern as
-    // execute_query. Prevents passwords lingering in process memory.
-    unsafe {
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
     result
 }
 
 
 // ── kill_session ─────────────────────────────────────────────────────────────
 #[tauri::command]
-async fn kill_session(mut connection_string: String, engine: String, pid: String) -> Result<String, IpcError> {
+async fn kill_session(connection_string: String, engine: String, pid: String) -> Result<String, IpcError> {
+    let connection_string = Zeroizing::new(connection_string);
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor()
             .get(b"kill_session")
-            .expect("kill_session");
+            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `kill_session`: {e}")));
         let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
         let c_engine = CString::new(engine).unwrap_or_default();
         let c_pid    = CString::new(pid).unwrap_or_default();
@@ -2304,10 +2376,6 @@ async fn kill_session(mut connection_string: String, engine: String, pid: String
             Ok(read_and_free(get_query_executor(), ptr))
         }
     };
-    unsafe {
-        let bytes = connection_string.as_bytes_mut();
-        for b in bytes.iter_mut() { *b = 0; }
-    }
     result
 }
 
@@ -2428,7 +2496,7 @@ fn main() {
             kill_session,
             log_ready_time])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|e| fatal::report_fatal("Tauri runtime", e));
 }
 #[cfg(test)]
 mod conn_string_tests {
