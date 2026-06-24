@@ -471,7 +471,7 @@ fn get_sqlcipher() -> &'static libloading::Library {
 }
 
 #[tauri::command]
-async fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>, row_limit: Option<u32>) -> String {
+async fn execute_query(mut connection_string: String, sql: String, engine: String, read_only: Option<bool>, row_limit: Option<u32>) -> Result<String, IpcError> {
     let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
     // Row cap from the user's resultRowLimit setting; passed as a string over FFI
     // (like read_only). C# clamps a zero/garbage value to its default.
@@ -486,9 +486,14 @@ async fn execute_query(mut connection_string: String, sql: String, engine: Strin
         let c_ro     = CString::new(read_only_str).unwrap_or_default();
         let c_limit  = CString::new(row_limit_str).unwrap_or_default();
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr(), c_limit.as_ptr());
-        if ptr.is_null() { "{\"error\":\"null response\"}".to_string() }
-        else { read_and_free(get_query_executor(), ptr) }
+        // A null pointer is a native-layer failure (the command could not run at
+        // all). Per-statement and connection errors that the C# side does produce
+        // travel inside the JSON payload as data (see the result-set exception in
+        // AGENTS.md); only the no-response case becomes a command failure.
+        if ptr.is_null() { Err(IpcError::native("Query executor returned no response")) }
+        else { Ok(read_and_free(get_query_executor(), ptr)) }
     };
+    // Zero the connection string in memory after use — must run on both paths.
     unsafe {
         let bytes = connection_string.as_bytes_mut();
         for b in bytes.iter_mut() { *b = 0; }
@@ -497,14 +502,17 @@ async fn execute_query(mut connection_string: String, sql: String, engine: Strin
 }
 
 #[tauri::command]
-fn list_connections(folder_path: String) -> String {
+fn list_connections(folder_path: String) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
             get_connection_manager().get(b"list_connections").expect("list_connections");
         let c_path = CString::new(folder_path).unwrap_or_default();
         let ptr = func(c_path.as_ptr());
-        if ptr.is_null() { "{\"connections\":[]}".to_string() }
-        else { read_and_free(get_connection_manager(), ptr) }
+        if ptr.is_null() {
+            Err(IpcError::native("Connection manager returned no response"))
+        } else {
+            Ok(read_and_free(get_connection_manager(), ptr))
+        }
     }
 }
 
@@ -578,25 +586,32 @@ fn delete_connection(file_path: String) -> Result<(), IpcError> {
 }
 
 #[tauri::command]
-fn store_credential(target: String, username: String, password: String) -> bool {
-    let entry = match keyring::Entry::new(&target, &username) {
-        Ok(e) => e, Err(_) => return false,
-    };
-    entry.set_password(&password).is_ok()
+fn store_credential(target: String, username: String, password: String) -> Result<(), IpcError> {
+    let entry = keyring::Entry::new(&target, &username)
+        .map_err(|e| IpcError::native(format!("Keychain unavailable: {e}")))?;
+    entry
+        .set_password(&password)
+        .map_err(|e| IpcError::native(format!("Failed to store credential: {e}")))
 }
 
 #[tauri::command]
-fn delete_credential(target: String) -> bool {
+fn delete_credential(target: String) -> Result<(), IpcError> {
     let username = target.split(':').nth(2).unwrap_or("").to_string();
-    let entry = match keyring::Entry::new(&target, &username) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    entry.delete_password().is_ok()
+    let entry = keyring::Entry::new(&target, &username)
+        .map_err(|e| IpcError::native(format!("Keychain unavailable: {e}")))?;
+    match entry.delete_password() {
+        Ok(()) => Ok(()),
+        // Deleting a credential that isn't there is a no-op success, not a
+        // failure. Many connections legitimately have no stored secret (SQLite,
+        // Windows-auth, password-less, or DBeaver-imported without a password),
+        // so treating NoEntry as an error stranded their deletion in the UI.
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(IpcError::native(format!("Failed to delete credential: {e}"))),
+    }
 }
 
 #[tauri::command]
-fn build_connection_string(params: ConnectionParams) -> Result<String, String> {
+fn build_connection_string(params: ConnectionParams) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, tunnel_port,
@@ -623,10 +638,10 @@ fn build_connection_string(params: ConnectionParams) -> Result<String, String> {
         let pw = match entry.get_password() {
             Ok(p)  => p,
             Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
         };
         if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
-            return Err(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref));
+            return Err(IpcError::not_found(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref)));
         }
         pw
     } else {
@@ -677,14 +692,14 @@ fn build_connection_string(params: ConnectionParams) -> Result<String, String> {
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
         "sqlite" => format!("Data Source={}", database),
-        _ => return Err(format!("Unsupported engine: {}", engine)),
+        _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
 
     Ok(conn_str)
 }
 
 #[tauri::command]
-async fn query_file(file_path: String, sql: String) -> String {
+async fn query_file(file_path: String, sql: String) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
@@ -692,25 +707,31 @@ async fn query_file(file_path: String, sql: String) -> String {
         let c_path = CString::new(file_path).unwrap_or_default();
         let c_sql  = CString::new(sql).unwrap_or_default();
         let ptr = func(c_path.as_ptr(), c_sql.as_ptr());
-        if ptr.is_null() { "{\"error\":\"null\"}".to_string() }
-        else { read_and_free(get_file_query_engine(), ptr) }
+        if ptr.is_null() {
+            Err(IpcError::native("File query engine returned no response"))
+        } else {
+            Ok(read_and_free(get_file_query_engine(), ptr))
+        }
     }
 }
 
 #[tauri::command]
-async fn get_file_schema(file_path: String) -> String {
+async fn get_file_schema(file_path: String) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
             get_file_query_engine().get(b"get_file_schema").expect("get_file_schema");
         let c_path = CString::new(file_path).unwrap_or_default();
         let ptr = func(c_path.as_ptr());
-        if ptr.is_null() { "{\"error\":\"null\"}".to_string() }
-        else { read_and_free(get_file_query_engine(), ptr) }
+        if ptr.is_null() {
+            Err(IpcError::native("File query engine returned no response"))
+        } else {
+            Ok(read_and_free(get_file_query_engine(), ptr))
+        }
     }
 }
 
 #[tauri::command]
-async fn list_db_tables(params: ConnectionParams) -> Result<String, String> {
+async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, ..
@@ -724,7 +745,7 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, String> {
     } else {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
+        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     };
     let mut connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
@@ -734,7 +755,7 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, String> {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
-        _                          => return Err(format!("Unsupported engine: {}", engine)),
+        _                          => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -743,7 +764,7 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, String> {
         let cs  = CString::new(connection_string.as_str()).unwrap();
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_file_query_engine(), ptr))
     };
     unsafe {
@@ -756,7 +777,7 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, String> {
 #[tauri::command]
 async fn query_file_with_db(
     params: ConnectionParams, file_path: String, sql: String, table_names: String,
-) -> Result<String, String> {
+) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, ..
@@ -772,7 +793,7 @@ async fn query_file_with_db(
     } else {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
+        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     };
     let mut connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
@@ -782,7 +803,7 @@ async fn query_file_with_db(
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
-        _                          => return Err(format!("Unsupported engine: {}", engine)),
+        _                          => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -801,7 +822,7 @@ async fn query_file_with_db(
             strings.2.as_ptr(), strings.3.as_ptr(),
             strings.4.as_ptr(),
         );
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_file_query_engine(), ptr))
     };
     unsafe {
@@ -812,7 +833,7 @@ async fn query_file_with_db(
 }
 
 #[tauri::command]
-async fn get_schema(params: ConnectionParams) -> Result<String, String> {
+async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, ..
@@ -835,10 +856,10 @@ async fn get_schema(params: ConnectionParams) -> Result<String, String> {
         let pw = match entry.get_password() {
             Ok(p)  => p,
             Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
         };
         if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
-            return Err(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref));
+            return Err(IpcError::not_found(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref)));
         }
         pw
     } else {
@@ -856,7 +877,7 @@ async fn get_schema(params: ConnectionParams) -> Result<String, String> {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
-        _ => return Err(format!("Unsupported engine: {}", engine)),
+        _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
 
     let result = unsafe {
@@ -868,7 +889,7 @@ async fn get_schema(params: ConnectionParams) -> Result<String, String> {
         let cs  = CString::new(connection_string.as_str()).unwrap();
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
@@ -888,7 +909,7 @@ async fn get_schema(params: ConnectionParams) -> Result<String, String> {
 // frontend calls this once when a connection is selected to populate the
 // database list, then calls get_schema(database = <chosen db>) on expand.
 #[tauri::command]
-async fn list_databases(params: ConnectionParams) -> Result<String, String> {
+async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, ..
@@ -911,10 +932,10 @@ async fn list_databases(params: ConnectionParams) -> Result<String, String> {
         let pw = match entry.get_password() {
             Ok(p)  => p,
             Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
         };
         if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
-            return Err(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref));
+            return Err(IpcError::not_found(format!("No password stored for '{}'. Open Edit Connection, enter the password and save.", credential_ref)));
         }
         pw
     } else {
@@ -929,7 +950,7 @@ async fn list_databases(params: ConnectionParams) -> Result<String, String> {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
-        _ => return Err(format!("Unsupported engine: {}", engine)),
+        _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
 
     let result = unsafe {
@@ -941,7 +962,7 @@ async fn list_databases(params: ConnectionParams) -> Result<String, String> {
         let cs  = CString::new(connection_string.as_str()).unwrap();
         let eng = CString::new(engine).unwrap();
         let ptr = func(cs.as_ptr(), eng.as_ptr());
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
@@ -975,14 +996,17 @@ async fn add_history_entry(
 }
 
 #[tauri::command]
-async fn get_history(connection_id: String, limit: i32) -> String {
+async fn get_history(connection_id: String, limit: i32) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char, i32) -> *const c_char> =
             get_query_history().get(b"get_history").expect("get_history");
-        let c_id = CString::new(connection_id).unwrap();
+        let c_id = CString::new(connection_id).unwrap_or_default();
         let ptr  = func(c_id.as_ptr(), limit);
-        if ptr.is_null() { "{\"entries\":[]}".to_string() }
-        else { read_and_free(get_query_history(), ptr) }
+        if ptr.is_null() {
+            Err(IpcError::native("Query history returned no response"))
+        } else {
+            Ok(read_and_free(get_query_history(), ptr))
+        }
     }
 }
 
@@ -1002,7 +1026,7 @@ async fn clear_history(connection_id: String) -> Result<(), IpcError> {
 }
 
 #[tauri::command]
-async fn test_connection(params: ConnectionParams) -> Result<String, String> {
+async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, ..
@@ -1017,7 +1041,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, String> {
         match entry.get_password() {
             Ok(p)  => p,
             Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)),
+            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
         }
     } else {
         String::new()
@@ -1042,7 +1066,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, String> {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
-        _ => return Err(format!("Unsupported engine: {}", engine)),
+        _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
 
     // Run a minimal test query
@@ -1068,7 +1092,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, String> {
 
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
-        if ptr.is_null() { return Err("No response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("No response")); }
         read_and_free(get_query_executor(), ptr)
     };
 
@@ -1076,7 +1100,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, String> {
         .unwrap_or(serde_json::Value::Null);
 
     if let Some(err) = parsed.get("error").and_then(|e| e.as_str()) {
-        Err(err.to_string())
+        Err(IpcError::native(err.to_string()))
     } else {
         Ok("Connected successfully".to_string())
     }
@@ -1120,7 +1144,7 @@ pub(crate) fn dbark_dir() -> std::path::PathBuf {
 }
 
 #[tauri::command]
-async fn open_tunnel(params: TunnelParams) -> Result<i32, String> {
+async fn open_tunnel(params: TunnelParams) -> Result<i32, IpcError> {
     let TunnelParams {
         tunnel_id, ssh_host, ssh_port, ssh_user, ssh_key_path, ssh_password, db_host, db_port,
     } = params;
@@ -1133,15 +1157,15 @@ async fn open_tunnel(params: TunnelParams) -> Result<i32, String> {
 
         // 1. Must exist
         if !key_path.exists() {
-            return Err(format!(
+            return Err(IpcError::validation(format!(
                 "SSH key file not found: {}",
                 ssh_key_path
-            ));
+            )));
         }
 
         // 2. Must be a file, not a directory
         if !key_path.is_file() {
-            return Err("SSH key path must point to a file, not a directory".to_string());
+            return Err(IpcError::validation("SSH key path must point to a file, not a directory"));
         }
 
         // 3. Extension must be .pem, .key, or .ppk
@@ -1153,10 +1177,10 @@ async fn open_tunnel(params: TunnelParams) -> Result<i32, String> {
             .to_lowercase();
 
         if !valid_extensions.contains(&ext.as_str()) {
-            return Err(format!(
+            return Err(IpcError::validation(format!(
                 "Invalid SSH key file type '.{}' — must be .pem, .key, or .ppk",
                 ext
-            ));
+            )));
         }
 
         // 4. Must be within the user's home directory or a standard SSH location
@@ -1173,10 +1197,10 @@ async fn open_tunnel(params: TunnelParams) -> Result<i32, String> {
                       || canonical_key.starts_with("C:\\ProgramData\\ssh"); // Windows
 
         if !in_home && !in_ssh_dir {
-            return Err(format!(
+            return Err(IpcError::validation(format!(
                 "SSH key must be within your home directory or a standard SSH location. Got: {}",
                 ssh_key_path
-            ));
+            )));
         }
     }
     // ── End validation ───────────────────────────────────────────────────────
@@ -1205,7 +1229,7 @@ async fn open_tunnel(params: TunnelParams) -> Result<i32, String> {
             strings.5.as_ptr(), db_port,
         );
 
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         let json = read_and_free(get_ssh_tunnel(), ptr);
 
         let val: serde_json::Value = serde_json::from_str(&json)
@@ -1213,14 +1237,14 @@ async fn open_tunnel(params: TunnelParams) -> Result<i32, String> {
 
         if let Some(err) = val.get("error").and_then(|e| e.as_str()) {
             if !err.is_empty() && err != "null" {
-                return Err(err.to_string());
+                return Err(IpcError::native(err.to_string()));
             }
         }
 
         val.get("localPort")
             .and_then(|p| p.as_i64())
             .map(|p| p as i32)
-            .ok_or_else(|| "No local port in response".to_string())
+            .ok_or_else(|| IpcError::native("No local port in response"))
     }
 }
 
@@ -1250,10 +1274,10 @@ fn is_tunnel_open(tunnel_id: String) -> bool {
 }
 
 #[tauri::command]
-fn get_ssh_password(target: String, username: String) -> Result<String, String> {
+fn get_ssh_password(target: String, username: String) -> Result<String, IpcError> {
     let entry = keyring::Entry::new(&target, &username)
         .map_err(|e| e.to_string())?;
-    entry.get_password().map_err(|e| e.to_string())
+    entry.get_password().map_err(|e| IpcError::native(e.to_string()))
 }
 
 #[tauri::command]
@@ -1262,11 +1286,11 @@ async fn export_results(
     format: String,
     columns: Vec<String>,
     rows: Vec<Vec<Option<String>>>,
-) -> Result<(), String> {
+) -> Result<(), IpcError> {
     match format.as_str() {
-        "csv"  => export_csv(&path, &columns, &rows),
-        "json" => export_json(&path, &columns, &rows),
-        _      => Err(format!("Unsupported format: {}", format)),
+        "csv"  => export_csv(&path, &columns, &rows).map_err(|e| IpcError::io(e)),
+        "json" => export_json(&path, &columns, &rows).map_err(|e| IpcError::io(e)),
+        _      => Err(IpcError::validation(format!("Unsupported format: {}", format))),
     }
 }
 
@@ -1392,7 +1416,7 @@ fn append_audit_log(
 #[tauri::command]
 async fn get_object_definition(
     params: ConnectionParams, object_name: String, object_type: String, schema_name: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, ..
@@ -1438,7 +1462,7 @@ async fn get_object_definition(
 
             let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                            c_engine.as_ptr(), c_ro.as_ptr());
-            if ptr.is_null() { return Err("null response".to_string()); }
+            if ptr.is_null() { return Err(IpcError::native("null response")); }
             read_and_free(get_query_executor(), ptr)
         };
 
@@ -1481,7 +1505,7 @@ async fn get_object_definition(
     let password = if !win_auth {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
+        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     } else {
         String::new()
     };
@@ -1493,7 +1517,7 @@ async fn get_object_definition(
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
-        _ => return Err(format!("Unsupported engine: {}", engine)),
+        _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
 
     let result = unsafe {
@@ -1517,7 +1541,7 @@ async fn get_object_definition(
             c_schema.as_ptr(),
         );
 
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_schema_explorer(), ptr))
     };
 
@@ -1568,7 +1592,7 @@ fn scrub_sql_for_log(sql: &str) -> String {
 }
 
 #[tauri::command]
-async fn get_sqlite_objects(database: String) -> Result<String, String> {
+async fn get_sqlite_objects(database: String) -> Result<String, IpcError> {
     let conn_str = format!("Data Source={}", database);
 
     // Single query fetches all programmable objects at once
@@ -1593,7 +1617,7 @@ async fn get_sqlite_objects(database: String) -> Result<String, String> {
 
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         read_and_free(get_query_executor(), ptr)
     };
 
@@ -1604,7 +1628,7 @@ async fn get_sqlite_objects(database: String) -> Result<String, String> {
 async fn drop_object(
     params: ConnectionParams, object_name: String, object_type: String,
     schema_name: Option<String>, table_name: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, IpcError> {
     let ConnectionParams {
         credential_ref, engine, host, port, database, username,
         ssl_mode, sql_instance, windows_auth, ..
@@ -1619,7 +1643,7 @@ async fn drop_object(
     let password = if !win_auth && engine.to_lowercase() != "sqlite" {
         let entry = keyring::Entry::new(&credential_ref, &username)
             .map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))?
+        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     } else {
         String::new()
     };
@@ -1632,7 +1656,7 @@ async fn drop_object(
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
         }),
-        _ => return Err(format!("Unsupported engine: {}", engine)),
+        _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
 
     // Build DROP statement per engine and type. Identifiers are quoted per engine
@@ -1656,7 +1680,7 @@ async fn drop_object(
 
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
-        if ptr.is_null() { return Err("null response".to_string()); }
+        if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_query_executor(), ptr))
     };
 
@@ -1837,7 +1861,7 @@ fn settings_path() -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn load_settings() -> Result<String, String> {
+fn load_settings() -> Result<String, IpcError> {
     let path = settings_path();
     if !path.exists() {
         let defaults = AppSettings::default();
@@ -1851,7 +1875,7 @@ fn load_settings() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn save_settings(settings_json: String) -> Result<(), String> {
+fn save_settings(settings_json: String) -> Result<(), IpcError> {
     let settings: AppSettings = serde_json::from_str(&settings_json)
         .map_err(|e| e.to_string())?;
     let toml_str = toml::to_string(&settings)
@@ -1888,7 +1912,7 @@ fn queries_dir() -> std::path::PathBuf {
 }
 
 #[tauri::command]
-async fn save_query(id: String, sql: String, meta_json: String) -> Result<(), String> {
+async fn save_query(id: String, sql: String, meta_json: String) -> Result<(), IpcError> {
     let dir = queries_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
@@ -1897,7 +1921,7 @@ async fn save_query(id: String, sql: String, meta_json: String) -> Result<(), St
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
     if safe_id.is_empty() {
-        return Err("Query name cannot be empty".to_string());
+        return Err(IpcError::validation("Query name cannot be empty"));
     }
 
     let mut meta: SavedQueryMeta = serde_json::from_str(&meta_json)
@@ -1917,7 +1941,7 @@ async fn save_query(id: String, sql: String, meta_json: String) -> Result<(), St
 }
 
 #[tauri::command]
-async fn list_queries() -> Result<String, String> {
+async fn list_queries() -> Result<String, IpcError> {
     let dir = queries_dir();
     if !dir.exists() {
         return Ok("[]".to_string());
@@ -1968,11 +1992,11 @@ async fn list_queries() -> Result<String, String> {
     // Sort by updated_at descending (most recently saved first)
     queries.sort_by(|a, b| b.meta.updated_at.cmp(&a.meta.updated_at));
 
-    serde_json::to_string(&queries).map_err(|e| e.to_string())
+    serde_json::to_string(&queries).map_err(|e| IpcError::internal(e.to_string()))
 }
 
 #[tauri::command]
-async fn delete_query(id: String) -> Result<(), String> {
+async fn delete_query(id: String) -> Result<(), IpcError> {
     let dir = queries_dir();
     let sql_path  = dir.join(format!("{}.sql", id));
     let meta_path = dir.join(format!("{}.meta.toml", id));
@@ -1987,9 +2011,9 @@ async fn delete_query(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn load_query(id: String) -> Result<String, String> {
+async fn load_query(id: String) -> Result<String, IpcError> {
     let path = queries_dir().join(format!("{}.sql", id));
-    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+    std::fs::read_to_string(&path).map_err(|e| IpcError::io(e.to_string()))
 }
 
 // ── DBeaver Import ───────────────────────────────────────────────────────────
@@ -2045,43 +2069,24 @@ fn map_ssl_mode(dbeaver_ssl: &str) -> &'static str {
 }
 
 #[tauri::command]
-fn import_dbeaver_connections() -> String {
+fn import_dbeaver_connections() -> Result<String, IpcError> {
     let path = match dirs::home_dir() {
         Some(h) => h.join(".dbeaver").join("data-sources.json"),
-        None => return serde_json::to_string(&DbeaverImportResult {
-            imported: vec![],
-            skipped:  vec![],
-            error:    Some("Could not determine home directory".to_string()),
-        }).unwrap(),
+        None => return Err(IpcError::internal("Could not determine home directory")),
     };
 
     if !path.exists() {
-        return serde_json::to_string(&DbeaverImportResult {
-            imported: vec![],
-            skipped:  vec![],
-            error:    Some(format!(
-                "DBeaver config not found at {}. Is DBeaver installed?",
-                path.display()
-            )),
-        }).unwrap();
+        return Err(IpcError::not_found(format!("DBeaver config not found at {}. Is DBeaver installed?", path.display())));
     }
 
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(e) => return serde_json::to_string(&DbeaverImportResult {
-            imported: vec![],
-            skipped:  vec![],
-            error:    Some(format!("Failed to read DBeaver config: {}", e)),
-        }).unwrap(),
+        Err(e) => return Err(IpcError::io(format!("Failed to read DBeaver config: {}", e))),
     };
 
     let json: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(e) => return serde_json::to_string(&DbeaverImportResult {
-            imported: vec![],
-            skipped:  vec![],
-            error:    Some(format!("Failed to parse DBeaver config: {}", e)),
-        }).unwrap(),
+        Err(e) => return Err(IpcError::internal(format!("Failed to parse DBeaver config: {}", e))),
     };
 
     let mut imported = Vec::new();
@@ -2089,11 +2094,7 @@ fn import_dbeaver_connections() -> String {
 
     let connections = match json.get("connections").and_then(|c| c.as_object()) {
         Some(c) => c,
-        None    => return serde_json::to_string(&DbeaverImportResult {
-            imported: vec![],
-            skipped:  vec![],
-            error:    Some("No connections found in DBeaver config".to_string()),
-        }).unwrap(),
+        None    => return Err(IpcError::internal("No connections found in DBeaver config")),
     };
 
     for (_id, conn) in connections {
@@ -2245,7 +2246,7 @@ fn import_dbeaver_connections() -> String {
         });
     }
 
-    serde_json::to_string(&DbeaverImportResult { imported, skipped, error: None }).unwrap()
+    Ok(serde_json::to_string(&DbeaverImportResult { imported, skipped, error: None }).unwrap())
 }
 
 // Two new Tauri commands for the Activity panel.
@@ -2258,7 +2259,7 @@ fn import_dbeaver_connections() -> String {
 
 // ── get_activity ─────────────────────────────────────────────────────────────
 #[tauri::command]
-async fn get_activity(mut connection_string: String, engine: String) -> String {
+async fn get_activity(mut connection_string: String, engine: String) -> Result<String, IpcError> {
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
@@ -2269,9 +2270,9 @@ async fn get_activity(mut connection_string: String, engine: String) -> String {
         let c_engine = CString::new(engine).unwrap_or_default();
         let ptr = func(c_conn.as_ptr(), c_engine.as_ptr());
         if ptr.is_null() {
-            "{\"error\":\"null response\"}".to_string()
+            Err(IpcError::native("Query executor returned no response"))
         } else {
-            read_and_free(get_query_executor(), ptr)
+            Ok(read_and_free(get_query_executor(), ptr))
         }
     };
     // Zero the connection string in memory after use — same pattern as
@@ -2286,7 +2287,7 @@ async fn get_activity(mut connection_string: String, engine: String) -> String {
 
 // ── kill_session ─────────────────────────────────────────────────────────────
 #[tauri::command]
-async fn kill_session(mut connection_string: String, engine: String, pid: String) -> String {
+async fn kill_session(mut connection_string: String, engine: String, pid: String) -> Result<String, IpcError> {
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, *const c_char,
@@ -2298,9 +2299,9 @@ async fn kill_session(mut connection_string: String, engine: String, pid: String
         let c_pid    = CString::new(pid).unwrap_or_default();
         let ptr = func(c_conn.as_ptr(), c_engine.as_ptr(), c_pid.as_ptr());
         if ptr.is_null() {
-            "{\"error\":\"null response\"}".to_string()
+            Err(IpcError::native("Query executor returned no response"))
         } else {
-            read_and_free(get_query_executor(), ptr)
+            Ok(read_and_free(get_query_executor(), ptr))
         }
     };
     unsafe {

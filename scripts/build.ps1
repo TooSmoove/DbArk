@@ -1,12 +1,12 @@
-# build.ps1 — the one locked, atomic build for DbArk (Windows).
+# build.ps1 -- the one locked, atomic build for DbArk (Windows).
 #
 # Closes the "works on my machine / stale binary" class for good (audit C-3 +
 # session follow-up #4). Sequence:
 #   1. AOT-publish every C# engine and stage its native DLL into src-tauri\natives\
-#      (via publish-engine.ps1 — a plain `dotnet build` makes a managed stub the
+#      (via publish-engine.ps1 -- a plain `dotnet build` makes a managed stub the
 #       Rust host can't load, which is how a pre-fix engine kept running).
 #   2. Stage the two third-party natives, duckdb + sqlcipher (via stage-natives.ps1).
-#   3. cargo tauri build — build.rs then re-hashes natives\ from the exact shipping
+#   3. cargo tauri build -- build.rs then re-hashes natives\ from the exact shipping
 #      bytes on its own. There is NO manual hash step; do not hand-edit hashes.
 #
 # A freshness guard asserts every engine DLL was actually refreshed THIS run, so a
@@ -72,10 +72,10 @@ foreach ($r in $required) {
     if (-not (Test-Path $p)) { $problems += "missing: natives\$r.dll"; continue }
     $f = Get-Item $p
     if (-not $SkipEngines -and ($Engines -contains $r) -and $f.LastWriteTime -lt $start) {
-        $problems += "STALE: natives\$r.dll was not refreshed this run (still $($f.LastWriteTime)) — its AOT publish likely failed silently"
+        $problems += "STALE: natives\$r.dll was not refreshed this run (still $($f.LastWriteTime)) -- its AOT publish likely failed silently"
     }
     if (($Engines -contains $r) -and $f.Length -lt 200kb) {
-        Write-Warning "natives\$r.dll is only $($f.Length) bytes — looks like a managed stub, not an AOT native lib."
+        Write-Warning "natives\$r.dll is only $($f.Length) bytes -- looks like a managed stub, not an AOT native lib."
     }
 }
 if ($problems.Count) {
@@ -89,7 +89,7 @@ if ($NoBuild) {
     return
 }
 
-# --- 3. cargo tauri build|dev — build.rs re-hashes natives\ automatically ------
+# --- 3. cargo tauri build|dev -- build.rs re-hashes natives\ automatically ------
 Push-Location $root
 try {
     if ($CleanTarget) { Write-Host "==> cargo clean"; cargo clean }

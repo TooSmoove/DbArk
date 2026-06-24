@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ipc, toIpcError } from "./ipc";
+import { ipc, ipcJson, toIpcError } from "./ipc";
 import { useState, useCallback, useRef, useEffect, useMemo, Fragment, lazy, Suspense } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
@@ -489,7 +489,7 @@ function JoinTablesPanel({
         if (parsed.error) { setError(parsed.error); return; }
         setTables(parsed.tables ?? []);
       })
-      .catch((e) => { if (!cancelled) setError(String(e)); })
+      .catch((e) => { if (!cancelled) setError(toIpcError(e).message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [activeConnection]);
@@ -668,7 +668,7 @@ function AddConnectionForm({
       const newRef = `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
 
       if (form.sshEnabled && form.sshPassword) {
-        await invoke<boolean>("store_credential", {
+        await ipc("store_credential", {
           target:   `dbark-ssh:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.sshUser}`,
           username: form.sshUser,
           password: form.sshPassword,
@@ -677,14 +677,14 @@ function AddConnectionForm({
 
       if (form.password) {
         // User entered a new password — store it under the new ref
-        await invoke<boolean>("store_credential", {
+        await ipc("store_credential", {
           target:   newRef,
           username: form.username,
           password: form.password,
         });
         // Clean up old ref if name changed
         if (editingConnection && editingConnection.credentialRef !== newRef) {
-          await invoke("delete_credential", { target: editingConnection.credentialRef });
+          await ipc("delete_credential", { target: editingConnection.credentialRef });
         }
       } else if (editingConnection) {
         // No new password — migrate old credential to new ref if name changed
@@ -1010,7 +1010,7 @@ function AddConnectionForm({
               setTestMessage(msg);
             } catch (e) {
               setTestResult("error");
-              setTestMessage(String(e));
+              setTestMessage(toIpcError(e).message);
             } finally {
               setTesting(false);
             }
@@ -2338,11 +2338,12 @@ function PlanResultRenderer({ result }: { result: QueryResult }) {
 }
 
 function ActivityPanelBody({
-  rows, loading, error, engine, onRefresh, onKillRequest,
+  rows, loading, error, errorCode, engine, onRefresh, onKillRequest,
 }: {
   rows:          ActivityRow[];
   loading:       boolean;
   error:         string | null;
+  errorCode:     string | null;
   engine:        string;
   onRefresh:     () => void;
   onKillRequest: (row: ActivityRow) => void;
@@ -2397,7 +2398,39 @@ function ActivityPanelBody({
       {/* Error banner if last fetch failed.
           Doesn't replace the rows — failed refresh keeps stale data visible,
           which is preferable to blanking the panel on a transient blip. */}
-      {error && (
+      {/* Permission notice — distinct, actionable styling. A least-privilege
+          login that can't read server activity gets the exact GRANT to run,
+          not a generic red error or a misleading "idle" empty state. */}
+      {error && errorCode === "permission" && (() => {
+        const [headline, ...rest] = error.split("\n");
+        const grant = rest.join("\n").trim();
+        return (
+          <div style={{
+            padding: "12px 14px",
+            background: "var(--warning-bg)",
+            color: "var(--text-secondary)",
+            fontSize: 12, lineHeight: 1.5,
+            borderBottom: "1px solid var(--warning)",
+            flexShrink: 0,
+          }}>
+            <div style={{ marginBottom: grant ? 8 : 0 }}>🔒 {headline}</div>
+            {grant && (
+              <code style={{
+                display: "block",
+                padding: "6px 10px",
+                background: "var(--surface-2)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                fontFamily: "monospace", fontSize: 11,
+                color: "var(--text)",
+                userSelect: "all", whiteSpace: "pre-wrap",
+              }}>{grant}</code>
+            )}
+          </div>
+        );
+      })()}
+
+      {error && errorCode !== "permission" && (
         <div style={{
           padding: "8px 14px",
           background: "var(--error-bg)",
@@ -2700,6 +2733,9 @@ function App() {
   const [showActivity, setShowActivity]     = useState(false);
   const [activityRows, setActivityRows]     = useState<ActivityRow[]>([]);
   const [activityError, setActivityError]   = useState<string | null>(null);
+  // Structured tag for the last activity error (e.g. "permission") so the panel
+  // can show an actionable notice rather than a generic error banner.
+  const [activityErrorCode, setActivityErrorCode] = useState<string | null>(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [killPending, setKillPending]       = useState<ActivityRow | null>(null);
 
@@ -2977,11 +3013,10 @@ function App() {
   async function handleDbeaverImport() {
     setDbeaverImporting(true);
     try {
-      const raw = await invoke<string>("import_dbeaver_connections");
-      const result = JSON.parse(raw);
+      const result = await ipcJson<{ imported: { name: string; engine: string; host: string; port: number; database: string; username: string; password: string; }[]; skipped: string[] }>("import_dbeaver_connections");
       setDbeaverResult(result);
 
-      if (!result.error && result.imported.length > 0) {
+      if (result.imported.length > 0) {
         // Save each connection and store its password in the keychain
         for (const conn of result.imported) {
           const request = {
@@ -3013,7 +3048,7 @@ function App() {
 
             if (conn.password) {
               const credRef = `dbark:${conn.name.toLowerCase().replace(/\s+/g, "-")}:${conn.username}`;
-              await invoke("store_credential", {
+              await ipc("store_credential", {
                 target:   credRef,
                 username: conn.username,
                 password: conn.password,
@@ -3027,7 +3062,7 @@ function App() {
         loadConnections(connectionsFolder);
       }
     } catch (e) {
-      setDbeaverResult({ imported: [], skipped: [], error: String(e) });
+      setDbeaverResult({ imported: [], skipped: [], error: toIpcError(e).message });
     } finally {
       setDbeaverImporting(false);
     }
@@ -3069,7 +3104,7 @@ function App() {
       return localPort;
     } catch (e) {
       console.error("open_tunnel invoke error:", e);
-      updateActiveTab({ error: `SSH tunnel failed: ${String(e)}` });
+      updateActiveTab({ error: `SSH tunnel failed: ${toIpcError(e).message}` });
       return null;
     } finally {
       setTunnelLoading(prev => ({ ...prev, [conn.id]: false }));
@@ -3178,8 +3213,7 @@ function App() {
   async function loadConnections(folder: string) {
     if (!folder) return;
     try {
-      const raw = await invoke<string>("list_connections", { folderPath: folder });
-      const parsed: ConnectionListResult = JSON.parse(raw);
+      const parsed = await ipcJson<ConnectionListResult>("list_connections", { folderPath: folder });
       setConnections(parsed.connections ?? []);
 
       if (parsed.connections?.length > 0) {
@@ -3641,7 +3675,7 @@ function App() {
             },
           });
         } else {
-          raw = await invoke<string>("query_file", {
+          raw = await ipc<string>("query_file", {
             filePath: tab.file.path,
             sql,
           });
@@ -3691,7 +3725,7 @@ function App() {
             },
           });
 
-        raw = await invoke<string>("execute_query", {
+        raw = await ipc<string>("execute_query", {
           connectionString,
           sql,
           engine:   conn.engine,
@@ -3708,7 +3742,7 @@ function App() {
         // as an errored plan tab and the user keeps their data result.
         if (wrappedPlanSql) {
           try {
-            planRaw = await invoke<string>("execute_query", {
+            planRaw = await ipc<string>("execute_query", {
               connectionString,
               sql: wrappedPlanSql,
               engine: conn.engine,
@@ -3717,7 +3751,7 @@ function App() {
             });
           } catch (e) {
             planRaw = JSON.stringify({
-              error: `Plan capture failed: ${e instanceof Error ? e.message : String(e)}`,
+              error: `Plan capture failed: ${toIpcError(e).message}`,
             });
           }
         }
@@ -3841,7 +3875,7 @@ function App() {
             columns: [],
             rows: [],
             rowCount: 0,
-            error: `Plan parse failed: ${e instanceof Error ? e.message : String(e)}`,
+            error: `Plan parse failed: ${toIpcError(e).message}`,
             isPlan: true,
             planEngine: engine,
           });
@@ -3893,7 +3927,7 @@ function App() {
     }
 
    } catch (e) {
-      writeTab({ loading: false, error: String(e) });
+      writeTab({ loading: false, error: toIpcError(e).message });
     }
   }, [locked, showHistory, activeTabId, auditLogEnabled]);
 
@@ -4551,12 +4585,10 @@ function App() {
       return;
     }
     try {
-      const raw = await invoke<string>("get_history", {
+      const parsed = await ipcJson<{ entries?: HistoryEntry[] }>("get_history", {
         connectionId: conn?.id ?? "",
         limit: 100,
       });
-
-      const parsed = JSON.parse(raw);
 
       setHistory(parsed.entries ?? []);
     } catch (e) {
@@ -4584,6 +4616,7 @@ function App() {
         const port = await openTunnel(conn);
         if (!port) {
           setActivityError("SSH tunnel failed");
+          setActivityErrorCode(null);
           setActivityRows([]);
           return;
         }
@@ -4606,21 +4639,23 @@ function App() {
         },
       });
 
-      const raw = await invoke<string>("get_activity", {
+      const parsed = await ipcJson<{ error?: string; code?: string; rows?: ActivityRow[] }>("get_activity", {
         connectionString,
         engine: conn.engine,
       });
 
-      const parsed = JSON.parse(raw);
       if (parsed.error) {
         setActivityError(parsed.error);
+        setActivityErrorCode(parsed.code ?? null);
         setActivityRows([]);
       } else {
         setActivityError(null);
+        setActivityErrorCode(null);
         setActivityRows(parsed.rows ?? []);
       }
     } catch (e) {
-      setActivityError(String(e));
+      setActivityError(toIpcError(e).message);
+      setActivityErrorCode(null);
       setActivityRows([]);
     } finally {
       if (!silent) setActivityLoading(false);
@@ -4662,21 +4697,23 @@ function App() {
         },
       });
 
-      const raw = await invoke<string>("kill_session", {
+      const parsed = await ipcJson<{ error?: string }>("kill_session", {
         connectionString,
         engine: conn.engine,
         pid:    row.pid,
       });
-      const parsed = JSON.parse(raw);
       if (parsed.error) {
         setActivityError(parsed.error);
+        setActivityErrorCode(null);
       } else {
         setActivityError(null);
+        setActivityErrorCode(null);
         // Refresh silently so the user sees the kill take effect immediately
         await loadActivity(conn, true);
       }
     } catch (e) {
-      setActivityError(String(e));
+      setActivityError(toIpcError(e).message);
+      setActivityErrorCode(null);
     }
   }
 
@@ -4966,7 +5003,7 @@ function App() {
 
     } catch (e) {
       console.error("Export failed:", e);
-      updateActiveTab({ error: `Export failed: ${String(e)}` });
+      updateActiveTab({ error: `Export failed: ${toIpcError(e).message}` });
     }
   }
 
@@ -5023,7 +5060,7 @@ function App() {
       }, 0);
 
     } catch (e) {
-      updateActiveTab({ error: `Failed to load definition: ${String(e)}` });
+      updateActiveTab({ error: `Failed to load definition: ${toIpcError(e).message}` });
     }
   }
 
@@ -5129,7 +5166,7 @@ function handleCellCommit(
           },
         });
 
-        const raw = await invoke<string>("execute_query", {
+        const raw = await ipc<string>("execute_query", {
           connectionString: connStr,
           sql,
           engine:   conn.engine,
@@ -5142,7 +5179,7 @@ function handleCellCommit(
           errors.push(parsed.results[0].error);
         }
       } catch (e) {
-        errors.push(String(e));
+        errors.push(toIpcError(e).message);
       }
     }
 
@@ -5614,18 +5651,28 @@ function handleCellCommit(
                 onClick={async () => {
                   try {
                     await ipc("delete_connection", { filePath: deletingConnection.filePath });
-                    await invoke("delete_credential", { target: deletingConnection.credentialRef });
-                    // Clear from tabs if active
-                    setTabs(prev => prev.map(t =>
-                      t.connection?.id === deletingConnection.id
-                        ? { ...t, connection: null, title: "New tab" }
-                        : t
-                    ));
-                    setDeletingConnection(null);
-                    loadConnections(connectionsFolder);
                   } catch (e) {
-                    console.error("Delete failed:", e);
+                    // The connection file is the source of truth — if this fails,
+                    // nothing was removed, so keep the dialog open and surface it.
+                    console.error("Delete failed:", toIpcError(e).message);
+                    return;
                   }
+                  // File is gone. Credential cleanup is best-effort: a missing or
+                  // locked keychain entry must not strand a connection that has
+                  // already been deleted on disk.
+                  try {
+                    await ipc("delete_credential", { target: deletingConnection.credentialRef });
+                  } catch (e) {
+                    console.warn("Credential cleanup skipped:", toIpcError(e).message);
+                  }
+                  // Clear from tabs if active
+                  setTabs(prev => prev.map(t =>
+                    t.connection?.id === deletingConnection.id
+                      ? { ...t, connection: null, title: "New tab" }
+                      : t
+                  ));
+                  setDeletingConnection(null);
+                  loadConnections(connectionsFolder);
                 }}
                 style={{
                   flex: 1, padding: "8px 0", background: "var(--error)", color: "white",
@@ -5734,7 +5781,7 @@ function handleCellCommit(
                     setDropConfirm(null);
                   } catch (e) {
                     // Show error in results area
-                    updateActiveTab({ error: `Drop failed: ${String(e)}` });
+                    updateActiveTab({ error: `Drop failed: ${toIpcError(e).message}` });
                     setDropConfirm(null);
                   }
                 }}
@@ -8277,6 +8324,7 @@ function handleCellCommit(
                   rows={activityRows}
                   loading={activityLoading}
                   error={activityError}
+                  errorCode={activityErrorCode}
                   engine={activeTab.connection?.engine ?? ""}
                   onRefresh={() => loadActivity(activeTab.connection, false)}
                   onKillRequest={(row) => setKillPending(row)}

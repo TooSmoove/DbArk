@@ -1,26 +1,14 @@
 # IPC contract allowlist (audit H-3)
 #
-# Commands listed here are still permitted to return a bare `String` or `bool`
-# instead of the canonical `Result<T, IpcError>` envelope. Every entry except
-# `is_tunnel_open` is *legacy debt* scheduled for migration — see the H-3
-# migration checklist. Removing an entry (after migrating it) is always fine.
-# ADDING a new bare String/bool command makes scripts/check-ipc-contract.sh fail.
+# Commands listed here are permitted to return a bare `String` or `bool` instead
+# of the canonical `Result<T, IpcError>` envelope. Adding a NEW bare String/bool
+# command makes scripts/check-ipc-contract.sh fail. Removing an entry (after
+# migrating it) is always fine.
+#
+# As of the H-3 migration the only entry is a genuine boolean *value* (not a
+# success flag). The legacy String/bool batch has been fully migrated.
 #
 # Format: one command name per line. Blank lines and # comments ignored.
 
 # --- genuine boolean value (NOT a success flag) — permanently allowed ---
 is_tunnel_open
-
-# --- legacy String payloads (JSON-as-string) — migrate to Result<String, IpcError> ---
-execute_query
-list_connections
-query_file
-get_file_schema
-get_history
-import_dbeaver_connections
-get_activity
-kill_session
-
-# --- legacy bool success flags — migrate to Result<(), IpcError> (symmetric pair) ---
-store_credential
-delete_credential

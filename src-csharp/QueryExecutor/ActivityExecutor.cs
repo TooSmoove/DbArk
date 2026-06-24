@@ -150,6 +150,10 @@ public static class ActivityExecutor
                     new ActivityResult { Rows = rows },
                     ActivityJsonContext.Default.ActivityResult));
         }
+        catch (ViewStatePermissionException pex)
+        {
+            return ReturnError(pex.Message, "permission");
+        }
         catch (Exception ex)
         {
             return ReturnError(ex.Message);
@@ -239,6 +243,21 @@ public static class ActivityExecutor
             if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
                 throw new Exception("ODBC connect failed for activity panel");
 
+            // VIEW SERVER STATE preflight. Without this permission,
+            // sys.dm_exec_requests silently returns only OUR session, which the
+            // activity query then filters out (session_id <> @@SPID) — so a busy
+            // server looks idle and the user has no idea why. Detect it and fail
+            // loudly with the exact GRANT, instead of showing a misleading
+            // "server is idle". The check is conservative: any ambiguity is
+            // treated as "has permission" so a transient hiccup never produces a
+            // false permission notice.
+            if (!HasViewServerState(hDbc))
+                throw new ViewStatePermissionException(
+                    "This login lacks the VIEW SERVER STATE permission, so DbArk " +
+                    "can only see its own session — the activity panel will always " +
+                    "look idle. Ask a sysadmin to grant it:\n" +
+                    "GRANT VIEW SERVER STATE TO [your_login];");
+
             if (SQLAllocStmt(hDbc, out hStmt) != SQL_SUCCESS)
                 throw new Exception("Failed to allocate ODBC statement");
             SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT, new IntPtr(10), 0);
@@ -281,6 +300,44 @@ public static class ActivityExecutor
         if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) return "";
         int chars = (int)(Math.Max(0, Math.Min(ind, SQL_BUF - 2)) / 2);
         return Marshal.PtrToStringUni(buf, chars) ?? "";
+    }
+
+    // Probe whether the current login has VIEW SERVER STATE, on an already-open
+    // ODBC connection. Returns false ONLY when SQL Server definitively answers
+    // "0"; every other outcome (can't allocate, query error, NULL, fetch miss)
+    // returns true, so an inability to check never blocks the panel or shows a
+    // false permission notice. HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')
+    // is the server-scoped form and itself needs no special permission to call.
+    private static bool HasViewServerState(IntPtr hDbc)
+    {
+        IntPtr hStmt = IntPtr.Zero;
+        IntPtr buf   = IntPtr.Zero;
+        try
+        {
+            if (SQLAllocStmt(hDbc, out hStmt) != SQL_SUCCESS) return true;
+            SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT, new IntPtr(10), 0);
+
+            var rc = SQLExecDirectW(hStmt,
+                "SELECT HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE')", SQL_NTS);
+            if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) return true;
+            if (SQLFetch(hStmt) != SQL_SUCCESS) return true;
+
+            buf = Marshal.AllocHGlobal(SQL_BUF);
+            return ReadCol(hStmt, 1, buf) != "0"; // only an explicit "0" blocks
+        }
+        finally
+        {
+            if (buf != IntPtr.Zero)   Marshal.FreeHGlobal(buf);
+            if (hStmt != IntPtr.Zero) SQLFreeHandle(SQL_HANDLE_STMT, hStmt);
+        }
+    }
+
+    // Raised when a least-privilege login can't read server activity. Caught in
+    // GetActivity and surfaced with the structured "permission" code so the UI
+    // shows the GRANT instead of a generic error.
+    private sealed class ViewStatePermissionException : Exception
+    {
+        public ViewStatePermissionException(string message) : base(message) { }
     }
 
     private static List<ActivityRow> ReadPostgres(string connectionString)
@@ -400,11 +457,11 @@ public static class ActivityExecutor
     // ── Error envelope helper ───────────────────────────────────────────────
     // Returns the same JSON shape as QueryExecutor's error path:
     // { "error": "..." }
-    private static IntPtr ReturnError(string message)
+    private static IntPtr ReturnError(string message, string? code = null)
     {
         return Marshal.StringToCoTaskMemUTF8(
             JsonSerializer.Serialize(
-                new ActivityErrorResult { Error = message },
+                new ActivityErrorResult { Error = message, Code = code },
                 ActivityJsonContext.Default.ActivityErrorResult));
     }
 }
@@ -435,6 +492,12 @@ public class KillResult
 public class ActivityErrorResult
 {
     [JsonPropertyName("error")] public string Error { get; set; } = "";
+
+    // Optional machine-readable tag (e.g. "permission") so the UI can render an
+    // actionable notice rather than a generic error. Omitted from JSON when null.
+    [JsonPropertyName("code")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Code { get; set; }
 }
 
 // Source-generated JSON context for NativeAOT.
