@@ -246,3 +246,21 @@ export interface PendingEdit {
 export type ThemePreference = "system" | "light" | "dark";
 
 export type ResolvedTheme   = "light" | "dark";
+
+// Shape of the Drop-object confirmation dialog state.
+export interface DropConfirm {
+  name:       string;
+  type:       string;
+  schema:     string;
+  tableName:  string;
+  dropSql:    string;
+  connection: ConnectionConfig;
+}
+
+// Result of importing connections from DBeaver's data-sources.json.
+export interface DbeaverImportResult {
+  imported: { name: string; engine: string; host: string; port: number;
+              database: string; username: string; password: string; }[];
+  skipped:  string[];
+  error?:   string;
+}
