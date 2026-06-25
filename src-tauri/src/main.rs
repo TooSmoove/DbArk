@@ -570,12 +570,12 @@ async fn execute_query(connection_string: String, sql: String, engine: String, r
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, *const c_char, *const c_char, *const c_char,
-        ) -> *const c_char> = get_query_executor().get(b"execute_query").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `execute_query`: {e}")));
-        let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
-        let c_sql    = CString::new(sql).unwrap_or_default();
-        let c_engine = CString::new(engine).unwrap_or_default();
-        let c_ro     = CString::new(read_only_str).unwrap_or_default();
-        let c_limit  = CString::new(row_limit_str).unwrap_or_default();
+        ) -> *const c_char> = get_query_executor().get(b"execute_query").map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_conn   = CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_sql    = CString::new(sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_engine = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_ro     = CString::new(read_only_str).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_limit  = CString::new(row_limit_str).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr(), c_limit.as_ptr());
         // A null pointer is a native-layer failure (the command could not run at
         // all). Per-statement and connection errors that the C# side does produce
@@ -591,8 +591,8 @@ async fn execute_query(connection_string: String, sql: String, engine: String, r
 fn list_connections(folder_path: String) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
-            get_connection_manager().get(b"list_connections").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `list_connections`: {e}")));
-        let c_path = CString::new(folder_path).unwrap_or_default();
+            get_connection_manager().get(b"list_connections").map_err(|e| IpcError::native(format!("Native export `list_connections` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_path = CString::new(folder_path).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(c_path.as_ptr());
         if ptr.is_null() {
             Err(IpcError::native("Connection manager returned no response"))
@@ -638,8 +638,8 @@ fn save_connection(request_json: String) -> Result<(), IpcError> {
 
     let response = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
-            get_connection_manager().get(b"save_connection").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `save_connection`: {e}")));
-        let c_req = CString::new(request_json).unwrap_or_default();
+            get_connection_manager().get(b"save_connection").map_err(|e| IpcError::native(format!("Native export `save_connection` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_req = CString::new(request_json).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(c_req.as_ptr());
         if ptr.is_null() {
             return Err(IpcError::native("Connection manager returned no response"));
@@ -660,8 +660,8 @@ fn save_connection(request_json: String) -> Result<(), IpcError> {
 fn delete_connection(file_path: String) -> Result<(), IpcError> {
     let rc = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
-            get_connection_manager().get(b"delete_connection").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `delete_connection`: {e}")));
-        let c_path = CString::new(file_path).unwrap_or_default();
+            get_connection_manager().get(b"delete_connection").map_err(|e| IpcError::native(format!("Native export `delete_connection` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_path = CString::new(file_path).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         func(c_path.as_ptr())
     };
     if rc == 1 {
@@ -733,6 +733,7 @@ fn build_connection_string(params: ConnectionParams) -> Result<String, IpcError>
     } else {
         String::new()
     };
+    let password = Zeroizing::new(password);
 
     let conn_str = match engine.to_lowercase().as_str() {
         // MariaDB is wire-protocol compatible with MySQL — uses the same MySqlConnector driver
@@ -743,7 +744,7 @@ fn build_connection_string(params: ConnectionParams) -> Result<String, IpcError>
                 "verify-full" => "SslMode=VerifyFull;",
                 _             => if tunnel_port.is_some() { "SslMode=None;" } else { "SslMode=Preferred;" },
             };
-            build_mysql_conn(&effective_host, effective_port, &database, &username, &password,
+            build_mysql_conn(&effective_host, effective_port, &database, &username, password.as_str(),
                 &format!("{};AllowUserVariables=true;", ssl_param))
         },
         "postgres" => {
@@ -753,7 +754,7 @@ fn build_connection_string(params: ConnectionParams) -> Result<String, IpcError>
                 "verify-full" => "SSL Mode=VerifyFull;",
                 _             => "SSL Mode=Prefer;",
             };
-            build_pg_conn(&effective_host, effective_port, &database, &username, &password, ssl_param)
+            build_pg_conn(&effective_host, effective_port, &database, &username, password.as_str(), ssl_param)
         },
         // CockroachDB speaks the Postgres wire protocol — uses Npgsql.
         // ssl_mode="none" means insecure single-node dev cluster: omit the SSL
@@ -771,11 +772,11 @@ fn build_connection_string(params: ConnectionParams) -> Result<String, IpcError>
                 "verify-full" => "SSL Mode=VerifyFull;",
                 _             => "SSL Mode=Prefer;Trust Server Certificate=true;",
             };
-            build_pg_conn(&effective_host, effective_port, &database, &username, &password, ssl_param)
+            build_pg_conn(&effective_host, effective_port, &database, &username, password.as_str(), ssl_param)
         },
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &effective_host, port: effective_port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         "sqlite" => format!("Data Source={}", database),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
@@ -789,9 +790,9 @@ async fn query_file(file_path: String, sql: String) -> Result<String, IpcError> 
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
-        ) -> *const c_char> = get_file_query_engine().get(b"query_file").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `query_file`: {e}")));
-        let c_path = CString::new(file_path).unwrap_or_default();
-        let c_sql  = CString::new(sql).unwrap_or_default();
+        ) -> *const c_char> = get_file_query_engine().get(b"query_file").map_err(|e| IpcError::native(format!("Native export `query_file` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_path = CString::new(file_path).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_sql  = CString::new(sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(c_path.as_ptr(), c_sql.as_ptr());
         if ptr.is_null() {
             Err(IpcError::native("File query engine returned no response"))
@@ -805,8 +806,8 @@ async fn query_file(file_path: String, sql: String) -> Result<String, IpcError> 
 async fn get_file_schema(file_path: String) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> *const c_char> =
-            get_file_query_engine().get(b"get_file_schema").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_file_schema`: {e}")));
-        let c_path = CString::new(file_path).unwrap_or_default();
+            get_file_query_engine().get(b"get_file_schema").map_err(|e| IpcError::native(format!("Native export `get_file_schema` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_path = CString::new(file_path).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(c_path.as_ptr());
         if ptr.is_null() {
             Err(IpcError::native("File query engine returned no response"))
@@ -833,13 +834,14 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
             .map_err(|e| e.to_string())?;
         entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     };
+    let password = Zeroizing::new(password);
     let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
-        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Prefer;"),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, password.as_str(), "SslMode=Preferred;"),
+        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, password.as_str(), "SSL Mode=Prefer;"),
         "sqlite"                   => format!("Data Source={}", database),
         "sqlserver"                => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         _                          => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
@@ -847,9 +849,9 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
-        ) -> *const c_char> = get_file_query_engine().get(b"ListTables").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `ListTables`: {e}")));
-        let cs  = CString::new(connection_string.as_str()).unwrap_or_default();
-        let eng = CString::new(engine).unwrap_or_default();
+        ) -> *const c_char> = get_file_query_engine().get(b"ListTables").map_err(|e| IpcError::native(format!("Native export `ListTables` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let cs  = CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let eng = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_file_query_engine(), ptr))
@@ -878,13 +880,14 @@ async fn query_file_with_db(
             .map_err(|e| e.to_string())?;
         entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
     };
+    let password = Zeroizing::new(password);
     let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, "SslMode=Preferred;"),
-        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Prefer;"),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, password.as_str(), "SslMode=Preferred;"),
+        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, password.as_str(), "SSL Mode=Prefer;"),
         "sqlite"                   => format!("Data Source={}", database),
         "sqlserver"                => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         _                          => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
@@ -893,13 +896,13 @@ async fn query_file_with_db(
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, *const c_char,
             *const c_char, *const c_char,
-        ) -> *const c_char> = get_file_query_engine().get(b"QueryFileWithDb").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `QueryFileWithDb`: {e}")));
+        ) -> *const c_char> = get_file_query_engine().get(b"QueryFileWithDb").map_err(|e| IpcError::native(format!("Native export `QueryFileWithDb` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
         let strings = (
-            CString::new(file_path).unwrap_or_default(),
-            CString::new(sql).unwrap_or_default(),
-            CString::new(connection_string.as_str()).unwrap_or_default(),
-            CString::new(engine).unwrap_or_default(),
-            CString::new(table_names).unwrap_or_default(),
+            CString::new(file_path).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
+            CString::new(table_names).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
         );
         let ptr = func(
             strings.0.as_ptr(), strings.1.as_ptr(),
@@ -945,17 +948,18 @@ async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
     } else {
         String::new()
     };
+    let password = Zeroizing::new(password);
 
     let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, ""),
-        "postgres"    => build_pg_conn(&host, port, &database, &username, &password, ""),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, password.as_str(), ""),
+        "postgres"    => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
         // CockroachDB insecure: add SSL Mode=Allow so Npgsql connects plain
         // without sending an SSLRequest (avoids 30-second connection timeout).
-        "cockroachdb"  => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Allow;"),
+        "cockroachdb"  => build_pg_conn(&host, port, &database, &username, password.as_str(), "SSL Mode=Allow;"),
         "sqlite"   => format!("Data Source={}", database),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
@@ -966,9 +970,9 @@ async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
             *const c_char, *const c_char,
         ) -> *const c_char> = get_schema_explorer()
             .get(b"get_schema")
-            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_schema`: {e}")));
-        let cs  = CString::new(connection_string.as_str()).unwrap_or_default();
-        let eng = CString::new(engine).unwrap_or_default();
+            .map_err(|e| IpcError::native(format!("Native export `get_schema` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let cs  = CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let eng = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_schema_explorer(), ptr))
@@ -1017,14 +1021,15 @@ async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
     } else {
         String::new()
     };
+    let password = Zeroizing::new(password);
 
     let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, &password, ""),
-        "postgres"    => build_pg_conn(&host, port, &database, &username, &password, ""),
-        "cockroachdb"  => build_pg_conn(&host, port, &database, &username, &password, "SSL Mode=Allow;"),
+        "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, password.as_str(), ""),
+        "postgres"    => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
+        "cockroachdb"  => build_pg_conn(&host, port, &database, &username, password.as_str(), "SSL Mode=Allow;"),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
@@ -1035,9 +1040,9 @@ async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
             *const c_char, *const c_char,
         ) -> *const c_char> = get_schema_explorer()
             .get(b"list_databases")
-            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `list_databases`: {e}")));
-        let cs  = CString::new(connection_string.as_str()).unwrap_or_default();
-        let eng = CString::new(engine).unwrap_or_default();
+            .map_err(|e| IpcError::native(format!("Native export `list_databases` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let cs  = CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let eng = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(cs.as_ptr(), eng.as_ptr());
         if ptr.is_null() { return Err(IpcError::native("null response")); }
         Ok(read_and_free(get_schema_explorer(), ptr))
@@ -1054,7 +1059,10 @@ async fn add_history_entry(
 ) -> bool {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
-            get_query_history().get(b"add_history_entry").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `add_history_entry`: {e}")));
+            match get_query_history().get(b"add_history_entry") {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
         let json = format!(
             r#"{{"connectionId":"{}","connectionName":"{}","sql":"{}","executedAt":{},"durationMs":{},"rowCount":{},"success":{}}}"#,
             connection_id.replace('"', "\\\""),
@@ -1076,8 +1084,8 @@ async fn add_history_entry(
 async fn get_history(connection_id: String, limit: i32) -> Result<String, IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char, i32) -> *const c_char> =
-            get_query_history().get(b"get_history").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_history`: {e}")));
-        let c_id = CString::new(connection_id).unwrap_or_default();
+            get_query_history().get(b"get_history").map_err(|e| IpcError::native(format!("Native export `get_history` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_id = CString::new(connection_id).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr  = func(c_id.as_ptr(), limit);
         if ptr.is_null() {
             Err(IpcError::native("Query history returned no response"))
@@ -1091,8 +1099,8 @@ async fn get_history(connection_id: String, limit: i32) -> Result<String, IpcErr
 async fn clear_history(connection_id: String) -> Result<(), IpcError> {
     let rc = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
-            get_query_history().get(b"clear_history").unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `clear_history`: {e}")));
-        let c_id = CString::new(connection_id).unwrap_or_default();
+            get_query_history().get(b"clear_history").map_err(|e| IpcError::native(format!("Native export `clear_history` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_id = CString::new(connection_id).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         func(c_id.as_ptr())
     };
     if rc == 1 {
@@ -1123,11 +1131,12 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
     } else {
         String::new()
     };
+    let password = Zeroizing::new(password);
 
     let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => build_mysql_conn(&host, port, &database, &username, &password,
+        "mysql" | "mariadb" => build_mysql_conn(&host, port, &database, &username, password.as_str(),
             "SslMode=Preferred;ConnectionTimeout=5;"),
-        "postgres" => build_pg_conn(&host, port, &database, &username, &password,
+        "postgres" => build_pg_conn(&host, port, &database, &username, password.as_str(),
             "SSL Mode=Prefer;Timeout=5;"),
         "cockroachdb" => {
             let ssl_param = if ssl == "none" {
@@ -1135,13 +1144,13 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
             } else {
                 "SSL Mode=Prefer;Trust Server Certificate=true;"
             };
-            build_pg_conn(&host, port, &database, &username, &password,
+            build_pg_conn(&host, port, &database, &username, password.as_str(),
                 &format!("{}Timeout=5;", ssl_param))
         },
         "sqlite" => format!("Data Source={}", database),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
@@ -1161,7 +1170,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
             *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor()
             .get(b"execute_query")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
 
         let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let c_sql    = CString::new(test_sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
@@ -1290,7 +1299,7 @@ async fn open_tunnel(params: TunnelParams) -> Result<i32, IpcError> {
             *const c_char, i32,
         ) -> *const c_char> = get_ssh_tunnel()
             .get(b"open_tunnel")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| IpcError::native(format!("Native export `open_tunnel` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
 
         let strings = (
             CString::new(tunnel_id).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?,
@@ -1535,12 +1544,12 @@ async fn get_object_definition(
                 *const c_char, *const c_char,
             ) -> *const c_char> = get_query_executor()
                 .get(b"execute_query")
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
 
-            let c_conn   = CString::new(conn_str.as_str()).unwrap_or_default();
-            let c_sql    = CString::new(sql.as_str()).unwrap_or_default();
-            let c_engine = CString::new("sqlite").unwrap_or_default();
-            let c_ro     = CString::new("true").unwrap_or_default();
+            let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+            let c_sql    = CString::new(sql.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+            let c_engine = CString::new("sqlite").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+            let c_ro     = CString::new("true").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
 
             let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                            c_engine.as_ptr(), c_ro.as_ptr());
@@ -1591,13 +1600,14 @@ async fn get_object_definition(
     } else {
         String::new()
     };
+    let password = Zeroizing::new(password);
 
     let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb"       => build_mysql_conn(&host, port, &database, &username, &password, ""),
-        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, &password, ""),
+        "mysql" | "mariadb"       => build_mysql_conn(&host, port, &database, &username, password.as_str(), ""),
+        "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
@@ -1610,13 +1620,13 @@ async fn get_object_definition(
             *const c_char,
         ) -> *const c_char> = get_schema_explorer()
             .get(b"get_object_definition")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| IpcError::native(format!("Native export `get_object_definition` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
 
-        let c_conn   = CString::new(conn_str.as_str()).unwrap_or_default();
-        let c_engine = CString::new(engine).unwrap_or_default();
-        let c_name   = CString::new(object_name).unwrap_or_default();
-        let c_type   = CString::new(object_type).unwrap_or_default();
-        let c_schema = CString::new(schema).unwrap_or_default();
+        let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_engine = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_name   = CString::new(object_name).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_type   = CString::new(object_type).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_schema = CString::new(schema).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
 
         let ptr = func(
             c_conn.as_ptr(), c_engine.as_ptr(),
@@ -1687,7 +1697,7 @@ async fn get_sqlite_objects(database: String) -> Result<String, IpcError> {
             *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor()
             .get(b"execute_query")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
 
         let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let c_sql    = CString::new(sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
@@ -1726,14 +1736,15 @@ async fn drop_object(
     } else {
         String::new()
     };
+    let password = Zeroizing::new(password);
 
     let conn_str = match engine.to_lowercase().as_str() {
-        "mysql"    => build_mysql_conn(&host, port, &database, &username, &password, ""),
-        "postgres" => build_pg_conn(&host, port, &database, &username, &password, ""),
+        "mysql"    => build_mysql_conn(&host, port, &database, &username, password.as_str(), ""),
+        "postgres" => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
         "sqlite"   => format!("Data Source={}", database),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
-            username: &username, password: &password, win_auth, ssl_mode: ssl.as_str(),
+            username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
@@ -1751,12 +1762,12 @@ async fn drop_object(
             *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor()
             .get(b"execute_query")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
 
-        let c_conn   = CString::new(conn_str.as_str()).unwrap_or_default();
-        let c_sql    = CString::new(drop_sql.as_str()).unwrap_or_default();
-        let c_engine = CString::new(engine.as_str()).unwrap_or_default();
-        let c_ro     = CString::new("false").unwrap_or_default();
+        let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_sql    = CString::new(drop_sql.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_engine = CString::new(engine.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_ro     = CString::new("false").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
 
         let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
                        c_engine.as_ptr(), c_ro.as_ptr());
@@ -2342,9 +2353,9 @@ async fn get_activity(connection_string: String, engine: String) -> Result<Strin
             *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor()
             .get(b"get_activity")
-            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `get_activity`: {e}")));
-        let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
-        let c_engine = CString::new(engine).unwrap_or_default();
+            .map_err(|e| IpcError::native(format!("Native export `get_activity` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_conn   = CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_engine = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(c_conn.as_ptr(), c_engine.as_ptr());
         if ptr.is_null() {
             Err(IpcError::native("Query executor returned no response"))
@@ -2365,10 +2376,10 @@ async fn kill_session(connection_string: String, engine: String, pid: String) ->
             *const c_char, *const c_char, *const c_char,
         ) -> *const c_char> = get_query_executor()
             .get(b"kill_session")
-            .unwrap_or_else(|e| fatal::report_fatal("Native symbol resolution", format!("Could not resolve native export `kill_session`: {e}")));
-        let c_conn   = CString::new(connection_string.as_str()).unwrap_or_default();
-        let c_engine = CString::new(engine).unwrap_or_default();
-        let c_pid    = CString::new(pid).unwrap_or_default();
+            .map_err(|e| IpcError::native(format!("Native export `kill_session` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
+        let c_conn   = CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_engine = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
+        let c_pid    = CString::new(pid).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
         let ptr = func(c_conn.as_ptr(), c_engine.as_ptr(), c_pid.as_ptr());
         if ptr.is_null() {
             Err(IpcError::native("Query executor returned no response"))
