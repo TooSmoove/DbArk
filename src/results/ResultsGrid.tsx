@@ -173,7 +173,7 @@ export function ResultsGrid({
             borderRadius: 6,
             color: "var(--text)",
             fontSize: 12,
-            fontFamily: "monospace",
+            fontFamily: "var(--mono)",
             padding: "4px 10px",
             outline: "none",
             width: 260,
@@ -181,7 +181,7 @@ export function ResultsGrid({
         />
         {debouncedFilter && (
           <>
-            <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace" }}>
+            <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--mono)" }}>
               {sortedRows.length} of {result.rowCount} rows
             </span>
             <button
@@ -201,7 +201,7 @@ export function ResultsGrid({
             style={{
               background: "none", border: "none", color: "var(--text-tertiary)",
               cursor: "pointer", fontSize: 11, padding: "2px 6px",
-              fontFamily: "monospace", marginLeft: "auto",
+              fontFamily: "var(--mono)", marginLeft: "auto",
             }}
           >
             ✕ clear sort
@@ -222,7 +222,7 @@ export function ResultsGrid({
         }}>
           <span style={{
             fontSize: 11, color: "var(--warning)",
-            fontFamily: "monospace", flex: 1,
+            fontFamily: "var(--mono)", flex: 1,
           }}>
             ⚠ {pendingEdits.length} unsaved change{pendingEdits.length > 1 ? "s" : ""}
           </span>
@@ -233,7 +233,7 @@ export function ResultsGrid({
               background: "var(--success)", color: "white",
               border: "none", borderRadius: 6,
               cursor: "pointer", fontSize: 11,
-              fontFamily: "monospace",
+              fontFamily: "var(--mono)",
             }}
           >
             ✓ Commit
@@ -245,7 +245,7 @@ export function ResultsGrid({
               background: "transparent", color: "var(--text-tertiary)",
               border: "1px solid var(--border)", borderRadius: 6,
               cursor: "pointer", fontSize: 11,
-              fontFamily: "monospace",
+              fontFamily: "var(--mono)",
             }}
           >
             ✕ Rollback
@@ -257,7 +257,7 @@ export function ResultsGrid({
       <div ref={parentRef} style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
         <table style={{
           borderCollapse: "collapse", width: "100%",
-          fontSize: 13, fontFamily: "monospace", tableLayout: "auto",
+          fontSize: 13, fontFamily: "var(--mono)", tableLayout: "auto",
         }}>
           <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
             {table.getHeaderGroups().map((hg) => (
@@ -369,7 +369,7 @@ export function ResultsGrid({
                             borderBottom: "2px solid var(--accent)",
                             color: "var(--text)",
                             fontSize: 13,
-                            fontFamily: "monospace",
+                            fontFamily: "var(--mono)",
                             outline: "none",
                             boxSizing: "border-box",
                           }}
@@ -425,7 +425,7 @@ export function ResultsGrid({
         background: "var(--surface)",
         borderTop: "1px solid var(--border)",
         fontSize: 10, color: "var(--text-disabled)",
-        fontFamily: "monospace", flexShrink: 0,
+        fontFamily: "var(--mono)", flexShrink: 0,
       }}>
         {isReadOnly
           ? "🔒 Read-only connection — editing disabled"

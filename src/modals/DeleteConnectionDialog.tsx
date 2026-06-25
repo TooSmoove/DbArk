@@ -2,11 +2,12 @@
 import type { Dispatch, SetStateAction } from "react";
 import { ipc, toIpcError } from "../ipc";
 import type { ConnectionConfig, Tab } from "../types";
+import { modalBackdrop } from "../ui/styles";
 
 export function DeleteConnectionDialog({ deletingConnection, setDeletingConnection, setTabs, loadConnections, connectionsFolder }: { deletingConnection: ConnectionConfig; setDeletingConnection: Dispatch<SetStateAction<ConnectionConfig | null>>; setTabs: Dispatch<SetStateAction<Tab[]>>; loadConnections: (folder: string) => void; connectionsFolder: string }) {
   return (
         <>
-          <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(0,0,0,0.6)" }}
+          <div style={modalBackdrop}
             onClick={() => setDeletingConnection(null)} />
           <div style={{
             position: "fixed", top: "50%", left: "50%",
@@ -54,7 +55,7 @@ export function DeleteConnectionDialog({ deletingConnection, setDeletingConnecti
                 style={{
                   flex: 1, padding: "8px 0", background: "var(--error)", color: "white",
                   border: "none", borderRadius: 6, cursor: "pointer",
-                  fontSize: 12, fontFamily: "monospace",
+                  fontSize: 12, fontFamily: "var(--mono)",
                 }}
               >
                 Delete
@@ -64,7 +65,7 @@ export function DeleteConnectionDialog({ deletingConnection, setDeletingConnecti
                 style={{
                   flex: 1, padding: "8px 0", background: "transparent", color: "var(--text-tertiary)",
                   border: "1px solid var(--border)", borderRadius: 6, cursor: "pointer",
-                  fontSize: 12, fontFamily: "monospace",
+                  fontSize: 12, fontFamily: "var(--mono)",
                 }}
               >
                 Cancel

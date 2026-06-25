@@ -1,12 +1,13 @@
 // Extracted from App.tsx (code-audit item A-1).
 import type { Dispatch, SetStateAction } from "react";
 import type { DbeaverImportResult } from "../types";
+import { modalBackdrop } from "../ui/styles";
 
 export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbeaverResult, handleDbeaverImport, dbeaverImporting }: { setShowDbeaverImport: Dispatch<SetStateAction<boolean>>; dbeaverResult: DbeaverImportResult | null; setDbeaverResult: Dispatch<SetStateAction<DbeaverImportResult | null>>; handleDbeaverImport: () => void; dbeaverImporting: boolean }) {
   return (
         <>
           <div
-            style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(0,0,0,0.6)" }}
+            style={modalBackdrop}
             onClick={() => { setShowDbeaverImport(false); setDbeaverResult(null); }}
           />
           <div style={{
@@ -37,7 +38,7 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
                       background: "var(--accent)", color: "white",
                       border: "none", borderRadius: 6,
                       cursor: dbeaverImporting ? "not-allowed" : "pointer",
-                      fontSize: 12, fontFamily: "monospace",
+                      fontSize: 12, fontFamily: "var(--mono)",
                     }}
                   >
                     {dbeaverImporting ? "Importing…" : "Import connections"}
@@ -48,7 +49,7 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
                       flex: 1, padding: "8px 0",
                       background: "transparent", color: "var(--text-tertiary)",
                       border: "1px solid var(--border)", borderRadius: 6,
-                      cursor: "pointer", fontSize: 12, fontFamily: "monospace",
+                      cursor: "pointer", fontSize: 12, fontFamily: "var(--mono)",
                     }}
                   >
                     Cancel
@@ -63,7 +64,7 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
                   <div style={{
                     padding: "10px 14px", borderRadius: 6, marginBottom: 16,
                     background: "var(--error-bg)", border: "1px solid var(--error)",
-                    color: "var(--error)", fontSize: 12, fontFamily: "monospace",
+                    color: "var(--error)", fontSize: 12, fontFamily: "var(--mono)",
                   }}>
                     ❌ {dbeaverResult.error}
                   </div>
@@ -71,12 +72,12 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
 
                 {dbeaverResult.imported.length > 0 && (
                   <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 11, color: "var(--success)", marginBottom: 8, fontFamily: "monospace" }}>
+                    <div style={{ fontSize: 11, color: "var(--success)", marginBottom: 8, fontFamily: "var(--mono)" }}>
                       ✓ {dbeaverResult.imported.length} connection{dbeaverResult.imported.length > 1 ? "s" : ""} imported
                     </div>
                     {dbeaverResult.imported.map(c => (
                       <div key={c.name} style={{
-                        fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace",
+                        fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--mono)",
                         padding: "2px 0",
                       }}>
                         · {c.name} ({c.engine} · {c.host})
@@ -87,12 +88,12 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
 
                 {dbeaverResult.skipped.length > 0 && (
                   <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 11, color: "var(--warning)", marginBottom: 8, fontFamily: "monospace" }}>
+                    <div style={{ fontSize: 11, color: "var(--warning)", marginBottom: 8, fontFamily: "var(--mono)" }}>
                       ⚠ {dbeaverResult.skipped.length} skipped
                     </div>
                     {dbeaverResult.skipped.map(s => (
                       <div key={s} style={{
-                        fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace",
+                        fontSize: 11, color: "var(--text-disabled)", fontFamily: "var(--mono)",
                         padding: "2px 0",
                       }}>
                         · {s}
@@ -107,7 +108,7 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
                     width: "100%", padding: "8px 0",
                     background: "transparent", color: "var(--text-tertiary)",
                     border: "1px solid var(--border)", borderRadius: 6,
-                    cursor: "pointer", fontSize: 12, fontFamily: "monospace",
+                    cursor: "pointer", fontSize: 12, fontFamily: "var(--mono)",
                   }}
                 >
                   Close

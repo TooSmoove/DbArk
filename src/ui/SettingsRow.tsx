@@ -16,13 +16,13 @@ export function SettingsRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
           fontSize: 12, color: "var(--text)",
-          marginBottom: 2, fontFamily: "monospace",
+          marginBottom: 2, fontFamily: "var(--mono)",
         }}>
           {label}
         </div>
         <div style={{
           fontSize: 10, color: "var(--text-tertiary)",
-          fontFamily: "monospace", lineHeight: 1.5,
+          fontFamily: "var(--mono)", lineHeight: 1.5,
         }}>
           {description}
         </div>

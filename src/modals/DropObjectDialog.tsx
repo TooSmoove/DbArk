@@ -3,13 +3,13 @@ import type { Dispatch, SetStateAction, RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toIpcError } from "../ipc";
 import type { ConnectionConfig, SchemaResult, Tab, DropConfirm } from "../types";
+import { modalBackdrop } from "../ui/styles";
 
 export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache, schemaConnectionIdRef, setSchema, setExpandedTables, setExpandedSections, loadSchema, activeTabRef, updateActiveTab }: { dropConfirm: DropConfirm; setDropConfirm: Dispatch<SetStateAction<DropConfirm | null>>; purgeSchemaCache: (connId: string) => void; schemaConnectionIdRef: RefObject<string | null>; setSchema: Dispatch<SetStateAction<SchemaResult | null>>; setExpandedTables: Dispatch<SetStateAction<Set<string>>>; setExpandedSections: Dispatch<SetStateAction<Set<string>>>; loadSchema: (conn: ConnectionConfig, database?: string) => void; activeTabRef: RefObject<Tab>; updateActiveTab: (updates: Partial<Tab>) => void }) {
   return (
         <>
           <div
-            style={{ position: "fixed", inset: 0, zIndex: 999,
-              background: "rgba(0,0,0,0.6)" }}
+            style={modalBackdrop}
             onClick={() => setDropConfirm(null)}
           />
           <div style={{
@@ -46,7 +46,7 @@ export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache
               borderRadius: 6,
               padding: "10px 14px",
               marginBottom: 20,
-              fontFamily: "monospace",
+              fontFamily: "var(--mono)",
               fontSize: 12,
               color: "var(--error)",
             }}>
@@ -97,7 +97,7 @@ export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache
                   background: "var(--error)", color: "white",
                   border: "none", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
-                  fontFamily: "monospace", fontWeight: 600,
+                  fontFamily: "var(--mono)", fontWeight: 600,
                 }}
               >
                 Drop {dropConfirm.type}
@@ -109,7 +109,7 @@ export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache
                   background: "transparent", color: "var(--text-tertiary)",
                   border: "1px solid var(--border)", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                 }}
               >
                 Cancel

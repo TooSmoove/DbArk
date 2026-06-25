@@ -30,11 +30,11 @@ export function SchemaSection({
         <span style={{ fontSize: 9, color: "var(--text-disabled)", width: 10, flexShrink: 0 }}>
           {expanded ? "▾" : "▸"}
         </span>
-        <span style={{ fontSize: 10, color: "var(--text-tertiary)", fontFamily: "monospace",
+        <span style={{ fontSize: 10, color: "var(--text-tertiary)", fontFamily: "var(--mono)",
           fontWeight: 600, flex: 1, textTransform: "uppercase", letterSpacing: ".05em" }}>
           {label}
         </span>
-        <span style={{ fontSize: 9, color: "var(--border-strong)", fontFamily: "monospace" }}>
+        <span style={{ fontSize: 9, color: "var(--border-strong)", fontFamily: "var(--mono)" }}>
           {count}
         </span>
       </div>
@@ -43,12 +43,12 @@ export function SchemaSection({
         <div style={{ background: "var(--bg)" }}>
           {emptyMessage ? (
             <div style={{ padding: "8px 14px 8px 20px", fontSize: 10,
-              color: "var(--border-strong)", fontFamily: "monospace", fontStyle: "italic" }}>
+              color: "var(--border-strong)", fontFamily: "var(--mono)", fontStyle: "italic" }}>
               {emptyMessage}
             </div>
           ) : count === 0 ? (
             <div style={{ padding: "8px 14px 8px 20px", fontSize: 10,
-              color: "var(--border-strong)", fontFamily: "monospace" }}>
+              color: "var(--border-strong)", fontFamily: "var(--mono)" }}>
               None found
             </div>
           ) : children}

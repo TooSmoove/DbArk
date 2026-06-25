@@ -69,6 +69,10 @@
   /* Lock screen overlay — 92% bg over the app */
   --lock-overlay: rgba(14, 15, 17, 0.92);
 
+  /* Modal backdrop scrims (theme-independent black dim) */
+  --scrim:        rgba(0, 0, 0, 0.4);
+  --scrim-strong: rgba(0, 0, 0, 0.6);
+
   /* Tell native form controls (scrollbar, date pickers, etc) the scheme */
   color-scheme: dark;
 }

@@ -35,6 +35,7 @@ import Fuse from "fuse.js";
 import "./theme.css";   // colors — must come first
 import "./index.css";   // typography & layout
 import { ErDiagram } from "./components/ErDiagram/ErDiagram";
+import { ellipsisLabel, microMutedLabel } from "./ui/styles";
 
 
 
@@ -1010,12 +1011,6 @@ function App() {
     editorRef.current?.focus();
   }
 
-  const menuItemStyle: React.CSSProperties = {
-    display: "block", width: "100%", padding: "8px 16px",
-    background: "none", border: "none", color: "var(--text)",
-    fontSize: 12, fontFamily: "monospace", cursor: "pointer",
-    textAlign: "left",
-  };
   //END CRUD Script function
 
   //Run Query Function
@@ -1964,7 +1959,7 @@ function App() {
           🗄
         </span>
         <span style={{
-          fontSize: 11, flex: 1, fontFamily: "monospace",
+          fontSize: 11, flex: 1, fontFamily: "var(--mono)",
           color: isActive ? "var(--text)" : "var(--text-secondary)",
           fontWeight: isActive ? 600 : 400,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -2666,7 +2661,7 @@ function handleCellCommit(
   return (
     <div style={{
       display: "flex", height: "100vh", width: "100vw",
-      background: "var(--bg)", color: "var(--text)", fontFamily: "monospace",
+      background: "var(--bg)", color: "var(--text)", fontFamily: "var(--mono)",
       overflow: "hidden", boxSizing: "border-box",
     }}>
 
@@ -2696,7 +2691,7 @@ function handleCellCommit(
             <div style={{
               padding: "6px 16px",
               fontSize: 10, color: "var(--text-disabled)",
-              fontFamily: "monospace",
+              fontFamily: "var(--mono)",
               borderBottom: "1px solid var(--border)",
               marginBottom: 4,
             }}>
@@ -2716,9 +2711,7 @@ function handleCellCommit(
                   );
                   setSchemaContextMenu(null);
                 }}
-                style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                className="menu-item"
               >
                 📄 Open Definition
               </button>
@@ -2737,9 +2730,7 @@ function handleCellCommit(
                   );
                   setSchemaContextMenu(null);
                 }}
-                style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                className="menu-item"
               >
                 📄 Open Definition
               </button>
@@ -2764,9 +2755,7 @@ function handleCellCommit(
                         setEditorScript(scriptTable(table, type, engine));
                         setSchemaContextMenu(null);
                       }}
-                      style={menuItemStyle}
-                      onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                      onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                      className="menu-item"
                     >
                       ✦ Script {type.toUpperCase()}
                     </button>
@@ -2786,9 +2775,7 @@ function handleCellCommit(
                   setEditorScript(limit);
                   setSchemaContextMenu(null);
                 }}
-                style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                className="menu-item"
               >
                 ▶ Query View
               </button>
@@ -2808,9 +2795,7 @@ function handleCellCommit(
                       setEditorScript(scriptExecute(proc, engine));
                       setSchemaContextMenu(null);
                     }}
-                    style={menuItemStyle}
-                    onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                    onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                    className="menu-item"
                   >
                     ▶ Script EXECUTE
                   </button>
@@ -2832,9 +2817,7 @@ function handleCellCommit(
                   );
                   setSchemaContextMenu(null);
                 }}
-                style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                className="menu-item"
               >
                 ⬇ Script DROP and CREATE
               </button>
@@ -2901,9 +2884,7 @@ function handleCellCommit(
                   setTimeout(() => editorRef.current?.setValue(definition), 0);
                   setSchemaContextMenu(null);
                 }}
-                style={menuItemStyle}
-                onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                className="menu-item"
               >
                 ✦ Script CREATE OR ALTER
               </button>
@@ -2930,9 +2911,7 @@ function handleCellCommit(
                 });
                 setSchemaContextMenu(null);
               }}
-              style={{ ...menuItemStyle, color: "var(--error)" }}
-              onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              className="menu-item menu-item--danger"
             >
               🗑️ Drop {schemaContextMenu.type}
             </button>
@@ -3072,7 +3051,7 @@ function handleCellCommit(
                   background: "none", border: "1px solid var(--border)", borderRadius: 4,
                   color: "var(--text-secondary)", cursor: "pointer", fontSize: 11,
                   lineHeight: 1, padding: "2px 7px", flexShrink: 0,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                 }}
               >
                 ↓ DBeaver
@@ -3122,17 +3101,14 @@ function handleCellCommit(
                   flex: 1,
                   textTransform: "uppercase",
                   letterSpacing: ".06em",
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
                 }}>
                   {groupLabel}
                 </span>
-                <span style={{
-                  fontSize: 9, color: "var(--text-disabled)",
-                  fontFamily: "monospace", flexShrink: 0,
-                }}>
+                <span style={microMutedLabel}>
                   {groupConns.length}
                 </span>
               </div>
@@ -3217,7 +3193,7 @@ function handleCellCommit(
                           Selecting a database loads its schema and points
                           query execution at it. */}
                       {databasesLoading && (
-                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace" }}>
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "var(--mono)" }}>
                           Loading databases…
                         </div>
                       )}
@@ -3248,15 +3224,12 @@ function handleCellCommit(
                             }}>
                               <span style={{
                                 fontSize: 9, color: "var(--text-tertiary)",
-                                fontFamily: "monospace", textTransform: "uppercase",
+                                fontFamily: "var(--mono)", textTransform: "uppercase",
                                 letterSpacing: ".06em", flex: 1,
                               }}>
                                 Databases
                               </span>
-                              <span style={{
-                                fontSize: 9, color: "var(--text-disabled)",
-                                fontFamily: "monospace", flexShrink: 0,
-                              }}>
+                              <span style={microMutedLabel}>
                                 {q ? `${filtered.length}/${databases.length}` : databases.length}
                               </span>
                             </div>
@@ -3276,7 +3249,7 @@ function handleCellCommit(
                                   spellCheck={false}
                                   style={{
                                     border: "none", outline: "none", background: "transparent",
-                                    flex: 1, fontSize: 11, fontFamily: "monospace",
+                                    flex: 1, fontSize: 11, fontFamily: "var(--mono)",
                                     color: "var(--text)", padding: 0,
                                   }}
                                 />
@@ -3291,7 +3264,7 @@ function handleCellCommit(
                             )}
 
                             {filtered.length === 0 && (
-                              <div style={{ padding: "6px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace" }}>
+                              <div style={{ padding: "6px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "var(--mono)" }}>
                                 No databases match “{dbFilter}”
                               </div>
                             )}
@@ -3321,18 +3294,18 @@ function handleCellCommit(
                       }}>
 
                       {schemaLoading && (
-                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "monospace" }}>
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--text-disabled)", fontFamily: "var(--mono)" }}>
                           Loading schema…
                         </div>
                       )}
 
                       {schema?.error && !(conn.sshEnabled && !tunnelPorts[conn.id]) && (
-                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--error)", fontFamily: "monospace" }}>
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--error)", fontFamily: "var(--mono)" }}>
                           {schema.error}
                         </div>
                       )}
                       {schema?.error && conn.sshEnabled && !tunnelPorts[conn.id] && (
-                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--warning)", fontFamily: "monospace" }}>
+                        <div style={{ padding: "8px 14px", fontSize: 11, color: "var(--warning)", fontFamily: "var(--mono)" }}>
                           ⚠ Run a query to open the SSH tunnel, then schema will load
                         </div>
                       )}
@@ -3376,7 +3349,7 @@ function handleCellCommit(
                                   color: showDiagram && activeTab.connection?.id === conn.id
                                     ? "var(--accent)"
                                     : "var(--text-disabled)",
-                                  cursor: "pointer", fontSize: 10, fontFamily: "monospace",
+                                  cursor: "pointer", fontSize: 10, fontFamily: "var(--mono)",
                                   padding: "2px 8px",
                                 }}
                                 title="Show ER diagram"
@@ -3392,7 +3365,7 @@ function handleCellCommit(
                                 loadSchema(conn, db);
                               }}
                               style={{ background: "none", border: "none", color: "var(--text-disabled)",
-                                cursor: "pointer", fontSize: 10, fontFamily: "monospace", padding: "2px 4px" }}
+                                cursor: "pointer", fontSize: 10, fontFamily: "var(--mono)", padding: "2px 4px" }}
                               title="Refresh schema"
                             >
                               ↻ refresh
@@ -3442,15 +3415,12 @@ function handleCellCommit(
                                       </span>
                                       <span style={{
                                         fontSize: 10, color: "var(--accent)",
-                                        fontFamily: "monospace", flex: 1,
+                                        fontFamily: "var(--mono)", flex: 1,
                                         fontWeight: 600, letterSpacing: ".03em",
                                       }}>
                                         {schemaName}
                                       </span>
-                                      <span style={{
-                                        fontSize: 9, color: "var(--text-disabled)",
-                                        fontFamily: "monospace", flexShrink: 0,
-                                      }}>
+                                      <span style={microMutedLabel}>
                                         {tables.length}
                                       </span>
                                     </div>
@@ -3468,7 +3438,7 @@ function handleCellCommit(
                                         <span style={{
                                           fontSize: 10,
                                           color: "var(--text-tertiary)",
-                                          fontFamily: "monospace",
+                                          fontFamily: "var(--mono)",
                                           textTransform: "uppercase",
                                           letterSpacing: "0.05em",
                                         }}>
@@ -3482,7 +3452,7 @@ function handleCellCommit(
                                           title="Show ER diagram of this connection's tables"
                                           style={{
                                             fontSize: 10,
-                                            fontFamily: "monospace",
+                                            fontFamily: "var(--mono)",
                                             color: showDiagram ? "var(--accent)" : "var(--text-tertiary)",
                                             background: "none",
                                             border: "1px solid var(--border)",
@@ -3540,14 +3510,11 @@ function handleCellCommit(
                                           <span style={{
                                             fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                             overflow: "hidden", textOverflow: "ellipsis",
-                                            whiteSpace: "nowrap", fontFamily: "monospace",
+                                            whiteSpace: "nowrap", fontFamily: "var(--mono)",
                                           }}>
                                             {table.name}
                                           </span>
-                                          <span style={{
-                                            fontSize: 9, color: "var(--text-disabled)",
-                                            fontFamily: "monospace", flexShrink: 0,
-                                          }}>
+                                          <span style={microMutedLabel}>
                                             {table.columns?.length ?? 0}
                                           </span>
                                         </div>
@@ -3571,16 +3538,13 @@ function handleCellCommit(
                                               <span style={{
                                                 fontSize: 11,
                                                 color: col.isPrimaryKey ? "var(--text)" : "var(--text-tertiary)",
-                                                fontFamily: "monospace", flex: 1,
+                                                fontFamily: "var(--mono)", flex: 1,
                                                 overflow: "hidden", textOverflow: "ellipsis",
                                                 whiteSpace: "nowrap",
                                               }}>
                                                 {col.name}
                                               </span>
-                                              <span style={{
-                                                fontSize: 9, color: "var(--text-disabled)",
-                                                fontFamily: "monospace", flexShrink: 0,
-                                              }}>
+                                              <span style={microMutedLabel}>
                                                 {col.dataType}
                                               </span>
                                             </div>
@@ -3632,14 +3596,11 @@ function handleCellCommit(
                                       <span style={{
                                         fontSize: 11, color: "var(--text-secondary)", flex: 1,
                                         overflow: "hidden", textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap", fontFamily: "monospace",
+                                        whiteSpace: "nowrap", fontFamily: "var(--mono)",
                                       }}>
                                         {table.name}
                                       </span>
-                                      <span style={{
-                                        fontSize: 9, color: "var(--text-disabled)",
-                                        fontFamily: "monospace", flexShrink: 0,
-                                      }}>
+                                      <span style={microMutedLabel}>
                                         {table.columns?.length ?? 0}
                                       </span>
                                     </div>
@@ -3662,16 +3623,13 @@ function handleCellCommit(
                                           <span style={{
                                             fontSize: 11,
                                             color: col.isPrimaryKey ? "var(--text)" : "var(--text-tertiary)",
-                                            fontFamily: "monospace", flex: 1,
+                                            fontFamily: "var(--mono)", flex: 1,
                                             overflow: "hidden", textOverflow: "ellipsis",
                                             whiteSpace: "nowrap",
                                           }}>
                                             {col.name}
                                           </span>
-                                          <span style={{
-                                            fontSize: 9, color: "var(--text-disabled)",
-                                            fontFamily: "monospace", flexShrink: 0,
-                                          }}>
+                                          <span style={microMutedLabel}>
                                             {col.dataType}
                                           </span>
                                         </div>
@@ -3710,12 +3668,10 @@ function handleCellCommit(
                                 }}
                               >
                                 <span style={{ fontSize: 10, color: "var(--accent)", flexShrink: 0 }}>ƒ</span>
-                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
-                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                  fontFamily: "monospace" }}>
+                                <span style={ellipsisLabel}>
                                   {proc.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace", flexShrink: 0 }}>
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)", flexShrink: 0 }}>
                                   {proc.parameterCount}p
                                 </span>
                               </div>
@@ -3755,12 +3711,10 @@ function handleCellCommit(
                                   flexShrink: 0 }}>
                                   λ
                                 </span>
-                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
-                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                  fontFamily: "monospace" }}>
+                                <span style={ellipsisLabel}>
                                   {fn.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace", flexShrink: 0 }}>
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)", flexShrink: 0 }}>
                                   {fn.functionType}
                                 </span>
                               </div>
@@ -3801,9 +3755,7 @@ function handleCellCommit(
                                 title="Double-click to query"
                               >
                                 <span style={{ fontSize: 9, color: "var(--info)", flexShrink: 0 }}>◫</span>
-                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
-                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                  fontFamily: "monospace" }}>
+                                <span style={ellipsisLabel}>
                                   {view.name}
                                 </span>
                               </div>
@@ -3836,12 +3788,10 @@ function handleCellCommit(
                                 }}
                               >
                                 <span style={{ fontSize: 9, color: "var(--error)", flexShrink: 0 }}>⚡</span>
-                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
-                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                  fontFamily: "monospace" }}>
+                                <span style={ellipsisLabel}>
                                   {trigger.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace",
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)",
                                   flexShrink: 0, textAlign: "right" }}>
                                   {trigger.timing} {trigger.event}
                                 </span>
@@ -3887,12 +3837,10 @@ function handleCellCommit(
                                   flexShrink: 0 }}>
                                   {idx.isPrimary ? "🔑" : idx.isUnique ? "◈" : "◇"}
                                 </span>
-                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1,
-                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                  fontFamily: "monospace" }}>
+                                <span style={ellipsisLabel}>
                                   {idx.name}
                                 </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "monospace",
+                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)",
                                   flexShrink: 0, maxWidth: 80, overflow: "hidden",
                                   textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                                   title={idx.columns}>
@@ -3981,7 +3929,7 @@ function handleCellCommit(
                     <span style={{
                       fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
                       background: "var(--success-bg)", color: "var(--success)",
-                      textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "monospace",
+                      textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "var(--mono)",
                     }}>
                       {file.type}
                     </span>
@@ -4029,7 +3977,7 @@ function handleCellCommit(
                 : tunnelLoading[activeTab.connection.id]
                 ? "var(--warning)"
                 : "var(--error)"}`,
-              fontSize: 11, fontFamily: "monospace",
+              fontSize: 11, fontFamily: "var(--mono)",
               color: tunnelPorts[activeTab.connection.id]
                 ? "var(--success)"
                 : tunnelLoading[activeTab.connection.id]
@@ -4055,7 +4003,7 @@ function handleCellCommit(
               <span style={{
                 fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 20,
                 background: "var(--success-bg)", color: "var(--success)",
-                textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "monospace",
+                textTransform: "uppercase", letterSpacing: ".05em", fontFamily: "var(--mono)",
               }}>
                 {activeTab.file.type}
               </span>
@@ -4071,7 +4019,7 @@ function handleCellCommit(
               background: activeTab.loading || (!activeTab.connection && !activeTab.file) ? "var(--surface-3)" : "var(--accent)",
               color: "white", border: "none", borderRadius: 6,
               cursor: activeTab.loading || (!activeTab.connection && !activeTab.file) ? "not-allowed" : "pointer",
-              fontSize: 12, fontFamily: "monospace", flexShrink: 0, whiteSpace: "nowrap",
+              fontSize: 12, fontFamily: "var(--mono)", flexShrink: 0, whiteSpace: "nowrap",
             }}
           >
             {activeTab.loading
@@ -4101,7 +4049,7 @@ function handleCellCommit(
                 borderRadius: 6,
                 cursor: "pointer",
                 fontSize: 11,
-                fontFamily: "monospace",
+                fontFamily: "var(--mono)",
                 flexShrink: 0,
                 whiteSpace: "nowrap",
               }}
@@ -4115,7 +4063,7 @@ function handleCellCommit(
               padding: "4px 10px", borderRadius: 6,
               background: "var(--warning-bg)",
               border: "1px solid var(--warning)",
-              fontSize: 11, fontFamily: "monospace",
+              fontSize: 11, fontFamily: "var(--mono)",
               color: "var(--warning)", flexShrink: 0,
             }}
               title="CREATE statements were automatically rewritten to CREATE OR ALTER / CREATE OR REPLACE"
@@ -4137,7 +4085,7 @@ function handleCellCommit(
               borderRadius: 6,
               cursor: "pointer",
               fontSize: 12,
-              fontFamily: "monospace",
+              fontFamily: "var(--mono)",
               flexShrink: 0,
             }}
           >
@@ -4160,7 +4108,7 @@ function handleCellCommit(
               borderRadius: 6,
               cursor: "pointer",
               fontSize: 11,
-              fontFamily: "monospace",
+              fontFamily: "var(--mono)",
               flexShrink: 0,
             }}
           >
@@ -4180,7 +4128,7 @@ function handleCellCommit(
                   borderRadius: 6,
                   cursor: "pointer",
                   fontSize: 12,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                   flexShrink: 0,
                 }}
               >
@@ -4212,16 +4160,7 @@ function handleCellCommit(
                       <button
                         key={format}
                         onClick={() => { exportResults(format); setShowExportMenu(false); }}
-                        style={{
-                          display: "block", width: "100%",
-                          padding: "8px 16px",
-                          background: "none", border: "none",
-                          color: "var(--text)", fontSize: 12,
-                          fontFamily: "monospace", cursor: "pointer",
-                          textAlign: "left",
-                        }}
-                        onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-                        onMouseLeave={e => (e.currentTarget.style.background = "none")}
+                        className="menu-item"
                       >
                         {label}
                       </button>
@@ -4272,7 +4211,7 @@ function handleCellCommit(
         {/* Editor — lazy-loaded so Monaco doesn't block first paint */}
         <div style={{ height: editorHeight, minHeight: editorHeight, maxHeight: editorHeight, borderBottom: "1px solid var(--border)", flexShrink: 0, overflow: "hidden" }}>
           <Suspense fallback={
-            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontFamily: "monospace", fontSize: 13 }}>
+            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--muted)", fontFamily: "var(--mono)", fontSize: 13 }}>
               Loading editor…
             </div>
           }>
@@ -4332,7 +4271,7 @@ function handleCellCommit(
                     color: activeTab.activeResult === i ? "var(--text)" : "var(--text-tertiary)",
                     cursor: "pointer",
                     fontSize: 11,
-                    fontFamily: "monospace",
+                    fontFamily: "var(--mono)",
                     whiteSpace: "nowrap",
                     flexShrink: 0,
                   }}
@@ -4382,7 +4321,7 @@ function handleCellCommit(
                     color: activeTab.activeResult === -1 ? "var(--text)" : "var(--text-tertiary)",
                     cursor: "pointer",
                     fontSize: 11,
-                    fontFamily: "monospace",
+                    fontFamily: "var(--mono)",
                     whiteSpace: "nowrap",
                     flexShrink: 0,
                     display: "flex",
@@ -4398,7 +4337,7 @@ function handleCellCommit(
                       borderRadius: 10,
                       padding: "0 6px",
                       fontSize: 10,
-                      fontFamily: "monospace",
+                      fontFamily: "var(--mono)",
                     }}>
                       {activityRows.length}
                     </span>
@@ -4443,7 +4382,7 @@ function handleCellCommit(
                     color: activeTab.activeResult === -2 ? "var(--text)" : "var(--text-tertiary)",
                     cursor: "pointer",
                     fontSize: 11,
-                    fontFamily: "monospace",
+                    fontFamily: "var(--mono)",
                     whiteSpace: "nowrap",
                     flexShrink: 0,
                     display: "flex",
@@ -4551,7 +4490,7 @@ function handleCellCommit(
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <span style={{ color: "var(--success)", fontSize: 18 }}>✓</span>
                     <span style={{
-                      color: "var(--text-secondary)", fontSize: 13, fontFamily: "monospace",
+                      color: "var(--text-secondary)", fontSize: 13, fontFamily: "var(--mono)",
                     }}>
                       {result.rows[0]?.[0] ?? "Command completed successfully."}
                     </span>
@@ -4559,7 +4498,7 @@ function handleCellCommit(
                   {result.wasRewritten && (
                     <div style={{
                       fontSize: 11, color: "var(--warning)",
-                      fontFamily: "monospace", paddingLeft: 28,
+                      fontFamily: "var(--mono)", paddingLeft: 28,
                     }}>
                       ✦ Automatically rewritten to CREATE OR ALTER / CREATE OR REPLACE
                     </div>

@@ -21,7 +21,7 @@ export function EngineBadge({ engine }: { engine: string }) {
       color,
       textTransform: "uppercase",
       letterSpacing: ".05em",
-      fontFamily: "monospace",
+      fontFamily: "var(--mono)",
       flexShrink: 0,
     }}>
       {engine}

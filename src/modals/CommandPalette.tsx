@@ -7,7 +7,7 @@ export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, 
         <>
           <div
             style={{ position: "fixed", inset: 0, zIndex: 999,
-              background: "rgba(0,0,0,0.4)" }}
+              background: "var(--scrim)" }}
             onClick={() => setShowPalette(false)}
           />
           <div style={{
@@ -58,7 +58,7 @@ export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, 
                   : "1px solid transparent",
                 color: "var(--text)",
                 fontSize: 14,
-                fontFamily: "monospace",
+                fontFamily: "var(--mono)",
                 padding: "14px 18px",
                 outline: "none",
                 width: "100%",
@@ -120,7 +120,7 @@ export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, 
                     <span style={{
                       flex: 1,
                       fontSize: 13,
-                      fontFamily: "monospace",
+                      fontFamily: "var(--mono)",
                       color: i === paletteIndex
                         ? "var(--text)"
                         : "var(--text-secondary)",
@@ -134,7 +134,7 @@ export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, 
                     {item.secondary && (
                       <span style={{
                         fontSize: 11,
-                        fontFamily: "monospace",
+                        fontFamily: "var(--mono)",
                         color: "var(--text-disabled)",
                         flexShrink: 0,
                         maxWidth: 200,
@@ -156,7 +156,7 @@ export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, 
                 padding: "6px 18px",
                 borderTop: "1px solid var(--border)",
                 fontSize: 10,
-                fontFamily: "monospace",
+                fontFamily: "var(--mono)",
                 color: "var(--text-disabled)",
                 display: "flex",
                 gap: 16,

@@ -32,7 +32,7 @@ export function HistoryPanel({
               top: 0,
               background: "var(--surface)",
             }}>
-             <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace" }}>
+             <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--mono)" }}>
                 {activeTab.connection
                   ? `${activeTab.connection.name} — recent queries`
                   : "All recent queries"}
@@ -50,7 +50,7 @@ export function HistoryPanel({
                 }}
                 style={{
                   background: "none", border: "none", color: "var(--text-tertiary)",
-                  cursor: "pointer", fontSize: 11, fontFamily: "monospace",
+                  cursor: "pointer", fontSize: 11, fontFamily: "var(--mono)",
                 }}
               >
                 Clear
@@ -58,7 +58,7 @@ export function HistoryPanel({
             </div>
 
             {history.length === 0 ? (
-              <div style={{ padding: "12px 14px", color: "var(--text-disabled)", fontSize: 12, fontFamily: "monospace" }}>
+              <div style={{ padding: "12px 14px", color: "var(--text-disabled)", fontSize: 12, fontFamily: "var(--mono)" }}>
                 No history yet
               </div>
             ) : (
@@ -81,7 +81,7 @@ export function HistoryPanel({
                   <div style={{
                     fontSize: 11,
                     color: entry.success ? "var(--text-secondary)" : "var(--error)",
-                    fontFamily: "monospace",
+                    fontFamily: "var(--mono)",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
@@ -94,7 +94,7 @@ export function HistoryPanel({
                     gap: 10,
                     fontSize: 10,
                     color: "var(--text-disabled)",
-                    fontFamily: "monospace",
+                    fontFamily: "var(--mono)",
                   }}>
                     <span>{entry.connectionName}</span>
                     <span>{entry.durationMs}ms</span>

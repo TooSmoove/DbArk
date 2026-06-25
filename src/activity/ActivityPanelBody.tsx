@@ -35,7 +35,7 @@ export function ActivityPanelBody({
         padding: "6px 14px",
         borderBottom: "1px solid var(--border)",
         background: "var(--bg)",
-        fontFamily: "monospace", fontSize: 11, flexShrink: 0,
+        fontFamily: "var(--mono)", fontSize: 11, flexShrink: 0,
       }}>
         <span style={{ color: "var(--text-secondary)" }}>
           ⚡ Active queries on this connection — auto-refresh every 5s
@@ -52,7 +52,7 @@ export function ActivityPanelBody({
             border: "1px solid var(--border)",
             borderRadius: 4,
             color: "var(--text-secondary)",
-            fontFamily: "monospace",
+            fontFamily: "var(--mono)",
             fontSize: 10,
             cursor: "pointer",
           }}
@@ -87,7 +87,7 @@ export function ActivityPanelBody({
                 background: "var(--surface-2)",
                 border: "1px solid var(--border)",
                 borderRadius: 4,
-                fontFamily: "monospace", fontSize: 11,
+                fontFamily: "var(--mono)", fontSize: 11,
                 color: "var(--text)",
                 userSelect: "all", whiteSpace: "pre-wrap",
               }}>{grant}</code>
@@ -101,7 +101,7 @@ export function ActivityPanelBody({
           padding: "8px 14px",
           background: "var(--error-bg)",
           color: "var(--error)",
-          fontSize: 11, fontFamily: "monospace",
+          fontSize: 11, fontFamily: "var(--mono)",
           borderBottom: "1px solid var(--error)",
           flexShrink: 0,
         }}>
@@ -131,7 +131,7 @@ export function ActivityPanelBody({
               style={{
                 padding: "8px 14px",
                 borderBottom: "1px solid var(--surface-3)",
-                fontFamily: "monospace", fontSize: 11,
+                fontFamily: "var(--mono)", fontSize: 11,
                 display: "flex", flexDirection: "column", gap: 4,
               }}
             >
@@ -176,7 +176,7 @@ export function ActivityPanelBody({
                     border: "1px solid var(--error)",
                     borderRadius: 3,
                     color: "var(--error)",
-                    fontFamily: "monospace",
+                    fontFamily: "var(--mono)",
                     fontSize: 10,
                     cursor: "pointer",
                   }}
@@ -210,7 +210,7 @@ export function ActivityPanelBody({
       {engine === "cockroachdb" && (
         <div style={{
           padding: "6px 14px",
-          fontSize: 10, fontFamily: "monospace",
+          fontSize: 10, fontFamily: "var(--mono)",
           color: "var(--text-tertiary)",
           borderTop: "1px solid var(--border)",
           flexShrink: 0,

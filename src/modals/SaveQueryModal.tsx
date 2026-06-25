@@ -4,7 +4,7 @@ import type { Dispatch, SetStateAction } from "react";
 export function SaveQueryModal({ saveQueryName, setSaveQueryName, saveQueryTags, setSaveQueryTags, saveQueryDesc, setSaveQueryDesc, handleSaveQuery, setSaveQueryOpen }: { saveQueryName: string; setSaveQueryName: Dispatch<SetStateAction<string>>; saveQueryTags: string; setSaveQueryTags: Dispatch<SetStateAction<string>>; saveQueryDesc: string; setSaveQueryDesc: Dispatch<SetStateAction<string>>; handleSaveQuery: () => void; setSaveQueryOpen: Dispatch<SetStateAction<boolean>> }) {
   return (
         <div style={{
-          position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+          position: "fixed", inset: 0, background: "var(--scrim-strong)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
         }}>
           <div style={{

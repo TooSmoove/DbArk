@@ -4,13 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_SETTINGS } from "../appState";
 import { selectStyle, SettingsSection, SettingsRow } from "../ui";
 import type { AppSettings, ThemePreference } from "../types";
+import { icon14, modalBackdrop } from "../ui/styles";
 
 export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft, themePreference, setThemePreference, setSettings, setAuditLogEnabled }: { setShowSettings: Dispatch<SetStateAction<boolean>>; settingsDraft: AppSettings; setSettingsDraft: Dispatch<SetStateAction<AppSettings>>; themePreference: ThemePreference; setThemePreference: Dispatch<SetStateAction<ThemePreference>>; setSettings: Dispatch<SetStateAction<AppSettings>>; setAuditLogEnabled: Dispatch<SetStateAction<boolean>> }) {
   return (
         <>
           <div
-            style={{ position: "fixed", inset: 0, zIndex: 999,
-              background: "rgba(0,0,0,0.6)" }}
+            style={modalBackdrop}
             onClick={() => setShowSettings(false)}
           />
           <div style={{
@@ -137,7 +137,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                       onChange={e => setSettingsDraft(s => ({
                         ...s, clipboardClearEnabled: e.target.checked
                       }))}
-                      style={{ width: 14, height: 14, cursor: "pointer" }}
+                      style={icon14}
                     />
                     {settingsDraft.clipboardClearEnabled && (
                       <select
@@ -166,7 +166,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                     onChange={e => setSettingsDraft(s => ({
                       ...s, auditLogEnabled: e.target.checked
                     }))}
-                    style={{ width: 14, height: 14, cursor: "pointer" }}
+                    style={icon14}
                   />
                 </SettingsRow>
               </SettingsSection>
@@ -248,7 +248,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                   background: "var(--accent)", color: "white",
                   border: "none", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                 }}
               >
                 Save
@@ -260,7 +260,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                   background: "transparent", color: "var(--text-secondary)",
                   border: "1px solid var(--border)", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                 }}
               >
                 Cancel
@@ -272,7 +272,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                   background: "transparent", color: "var(--text-tertiary)",
                   border: "1px solid var(--border)", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                 }}
               >
                 Reset defaults

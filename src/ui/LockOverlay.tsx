@@ -33,14 +33,14 @@ export function LockOverlay({ setLocked, resetInactivityTimer }: { setLocked: Di
             fontWeight: 700,
             color: "var(--text)",
             marginBottom: 8,
-            fontFamily: "monospace",
+            fontFamily: "var(--mono)",
           }}>
             DbArk is locked
           </div>
           <div style={{
             fontSize: 13,
             color: "var(--text-tertiary)",
-            fontFamily: "monospace",
+            fontFamily: "var(--mono)",
           }}>
             Click anywhere to unlock
           </div>
@@ -48,7 +48,7 @@ export function LockOverlay({ setLocked, resetInactivityTimer }: { setLocked: Di
             marginTop: 32,
             fontSize: 11,
             color: "var(--text-disabled)",
-            fontFamily: "monospace",
+            fontFamily: "var(--mono)",
           }}>
             Locked after 15 minutes of inactivity
           </div>

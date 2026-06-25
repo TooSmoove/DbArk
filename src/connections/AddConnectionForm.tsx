@@ -6,6 +6,7 @@ import { ipc, toIpcError } from "../ipc";
 import type {
   ConnectionConfig,
 } from "../types";
+import { icon14 } from "../ui/styles";
 
 // ---- Add connection form ----------------------------------
 export function AddConnectionForm({
@@ -56,7 +57,7 @@ export function AddConnectionForm({
   const fieldStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", background: "var(--bg)",
     border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)",
-    fontSize: 12, fontFamily: "monospace", marginTop: 3,
+    fontSize: 12, fontFamily: "var(--mono)", marginTop: 3,
     outline: "none", boxSizing: "border-box",
   };
   const labelStyle: React.CSSProperties = {
@@ -242,7 +243,7 @@ export function AddConnectionForm({
               type="checkbox"
               checked={form.windowsAuth}
               onChange={e => setForm(f => ({ ...f, windowsAuth: e.target.checked }))}
-              style={{ width: 14, height: 14, cursor: "pointer" }}
+              style={icon14}
             />
             <div>
               <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 2 }}>Windows Authentication</div>
@@ -259,7 +260,7 @@ export function AddConnectionForm({
         {form.sshEnabled && (
           <span style={{
             marginLeft: 8, fontSize: 10, color: "var(--warning)",
-            fontFamily: "monospace",
+            fontFamily: "var(--mono)",
           }}>
             ⚠ Disabled — SSH tunnel provides encryption
           </span>
@@ -297,7 +298,7 @@ export function AddConnectionForm({
             type="checkbox"
             checked={form.sshEnabled}
             onChange={e => setForm(f => ({ ...f, sshEnabled: e.target.checked }))}
-            style={{ width: 14, height: 14, cursor: "pointer" }}
+            style={icon14}
           />
           <div>
             <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 2 }}>
@@ -363,7 +364,7 @@ export function AddConnectionForm({
                     padding: "6px 10px", background: "var(--surface-2)",
                     border: "1px solid var(--border)", borderRadius: 6,
                     color: "var(--text-secondary)", cursor: "pointer", fontSize: 11,
-                    fontFamily: "monospace", flexShrink: 0,
+                    fontFamily: "var(--mono)", flexShrink: 0,
                   }}
                 >
                   Browse
@@ -392,7 +393,7 @@ export function AddConnectionForm({
           type="checkbox"
           checked={form.readOnly}
           onChange={e => setForm(f => ({ ...f, readOnly: e.target.checked }))}
-          style={{ width: 14, height: 14, cursor: "pointer" }}
+          style={icon14}
         />
         <div>
           <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 2 }}>Read-only connection</div>
@@ -409,7 +410,7 @@ export function AddConnectionForm({
             onChange={e => setForm(f => ({ ...f, color: e.target.value }))}
             style={{ width: 32, height: 28, border: "none", background: "none", cursor: "pointer", flexShrink: 0 }}
           />
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "monospace" }}>{form.color}</span>
+          <span style={{ fontSize: 11, color: "var(--text-tertiary)", fontFamily: "var(--mono)" }}>{form.color}</span>
         </div>
       </label>
 
@@ -458,7 +459,7 @@ export function AddConnectionForm({
             color: testing ? "var(--text-disabled)" : "var(--text-secondary)",
             border: "1px solid var(--border)",
             borderRadius: 6, cursor: testing ? "not-allowed" : "pointer",
-            fontSize: 12, fontFamily: "monospace",
+            fontSize: 12, fontFamily: "var(--mono)",
           }}
         >
           {testing ? "Testing…" : "⚡ Test connection"}
@@ -467,7 +468,7 @@ export function AddConnectionForm({
         {testResult && (
           <div style={{
             marginTop: 6, padding: "6px 10px", borderRadius: 6, fontSize: 11,
-            fontFamily: "monospace",
+            fontFamily: "var(--mono)",
             background: testResult === "success"
               ? "var(--success-bg)" : "var(--error-bg)",
             color: testResult === "success" ? "var(--success)" : "var(--error)",
@@ -483,14 +484,14 @@ export function AddConnectionForm({
         <button onClick={handleSave} disabled={saving} style={{
           flex: 1, padding: "7px 0", background: "var(--accent)", color: "white",
           border: "none", borderRadius: 6, cursor: saving ? "not-allowed" : "pointer",
-          fontSize: 12, fontFamily: "monospace",
+          fontSize: 12, fontFamily: "var(--mono)",
         }}>
           {saving ? "Saving..." : "Save"}
         </button>
         <button onClick={onCancel} style={{
           flex: 1, padding: "7px 0", background: "transparent", color: "var(--text-tertiary)",
           border: "1px solid var(--border)", borderRadius: 6, cursor: "pointer",
-          fontSize: 12, fontFamily: "monospace",
+          fontSize: 12, fontFamily: "var(--mono)",
         }}>
           Cancel
         </button>

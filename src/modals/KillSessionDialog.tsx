@@ -1,13 +1,13 @@
 // Extracted from App.tsx (code-audit item A-1).
 import type { Dispatch, SetStateAction } from "react";
 import type { ActivityRow } from "../types";
+import { modalBackdrop } from "../ui/styles";
 
 export function KillSessionDialog({ killPending, setKillPending, killActivity }: { killPending: ActivityRow; setKillPending: Dispatch<SetStateAction<ActivityRow | null>>; killActivity: (row: ActivityRow) => void }) {
   return (
         <>
           <div
-            style={{ position: "fixed", inset: 0, zIndex: 999,
-              background: "rgba(0,0,0,0.6)" }}
+            style={modalBackdrop}
             onClick={() => setKillPending(null)}
           />
           <div style={{
@@ -39,7 +39,7 @@ export function KillSessionDialog({ killPending, setKillPending, killActivity }:
                 borderRadius: 6,
                 padding: "10px 14px",
                 marginBottom: 20,
-                fontFamily: "monospace",
+                fontFamily: "var(--mono)",
                 fontSize: 11,
                 color: "var(--text)",
                 maxHeight: 120,
@@ -62,7 +62,7 @@ export function KillSessionDialog({ killPending, setKillPending, killActivity }:
                   background: "var(--error)", color: "white",
                   border: "none", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
-                  fontFamily: "monospace", fontWeight: 600,
+                  fontFamily: "var(--mono)", fontWeight: 600,
                 }}
               >
                 Kill session
@@ -74,7 +74,7 @@ export function KillSessionDialog({ killPending, setKillPending, killActivity }:
                   background: "transparent", color: "var(--text-secondary)",
                   border: "1px solid var(--border)", borderRadius: 6,
                   cursor: "pointer", fontSize: 12,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                 }}
               >
                 Cancel

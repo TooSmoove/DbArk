@@ -8,7 +8,7 @@ export function SettingsSection({
     <div style={{ marginBottom: 24 }}>
       <div style={{
         fontSize: 10, fontWeight: 600, color: "var(--text-disabled)",
-        fontFamily: "monospace", textTransform: "uppercase",
+        fontFamily: "var(--mono)", textTransform: "uppercase",
         letterSpacing: ".08em", marginBottom: 12,
         paddingBottom: 6, borderBottom: "1px solid var(--border)",
       }}>

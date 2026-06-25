@@ -53,7 +53,7 @@ export default function SqlEditor({
         scrollBeyondLastLine: false,
         lineNumbers: "on",
         renderLineHighlight: "line",
-        fontFamily: "monospace",
+        fontFamily: "var(--mono)",
         padding: { top: 12 },
         wordWrap: "on",
       }}

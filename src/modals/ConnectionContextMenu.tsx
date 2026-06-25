@@ -36,14 +36,7 @@ export function ConnectionContextMenu({
                 setShowAddForm(true);
                 setContextMenu(null);
               }}
-              style={{
-                display: "block", width: "100%", padding: "8px 16px",
-                background: "none", border: "none", color: "var(--text)",
-                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
-                textAlign: "left",
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              className="menu-item"
             >
               ✏️ Edit connection
             </button>
@@ -52,14 +45,7 @@ export function ConnectionContextMenu({
                 setDeletingConnection(contextMenu.connection);
                 setContextMenu(null);
               }}
-              style={{
-                display: "block", width: "100%", padding: "8px 16px",
-                background: "none", border: "none", color: "var(--error)",
-                fontSize: 12, fontFamily: "monospace", cursor: "pointer",
-                textAlign: "left",
-              }}
-              onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-3)")}
-              onMouseLeave={e => (e.currentTarget.style.background = "none")}
+              className="menu-item menu-item--danger"
             >
               🗑️ Delete connection
             </button>

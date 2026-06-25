@@ -81,7 +81,7 @@ export function TabBar({
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
                 flex: 1,
-                fontFamily: "monospace",
+                fontFamily: "var(--mono)",
               }}>
                 {tab.title}
               </span>

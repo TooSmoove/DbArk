@@ -69,7 +69,7 @@ export function JoinTablesPanel({
   return (
     <div style={{ borderBottom: "1px solid var(--border)", background: "var(--surface)", padding: "10px 12px" }}>
       {/* Framing line — names the `data` alias the file is queryable as. */}
-      <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, fontFamily: "monospace" }}>
+      <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: 0, fontFamily: "var(--mono)" }}>
         Querying <strong style={{ color: "var(--text)" }}>{fileName}</strong> as{" "}
         <code style={{ color: "var(--accent)", background: "var(--accent-bg)", padding: "1px 5px", borderRadius: 3 }}>data</code>
       </p>

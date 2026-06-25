@@ -21,7 +21,7 @@ function PlanTreeRenderer({
       flex: 1,
       overflow: "auto",
       padding: "12px 16px",
-      fontFamily: "monospace",
+      fontFamily: "var(--mono)",
       fontSize: 12,
     }}>
       <div style={{
@@ -129,7 +129,7 @@ function PlanNodeView({
                 <span style={{
                   color: "var(--text-secondary)",
                   wordBreak: "break-all",
-                  fontFamily: "monospace",
+                  fontFamily: "var(--mono)",
                 }}>
                   {v}
                 </span>
@@ -205,13 +205,13 @@ export function PlanResultRenderer({ result }: { result: QueryResult }) {
           color: "var(--text-tertiary)",
           fontSize: 11,
           marginBottom: 8,
-          fontFamily: "monospace",
+          fontFamily: "var(--mono)",
         }}>
           Execution plan (cockroachdb) — server-formatted text output.
         </div>
         <pre style={{
           fontSize: 12,
-          fontFamily: "monospace",
+          fontFamily: "var(--mono)",
           color: "var(--text-secondary)",
           whiteSpace: "pre",
           margin: 0,
@@ -244,13 +244,13 @@ export function PlanResultRenderer({ result }: { result: QueryResult }) {
         color: "var(--text-tertiary)",
         fontSize: 11,
         marginBottom: 8,
-        fontFamily: "monospace",
+        fontFamily: "var(--mono)",
       }}>
         Execution plan ({engine}) — tree rendering failed, raw output below.
       </div>
       <pre style={{
         fontSize: 11,
-        fontFamily: "monospace",
+        fontFamily: "var(--mono)",
         color: "var(--text-secondary)",
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
