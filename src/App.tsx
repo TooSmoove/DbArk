@@ -25,10 +25,6 @@ import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } fro
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
 
-// Monaco is code-split into SqlEditor.tsx and loaded lazily AFTER first paint,
-// so the large Monaco bundle no longer blocks initial render. Do NOT statically
-// import "monaco-editor" or "@monaco-editor/react" (value) anywhere in this file
-// or Monaco gets pulled back into the main bundle.
 const SqlEditor = lazy(() => import("./components/SqlEditor/SqlEditor"));
 import { format as formatSql } from "sql-formatter";
 import Fuse from "fuse.js";
@@ -36,71 +32,6 @@ import "./theme.css";   // colors — must come first
 import "./index.css";   // typography & layout
 import { ErDiagram } from "./components/ErDiagram/ErDiagram";
 import { ellipsisLabel, microMutedLabel } from "./ui/styles";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ── Execution plan: SQL wrapping ────────────────────────────────────────────
-// When the "Include Execution Plan" toggle is on, runQuery routes the user's
-// SQL through wrapPlanSql() first. Each engine has its own EXPLAIN dialect;
-// the wrapper returns the prefix that produces a single result row containing
-// the plan in its native serialised form (JSON for Postgres/MySQL, XML for
-// SQL Server, tabular for SQLite).
-//
-// The wrapper is conservative: only wraps SELECT statements. Wrapping a DDL
-// statement (CREATE TABLE, etc) or a non-data statement is either an error
-// (SHOWPLAN_XML doesn't work on most DDL) or actively dangerous (EXPLAIN
-// ANALYZE on an UPDATE actually mutates data). Easier and safer to require
-// the user to write SELECTs when plan mode is on.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ── Activity panel body ─────────────────────────────────────────────────────
-// Pure presentation: takes already-loaded rows and emits a row-per-query.
-// Polling, loading-state management, and kill-execution all live in App();
-// this component just renders what it's handed and emits user intent
-// (refresh request, kill request) back up through callbacks.
-// ── Execution plan parsers ──────────────────────────────────────────────────
-// One parser per engine, all returning the normalised PlanNode shape so the
-// renderer doesn't need engine-specific branches. Session 1 ships Postgres;
-// session 2 adds SQL Server XML and MySQL JSON.
-
-
-
-
-
-
 
 // ---- Main App ---------------------------------------------
 function App() {
@@ -130,10 +61,7 @@ function App() {
   const [connectionsFolder, setConnectionsFolder] = useState("");
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
-  // Database list for the currently-active connection. Only the active
-  // connection renders its tree (see the sidebar), so a single list here is
-  // enough — switching connections refetches. dbListCache memoises per
-  // connection id so re-selecting a connection is instant.
+  // Database list for the currently-active connection.
   const [databases, setDatabases] = useState<string[]>([]);
   const [databasesLoading, setDatabasesLoading] = useState(false);
   const dbListCache = useRef<Map<string, string[]>>(new Map());
