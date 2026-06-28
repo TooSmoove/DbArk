@@ -15,13 +15,15 @@ import {
   ConnectionContextMenu,
 } from "./modals";
 import { createTab, DEFAULT_SETTINGS } from "./appState";
+import { tabsReducer, initTabsState } from "./state/tabsReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
 import { ResultsGrid } from "./results/ResultsGrid";
 import { ActivityPanelBody } from "./activity/ActivityPanelBody";
 import { TabBar, HistoryPanel } from "./editor";
-import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
+import { useState, useReducer, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
 
@@ -34,81 +36,29 @@ import { format as formatSql } from "sql-formatter";
 import Fuse from "fuse.js";
 import "./theme.css";   // colors — must come first
 import "./index.css";   // typography & layout
+import "./App.css";     // component classes (.menu-item, etc.)
 import { ErDiagram } from "./components/ErDiagram/ErDiagram";
 import { ellipsisLabel, microMutedLabel } from "./ui/styles";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ── Execution plan: SQL wrapping ────────────────────────────────────────────
-// When the "Include Execution Plan" toggle is on, runQuery routes the user's
-// SQL through wrapPlanSql() first. Each engine has its own EXPLAIN dialect;
-// the wrapper returns the prefix that produces a single result row containing
-// the plan in its native serialised form (JSON for Postgres/MySQL, XML for
-// SQL Server, tabular for SQLite).
-//
-// The wrapper is conservative: only wraps SELECT statements. Wrapping a DDL
-// statement (CREATE TABLE, etc) or a non-data statement is either an error
-// (SHOWPLAN_XML doesn't work on most DDL) or actively dangerous (EXPLAIN
-// ANALYZE on an UPDATE actually mutates data). Easier and safer to require
-// the user to write SELECTs when plan mode is on.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ── Activity panel body ─────────────────────────────────────────────────────
-// Pure presentation: takes already-loaded rows and emits a row-per-query.
-// Polling, loading-state management, and kill-execution all live in App();
-// this component just renders what it's handed and emits user intent
-// (refresh request, kill request) back up through callbacks.
-// ── Execution plan parsers ──────────────────────────────────────────────────
-// One parser per engine, all returning the normalised PlanNode shape so the
-// renderer doesn't need engine-specific branches. Session 1 ships Postgres;
-// session 2 adds SQL Server XML and MySQL JSON.
-
-
-
-
-
-
 
 // ---- Main App ---------------------------------------------
 function App() {
   const editorRef = useRef<any>(null);
 
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
-  const [tabs, setTabs] = useState<Tab[]>([createTab("tab-1")]);
-  const [activeTabId, setActiveTabId] = useState("tab-1");
+  // Tab state lives in a pure, unit-tested reducer (code-audit A-1, Tier 3).
+  // The wrapper setters below keep every existing call site + child prop
+  // working unchanged; they route through the tested APPLY_* passthrough
+  // actions. Call sites are migrated to semantic actions incrementally.
+  const [tabsState, dispatchTabs] = useReducer(tabsReducer, undefined, initTabsState);
+  const { tabs, activeTabId } = tabsState;
+  const setTabs = useCallback<Dispatch<SetStateAction<Tab[]>>>(
+    updater => dispatchTabs({ type: "APPLY_TABS", updater }),
+    [],
+  );
+  const setActiveTabId = useCallback<Dispatch<SetStateAction<string>>>(
+    updater => dispatchTabs({ type: "APPLY_ACTIVE", updater }),
+    [],
+  );
   const [recentFiles, setRecentFiles] = useState<FileSession[]>([]);
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
   const [sidebarWidth, setSidebarWidth] = useState(220);
@@ -190,6 +140,7 @@ function App() {
   const [showQueryLibrary, setShowQueryLibrary] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTabRef = useRef<Tab>(activeTab);
+  const tabsRef = useRef<Tab[]>(tabs);
   const settingsRef  = useRef<AppSettings>(settings); 
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
   const formatSqlRef = useRef<() => void>(() => {});
@@ -199,28 +150,14 @@ function App() {
   // Toggle one live table in/out of the join set (checkbox path: attach or
   // detach without touching the editor text).
   const handleToggleJoinTable = useCallback((table: string, next: boolean) => {
-    setTabs(prev => prev.map(t => {
-      if (t.id !== activeTabId) return t;
-      const has = t.joinTables.includes(table);
-      if (next === has) return t;
-      return {
-        ...t,
-        joinTables: next
-          ? [...t.joinTables, table]
-          : t.joinTables.filter(x => x !== table),
-      };
-    }));
+    dispatchTabs({ type: "TOGGLE_JOIN_TABLE", id: activeTabId, table, attach: next });
   }, [activeTabId]);
 
   // Click-to-insert: drop db_<table> at the cursor AND ensure the table is
   // attached, so the identifier you just inserted is always one the query
   // engine actually exposes (no "db_x does not exist" surprise).
   const handleInsertJoinTable = useCallback((table: string) => {
-    setTabs(prev => prev.map(t =>
-      t.id === activeTabId && !t.joinTables.includes(table)
-        ? { ...t, joinTables: [...t.joinTables, table] }
-        : t
-    ));
+    dispatchTabs({ type: "TOGGLE_JOIN_TABLE", id: activeTabId, table, attach: true });
     const editor = editorRef.current;
     if (editor) {
       const sel = editor.getSelection();
@@ -370,6 +307,7 @@ function App() {
   }, []);
 
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+  useEffect(() => { tabsRef.current = tabs; }, [tabs]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   // Sidebar resize
@@ -715,9 +653,7 @@ function App() {
   
   // Update active tab helper
   function updateActiveTab(updates: Partial<Tab>) {
-    setTabs(prev => prev.map(t =>
-      t.id === activeTabId ? { ...t, ...updates } : t
-    ));
+    dispatchTabs({ type: "UPDATE_ACTIVE_TAB", updates });
   }
 
   // ---- Inactivity lock --------------------------------------
@@ -1626,8 +1562,9 @@ function App() {
         const currentSql = editorRef.current?.getValue() ?? "";
         const newTab = createTab();
         setTabs(prev => {
+          const activeId = activeTabRef.current.id;
           const updated = prev.map(t =>
-            t.id === editorRef.current ? { ...t, sql: currentSql } : t
+            t.id === activeId ? { ...t, sql: currentSql } : t
           );
           return [...updated, newTab];
         });
@@ -1637,20 +1574,23 @@ function App() {
 
       // Cmd+W — close tab
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
+        // Read the latest tabs from a ref — this callback is registered once at
+        // mount, so a captured `tabs` would be stale. Computing here (rather
+        // than inside the setTabs updater) keeps setActiveTabId out of the
+        // reducer's update phase, avoiding a dispatch-during-render.
+        const prev = tabsRef.current;
+        if (prev.length <= 1) return;
         const currentSql = editorRef.current?.getValue() ?? "";
-        setTabs(prev => {
-          if (prev.length <= 1) return prev;
-          const idx = prev.findIndex(t => t.id === editorRef.current);
-          // Save current SQL then remove current tab
-          const updated = prev.map(t =>
-            t.id === editorRef.current ? { ...t, sql: currentSql } : t
-          );
-          const newTabs = updated.filter(t => t.id !== editorRef.current);
-          const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
-          setActiveTabId(nextTab.id);
-          setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
-          return newTabs;
-        });
+        const activeId = activeTabRef.current.id;
+        const idx = prev.findIndex(t => t.id === activeId);
+        // Save current SQL into the active tab, then remove it.
+        const newTabs = prev
+          .map(t => (t.id === activeId ? { ...t, sql: currentSql } : t))
+          .filter(t => t.id !== activeId);
+        const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
+        setTabs(newTabs);
+        setActiveTabId(nextTab.id);
+        setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
       });
 
       // Ctrl+Shift+D / Cmd+Shift+D — toggle Diagram panel
@@ -1715,7 +1655,7 @@ function App() {
       if (sqlSaveTimer.current) clearTimeout(sqlSaveTimer.current);
       sqlSaveTimer.current = setTimeout(() => {
         setTabs(prev => prev.map(t =>
-          t.id === editorRef.current ? { ...t, sql } : t
+          t.id === activeTabRef.current.id ? { ...t, sql } : t
         ));
       }, 300);
     });
