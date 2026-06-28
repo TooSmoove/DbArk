@@ -27,10 +27,6 @@ import type { Dispatch, SetStateAction } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
 
-// Monaco is code-split into SqlEditor.tsx and loaded lazily AFTER first paint,
-// so the large Monaco bundle no longer blocks initial render. Do NOT statically
-// import "monaco-editor" or "@monaco-editor/react" (value) anywhere in this file
-// or Monaco gets pulled back into the main bundle.
 const SqlEditor = lazy(() => import("./components/SqlEditor/SqlEditor"));
 import { format as formatSql } from "sql-formatter";
 import Fuse from "fuse.js";
@@ -80,10 +76,7 @@ function App() {
   const [connectionsFolder, setConnectionsFolder] = useState("");
   const [schema, setSchema] = useState<SchemaResult | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
-  // Database list for the currently-active connection. Only the active
-  // connection renders its tree (see the sidebar), so a single list here is
-  // enough — switching connections refetches. dbListCache memoises per
-  // connection id so re-selecting a connection is instant.
+  // Database list for the currently-active connection.
   const [databases, setDatabases] = useState<string[]>([]);
   const [databasesLoading, setDatabasesLoading] = useState(false);
   const dbListCache = useRef<Map<string, string[]>>(new Map());
