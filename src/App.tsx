@@ -23,7 +23,6 @@ import { ResultsGrid } from "./results/ResultsGrid";
 import { ActivityPanelBody } from "./activity/ActivityPanelBody";
 import { TabBar, HistoryPanel } from "./editor";
 import { useState, useReducer, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
-import type { Dispatch, SetStateAction } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
 
@@ -47,14 +46,6 @@ function App() {
   // actions. Call sites are migrated to semantic actions incrementally.
   const [tabsState, dispatchTabs] = useReducer(tabsReducer, undefined, initTabsState);
   const { tabs, activeTabId } = tabsState;
-  const setTabs = useCallback<Dispatch<SetStateAction<Tab[]>>>(
-    updater => dispatchTabs({ type: "APPLY_TABS", updater }),
-    [],
-  );
-  const setActiveTabId = useCallback<Dispatch<SetStateAction<string>>>(
-    updater => dispatchTabs({ type: "APPLY_ACTIVE", updater }),
-    [],
-  );
   const [recentFiles, setRecentFiles] = useState<FileSession[]>([]);
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
   const [sidebarWidth, setSidebarWidth] = useState(220);
@@ -573,17 +564,23 @@ function App() {
       if (parsed.connections?.length > 0) {
         const currentConn = activeTabRef.current.connection;
         
-        setTabs(prev => prev.map(tab => {
-          if (!tab.connection) return tab;
+        // Cache purges are side effects — run them here, then let the reducer
+        // repoint tabs purely. Read the latest tabs from the ref.
+        let refreshedAny = false;
+        for (const tab of tabsRef.current) {
+          if (!tab.connection) continue;
           const fresh = parsed.connections.find(c => c.id === tab.connection!.id);
           if (fresh) {
             purgeSchemaCache(fresh.id);
             dbListCache.current.delete(fresh.id);
-            setExpandedSchemas(new Set(["public"]));
-            return { ...tab, connection: fresh, error: null, results: [], activeResult: 0 };
+            refreshedAny = true;
           }
-          return tab;
-        }));
+        }
+        if (refreshedAny) setExpandedSchemas(new Set(["public"]));
+        dispatchTabs({
+          type: "REFRESH_CONNECTIONS",
+          freshById: new Map(parsed.connections.map(c => [c.id, c] as [string, ConnectionConfig])),
+        });
 
         // If active tab's connection was refreshed, reload schema
         if (currentConn) {
@@ -1546,35 +1543,24 @@ function App() {
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT, () => {
         const currentSql = editorRef.current?.getValue() ?? "";
         const newTab = createTab();
-        setTabs(prev => {
-          const activeId = activeTabRef.current.id;
-          const updated = prev.map(t =>
-            t.id === activeId ? { ...t, sql: currentSql } : t
-          );
-          return [...updated, newTab];
-        });
-        setActiveTabId(newTab.id);
+        dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabRef.current.id, saveSql: currentSql });
         setTimeout(() => editorRef.current?.setValue(""), 0);
       });
 
       // Cmd+W — close tab
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW, () => {
         // Read the latest tabs from a ref — this callback is registered once at
-        // mount, so a captured `tabs` would be stale. Computing here (rather
-        // than inside the setTabs updater) keeps setActiveTabId out of the
-        // reducer's update phase, avoiding a dispatch-during-render.
+        // mount, so a captured `tabs` would be stale. We compute the next tab
+        // for editor sync here, then let the reducer's CLOSE action perform the
+        // save + remove + reselect.
         const prev = tabsRef.current;
         if (prev.length <= 1) return;
         const currentSql = editorRef.current?.getValue() ?? "";
         const activeId = activeTabRef.current.id;
         const idx = prev.findIndex(t => t.id === activeId);
-        // Save current SQL into the active tab, then remove it.
-        const newTabs = prev
-          .map(t => (t.id === activeId ? { ...t, sql: currentSql } : t))
-          .filter(t => t.id !== activeId);
-        const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
-        setTabs(newTabs);
-        setActiveTabId(nextTab.id);
+        const remaining = prev.filter(t => t.id !== activeId);
+        const nextTab = remaining[Math.min(idx, remaining.length - 1)];
+        dispatchTabs({ type: "CLOSE", closeId: activeId, saveSql: currentSql });
         setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
       });
 
@@ -1639,9 +1625,7 @@ function App() {
       const sql = editor.getValue();
       if (sqlSaveTimer.current) clearTimeout(sqlSaveTimer.current);
       sqlSaveTimer.current = setTimeout(() => {
-        setTabs(prev => prev.map(t =>
-          t.id === activeTabRef.current.id ? { ...t, sql } : t
-        ));
+        dispatchTabs({ type: "UPDATE_ACTIVE_TAB", updates: { sql } });
       }, 300);
     });
   };
@@ -2829,7 +2813,7 @@ function handleCellCommit(
         </>
       )}
       {/* END Schema object context menu */}
-      {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} setDeletingConnection={setDeletingConnection} setTabs={setTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
+      {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} setDeletingConnection={setDeletingConnection} dispatchTabs={dispatchTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
       {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} setDropConfirm={setDropConfirm} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} setSchema={setSchema} setExpandedTables={setExpandedTables} setExpandedSections={setExpandedSections} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
       {killPending && <KillSessionDialog killPending={killPending} setKillPending={setKillPending} killActivity={killActivity} />}
 
@@ -3864,7 +3848,7 @@ function handleCellCommit(
       {/* Main content */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
 
-        <TabBar tabs={tabs} setTabs={setTabs} activeTabId={activeTabId} setActiveTabId={setActiveTabId} editorRef={editorRef} />
+        <TabBar tabs={tabs} activeTabId={activeTabId} dispatchTabs={dispatchTabs} editorRef={editorRef} />
 
         {/* Toolbar */}
         <div style={{

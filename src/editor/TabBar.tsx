@@ -1,17 +1,17 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { Dispatch, RefObject } from "react";
 import type { Tab } from "../types";
+import type { TabsAction } from "../state/tabsReducer";
 import { createTab } from "../appState";
 
 type EditorHandle = { getValue: () => string; setValue: (value: string) => void };
 
 export function TabBar({
-  tabs, setTabs, activeTabId, setActiveTabId, editorRef,
+  tabs, activeTabId, dispatchTabs, editorRef,
 }: {
   tabs: Tab[];
-  setTabs: Dispatch<SetStateAction<Tab[]>>;
   activeTabId: string;
-  setActiveTabId: Dispatch<SetStateAction<string>>;
+  dispatchTabs: Dispatch<TabsAction>;
   editorRef: RefObject<EditorHandle | null>;
 }) {
   return (
@@ -30,18 +30,13 @@ export function TabBar({
               onClick={() => {
                 if (tab.id === activeTabId) return; // already active
 
-                // Save current editor content to current tab
+                // Save current editor content to the active tab, switch, then
+                // load the target tab's SQL into the editor.
                 const currentSql = editorRef.current?.getValue() ?? "";
-                setTabs(prev => {
-                  const updated = prev.map(t =>
-                    t.id === activeTabId ? { ...t, sql: currentSql } : t
-                  );
-                  // Find the target tab's SQL from the updated array
-                  const targetTab = updated.find(t => t.id === tab.id);
-                  setTimeout(() => editorRef.current?.setValue(targetTab?.sql ?? ""), 0);
-                  return updated;
-                });
-                setActiveTabId(tab.id);
+                const targetSql = tabs.find(t => t.id === tab.id)?.sql ?? "";
+                dispatchTabs({ type: "UPDATE_TAB", id: activeTabId, updates: { sql: currentSql } });
+                dispatchTabs({ type: "SET_ACTIVE", id: tab.id });
+                setTimeout(() => editorRef.current?.setValue(targetSql), 0);
               }}
               style={{
                 display: "flex",
@@ -92,19 +87,19 @@ export function TabBar({
                   onClick={(e) => {
                     e.stopPropagation();
                     const currentSql = editorRef.current?.getValue() ?? "";
-                    const idx = tabs.findIndex(t => t.id === tab.id);
-                    setTabs(prev => {
-                      const updated = prev.map(t =>
-                        t.id === activeTabId ? { ...t, sql: currentSql } : t
-                      );
-                      const newTabs = updated.filter(t => t.id !== tab.id);
-                      if (tab.id === activeTabId) {
-                        const nextTab = newTabs[Math.min(idx, newTabs.length - 1)];
-                        setActiveTabId(nextTab.id);
-                        setTimeout(() => editorRef.current?.setValue(nextTab.sql ?? ""), 0);
-                      }
-                      return newTabs;
-                    });
+                    const closingActive = tab.id === activeTabId;
+                    // If closing the active tab, work out which tab the reducer
+                    // will select so we can load its SQL into the editor.
+                    let nextSql = "";
+                    if (closingActive) {
+                      const idx = tabs.findIndex(t => t.id === tab.id);
+                      const remaining = tabs.filter(t => t.id !== tab.id);
+                      nextSql = remaining[Math.min(idx, remaining.length - 1)]?.sql ?? "";
+                    }
+                    dispatchTabs({ type: "CLOSE", closeId: tab.id, saveSql: currentSql });
+                    if (closingActive) {
+                      setTimeout(() => editorRef.current?.setValue(nextSql), 0);
+                    }
                   }}
                   style={{
                     background: "none", border: "none",
@@ -128,13 +123,7 @@ export function TabBar({
               // Save current editor content before creating new tab
               const currentSql = editorRef.current?.getValue() ?? "";
               const newTab = createTab();
-              setTabs(prev => {
-                const updated = prev.map(t =>
-                  t.id === activeTabId ? { ...t, sql: currentSql } : t
-                );
-                return [...updated, newTab];
-              });
-              setActiveTabId(newTab.id);
+              dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabId, saveSql: currentSql });
               setTimeout(() => editorRef.current?.setValue(""), 0);
             }}
             style={{

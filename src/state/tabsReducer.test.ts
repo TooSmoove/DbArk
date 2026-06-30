@@ -123,24 +123,43 @@ describe("TOGGLE_JOIN_TABLE", () => {
   });
 });
 
-describe("APPLY_TABS / APPLY_ACTIVE (useState-compatible passthroughs)", () => {
-  it("APPLY_TABS accepts a plain value", () => {
-    const s = state([tab("a")]);
-    const next = tabsReducer(s, { type: "APPLY_TABS", updater: [tab("a"), tab("b")] });
-    expect(next.tabs.map(t => t.id)).toEqual(["a", "b"]);
+describe("CLEAR_CONNECTION", () => {
+  it("detaches the deleted connection and resets title; leaves others", () => {
+    const c1 = { id: "c1", name: "Prod", color: "#f00" } as Tab["connection"];
+    const c2 = { id: "c2", name: "Stg", color: "#0f0" } as Tab["connection"];
+    const s = state([
+      tab("a", { connection: c1, title: "report.sql" }),
+      tab("b", { connection: c2, title: "other.sql" }),
+      tab("c", { connection: null, title: "New tab" }),
+    ]);
+    const next = tabsReducer(s, { type: "CLEAR_CONNECTION", connectionId: "c1" });
+    expect(next.tabs[0].connection).toBeNull();
+    expect(next.tabs[0].title).toBe("New tab");
+    expect(next.tabs[1].connection!.id).toBe("c2"); // untouched
+    expect(next.tabs[1].title).toBe("other.sql");
+    expect(next.tabs[2]).toBe(s.tabs[2]); // unconnected tab returned as-is
   });
-  it("APPLY_TABS accepts an updater function (prev => next)", () => {
-    const s = state([tab("a"), tab("b")]);
+});
+
+describe("REFRESH_CONNECTIONS", () => {
+  it("repoints to fresh connection + resets result state; skips unconnected/absent", () => {
+    const old = { id: "c1", name: "old", color: "#000" } as Tab["connection"];
+    const fresh = { id: "c1", name: "renamed", color: "#fff" } as NonNullable<Tab["connection"]>;
+    const s = state([
+      tab("a", { connection: old, error: "boom", activeResult: 3 }),
+      tab("b", { connection: null }),
+      tab("c", { connection: { id: "gone", name: "x", color: "#1" } as Tab["connection"] }),
+    ]);
     const next = tabsReducer(s, {
-      type: "APPLY_TABS",
-      updater: prev => prev.filter(t => t.id !== "a"),
+      type: "REFRESH_CONNECTIONS",
+      freshById: new Map([["c1", fresh]]),
     });
-    expect(next.tabs.map(t => t.id)).toEqual(["b"]);
-  });
-  it("APPLY_ACTIVE accepts a value and an updater", () => {
-    const s = state([tab("a"), tab("b")], "a");
-    expect(tabsReducer(s, { type: "APPLY_ACTIVE", updater: "b" }).activeTabId).toBe("b");
-    expect(tabsReducer(s, { type: "APPLY_ACTIVE", updater: () => "b" }).activeTabId).toBe("b");
+    expect(next.tabs[0].connection!.name).toBe("renamed");
+    expect(next.tabs[0].error).toBeNull();
+    expect(next.tabs[0].results).toEqual([]);
+    expect(next.tabs[0].activeResult).toBe(0);
+    expect(next.tabs[1].connection).toBeNull();      // unconnected untouched
+    expect(next.tabs[2].connection!.id).toBe("gone"); // absent from map untouched
   });
 });
 

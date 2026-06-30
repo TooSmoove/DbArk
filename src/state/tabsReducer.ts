@@ -5,17 +5,8 @@
 // unit-tested without a DOM. Side effects (reading/writing the Monaco editor,
 // timers, cache purges) stay in the component — this file only computes the
 // next { tabs, activeTabId } from the current state + an action.
-//
-// Faithful-migration note: the previous inline code in App.tsx matched the
-// "current" tab with `t.id === editorRef.current` in a few places (Cmd+T,
-// Cmd+W, the debounced autosave). `editorRef.current` is the editor *object*,
-// so that comparison is always false — a pre-existing bug (Cmd+W never closes,
-// autosave never writes). This reducer does NOT bake that bug in: callers pass
-// an explicit id. To preserve the exact old behavior at those specific call
-// sites, the caller can pass a non-matching id; to fix the bug, pass the real
-// active id. See the wiring in App.tsx.
 // ─────────────────────────────────────────────────────────────────────────
-import type { Tab } from "../types";
+import type { Tab, ConnectionConfig } from "../types";
 import { createTab } from "../appState";
 
 export interface TabsState {
@@ -43,15 +34,14 @@ export type TabsAction =
   | { type: "CLOSE"; closeId: string; saveSql?: string }
   /** Attach/detach a live join table on the tab `id`. */
   | { type: "TOGGLE_JOIN_TABLE"; id: string; table: string; attach: boolean }
+  /** Detach a deleted connection from every tab that referenced it. */
+  | { type: "CLEAR_CONNECTION"; connectionId: string }
   /**
-   * Backward-compatible passthroughs that let a useState-style setter sit on
-   * top of the reducer (value or updater function). These exist so call sites
-   * that haven't been migrated to a semantic action yet keep working unchanged
-   * during the incremental migration. New code should prefer the semantic
-   * actions above.
+   * Re-point each tab to the fresh copy of its connection (after the list
+   * reloads), resetting that tab's transient result state. Tabs with no
+   * connection, or whose connection is absent from `freshById`, are untouched.
    */
-  | { type: "APPLY_TABS"; updater: Tab[] | ((prev: Tab[]) => Tab[]) }
-  | { type: "APPLY_ACTIVE"; updater: string | ((prev: string) => string) };
+  | { type: "REFRESH_CONNECTIONS"; freshById: Map<string, ConnectionConfig> };
 
 function mapTab(tabs: Tab[], id: string, fn: (t: Tab) => Tab): Tab[] {
   return tabs.map(t => (t.id === id ? fn(t) : t));
@@ -114,19 +104,27 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
         }),
       };
 
-    case "APPLY_TABS": {
-      const tabs = typeof action.updater === "function"
-        ? action.updater(state.tabs)
-        : action.updater;
-      return { ...state, tabs };
-    }
+    case "CLEAR_CONNECTION":
+      return {
+        ...state,
+        tabs: state.tabs.map(t =>
+          t.connection?.id === action.connectionId
+            ? { ...t, connection: null, title: "New tab" }
+            : t
+        ),
+      };
 
-    case "APPLY_ACTIVE": {
-      const activeTabId = typeof action.updater === "function"
-        ? action.updater(state.activeTabId)
-        : action.updater;
-      return { ...state, activeTabId };
-    }
+    case "REFRESH_CONNECTIONS":
+      return {
+        ...state,
+        tabs: state.tabs.map(t => {
+          if (!t.connection) return t;
+          const fresh = action.freshById.get(t.connection.id);
+          return fresh
+            ? { ...t, connection: fresh, error: null, results: [], activeResult: 0 }
+            : t;
+        }),
+      };
 
     default: {
       // Exhaustiveness guard — a new action type without a case fails the build.

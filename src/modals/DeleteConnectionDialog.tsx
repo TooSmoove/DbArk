@@ -1,10 +1,11 @@
 // Extracted from App.tsx (code-audit item A-1).
 import type { Dispatch, SetStateAction } from "react";
 import { ipc, toIpcError } from "../ipc";
-import type { ConnectionConfig, Tab } from "../types";
+import type { ConnectionConfig } from "../types";
+import type { TabsAction } from "../state/tabsReducer";
 import { modalBackdrop } from "../ui/styles";
 
-export function DeleteConnectionDialog({ deletingConnection, setDeletingConnection, setTabs, loadConnections, connectionsFolder }: { deletingConnection: ConnectionConfig; setDeletingConnection: Dispatch<SetStateAction<ConnectionConfig | null>>; setTabs: Dispatch<SetStateAction<Tab[]>>; loadConnections: (folder: string) => void; connectionsFolder: string }) {
+export function DeleteConnectionDialog({ deletingConnection, setDeletingConnection, dispatchTabs, loadConnections, connectionsFolder }: { deletingConnection: ConnectionConfig; setDeletingConnection: Dispatch<SetStateAction<ConnectionConfig | null>>; dispatchTabs: Dispatch<TabsAction>; loadConnections: (folder: string) => void; connectionsFolder: string }) {
   return (
         <>
           <div style={modalBackdrop}
@@ -44,11 +45,7 @@ export function DeleteConnectionDialog({ deletingConnection, setDeletingConnecti
                     console.warn("Credential cleanup skipped:", toIpcError(e).message);
                   }
                   // Clear from tabs if active
-                  setTabs(prev => prev.map(t =>
-                    t.connection?.id === deletingConnection.id
-                      ? { ...t, connection: null, title: "New tab" }
-                      : t
-                  ));
+                  dispatchTabs({ type: "CLEAR_CONNECTION", connectionId: deletingConnection.id });
                   setDeletingConnection(null);
                   loadConnections(connectionsFolder);
                 }}
