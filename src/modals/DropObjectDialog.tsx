@@ -3,9 +3,10 @@ import type { Dispatch, SetStateAction, RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toIpcError } from "../ipc";
 import type { ConnectionConfig, SchemaResult, Tab, DropConfirm } from "../types";
+import type { SchemaTreeAction } from "../state/schemaTreeReducer";
 import { modalBackdrop } from "../ui/styles";
 
-export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache, schemaConnectionIdRef, setSchema, setExpandedTables, setExpandedSections, loadSchema, activeTabRef, updateActiveTab }: { dropConfirm: DropConfirm; setDropConfirm: Dispatch<SetStateAction<DropConfirm | null>>; purgeSchemaCache: (connId: string) => void; schemaConnectionIdRef: RefObject<string | null>; setSchema: Dispatch<SetStateAction<SchemaResult | null>>; setExpandedTables: Dispatch<SetStateAction<Set<string>>>; setExpandedSections: Dispatch<SetStateAction<Set<string>>>; loadSchema: (conn: ConnectionConfig, database?: string) => void; activeTabRef: RefObject<Tab>; updateActiveTab: (updates: Partial<Tab>) => void }) {
+export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache, schemaConnectionIdRef, setSchema, dispatchTree, loadSchema, activeTabRef, updateActiveTab }: { dropConfirm: DropConfirm; setDropConfirm: Dispatch<SetStateAction<DropConfirm | null>>; purgeSchemaCache: (connId: string) => void; schemaConnectionIdRef: RefObject<string | null>; setSchema: Dispatch<SetStateAction<SchemaResult | null>>; dispatchTree: Dispatch<SchemaTreeAction>; loadSchema: (conn: ConnectionConfig, database?: string) => void; activeTabRef: RefObject<Tab>; updateActiveTab: (updates: Partial<Tab>) => void }) {
   return (
         <>
           <div
@@ -81,8 +82,8 @@ export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache
                     purgeSchemaCache(conn.id);
                     schemaConnectionIdRef.current = null;
                     setSchema(null);
-                    setExpandedTables(new Set());
-                    setExpandedSections(new Set());
+                    dispatchTree({ type: "COLLAPSE_TABLES" });
+                    dispatchTree({ type: "COLLAPSE_SECTIONS" });
                     loadSchema(conn, activeTabRef.current.activeDatabase ?? conn.database);
 
                     setDropConfirm(null);

@@ -16,6 +16,7 @@ import {
 } from "./modals";
 import { createTab, DEFAULT_SETTINGS } from "./appState";
 import { tabsReducer, initTabsState } from "./state/tabsReducer";
+import { schemaTreeReducer, initSchemaTreeState } from "./state/schemaTreeReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
@@ -77,9 +78,9 @@ function App() {
   // Whether the active database's tree is collapsed. The active database is
   // always the one whose schema is loaded; collapsing hides its tree inline
   // (chevron ▸) without changing which database queries run against.
-  const [dbTreeCollapsed, setDbTreeCollapsed] = useState(false);
-  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
-  const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(["public"]));
+  // Schema-explorer tree view state (expand/collapse) lives in a tested reducer.
+  const [schemaTree, dispatchTree] = useReducer(schemaTreeReducer, undefined, initSchemaTreeState);
+  const { expandedTables, expandedSchemas, expandedSections, dbTreeCollapsed } = schemaTree;
   const schemaRef = useRef<SchemaResult | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -312,14 +313,8 @@ function App() {
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
   }, []);
 
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
-
   function toggleSection(key: string) {
-    setExpandedSections(prev => {
-      const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
-      return next;
-    });
+    dispatchTree({ type: "TOGGLE_SECTION", key });
   }
 
   function onSidebarDragStart(e: React.MouseEvent) {
@@ -529,15 +524,15 @@ function App() {
       if (schemaConnectionId.current === conn.id) return; // already loaded
       schemaConnectionId.current = conn.id;
       setSchema(null);
-      setExpandedTables(new Set());
+      dispatchTree({ type: "COLLAPSE_TABLES" });
       // Load the server's database list, then the schema for this tab's active
       // database (or the connection default if the tab hasn't picked one yet).
-      setDbTreeCollapsed(false);
+      dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
       loadDatabases(conn, activeTab.activeDatabase ?? conn.database);
     } else {
       schemaConnectionId.current = null;
       setSchema(null);
-      setExpandedTables(new Set());
+      dispatchTree({ type: "COLLAPSE_TABLES" });
       setDatabases([]);
     }
   }, [activeTabId]);
@@ -576,7 +571,7 @@ function App() {
             refreshedAny = true;
           }
         }
-        if (refreshedAny) setExpandedSchemas(new Set(["public"]));
+        if (refreshedAny) dispatchTree({ type: "RESET_SCHEMAS" });
         dispatchTabs({
           type: "REFRESH_CONNECTIONS",
           freshById: new Map(parsed.connections.map(c => [c.id, c] as [string, ConnectionConfig])),
@@ -588,7 +583,7 @@ function App() {
           if (freshConn) {
             schemaConnectionId.current = null;
             setSchema(null);
-            setExpandedTables(new Set());
+            dispatchTree({ type: "COLLAPSE_TABLES" });
             loadDatabases(freshConn, activeTabRef.current.activeDatabase ?? freshConn.database);
           }
         }
@@ -1647,7 +1642,7 @@ function App() {
       schemaCache.current.delete(firstKey!);
     }
 
-    setExpandedSchemas(new Set(["public"]));
+    dispatchTree({ type: "RESET_SCHEMAS" });
     setSchema(null);
     setSchemaLoading(true);
 
@@ -1834,15 +1829,15 @@ function App() {
         key={db}
         onClick={() => {
           if (isActive) {
-            setDbTreeCollapsed(c => !c);
+            dispatchTree({ type: "TOGGLE_DB_TREE" });
             return;
           }
           updateActiveTab({ activeDatabase: db });
           setSchema(null);
-          setExpandedTables(new Set());
-          setExpandedSections(new Set());
-          setExpandedSchemas(new Set(["public"]));
-          setDbTreeCollapsed(false);
+          dispatchTree({ type: "COLLAPSE_TABLES" });
+          dispatchTree({ type: "COLLAPSE_SECTIONS" });
+          dispatchTree({ type: "RESET_SCHEMAS" });
+          dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
           loadSchema(conn, db);
         }}
         title={isActive
@@ -2814,7 +2809,7 @@ function handleCellCommit(
       )}
       {/* END Schema object context menu */}
       {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} setDeletingConnection={setDeletingConnection} dispatchTabs={dispatchTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
-      {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} setDropConfirm={setDropConfirm} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} setSchema={setSchema} setExpandedTables={setExpandedTables} setExpandedSections={setExpandedSections} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
+      {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} setDropConfirm={setDropConfirm} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} setSchema={setSchema} dispatchTree={dispatchTree} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
       {killPending && <KillSessionDialog killPending={killPending} setKillPending={setKillPending} killActivity={killActivity} />}
 
       {showPalette && <CommandPalette setShowPalette={setShowPalette} paletteQuery={paletteQuery} setPaletteQuery={setPaletteQuery} paletteIndex={paletteIndex} setPaletteIndex={setPaletteIndex} filteredPalette={filteredPalette} />}
@@ -3026,10 +3021,10 @@ function handleCellCommit(
                         activeDatabase: conn.database,
                       });
                       setSchema(null);
-                      setExpandedTables(new Set());
-                      setExpandedSections(new Set());
+                      dispatchTree({ type: "COLLAPSE_TABLES" });
+                      dispatchTree({ type: "COLLAPSE_SECTIONS" });
                       setDbFilter("");
-                      setDbTreeCollapsed(false);
+                      dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
                       loadDatabases(conn, conn.database);
                     }}
                     onContextMenu={(e) => {
@@ -3281,13 +3276,7 @@ function handleCellCommit(
                                     {/* Schema header */}
                                     <div
                                       onClick={() => {
-                                        setExpandedSchemas(prev => {
-                                          const next = new Set(prev);
-                                          next.has(schemaName)
-                                            ? next.delete(schemaName)
-                                            : next.add(schemaName);
-                                          return next;
-                                        });
+                                        dispatchTree({ type: "TOGGLE_SCHEMA", key: schemaName });
                                       }}
                                       style={{
                                         display: "flex", alignItems: "center", gap: 6,
@@ -3365,11 +3354,7 @@ function handleCellCommit(
                                       <div key={`${schemaName}.${table.name}`}>
                                         <div
                                           onClick={() => {
-                                            const next = new Set(expandedTables);
-                                            next.has(`${schemaName}.${table.name}`)
-                                              ? next.delete(`${schemaName}.${table.name}`)
-                                              : next.add(`${schemaName}.${table.name}`);
-                                            setExpandedTables(next);
+                                            dispatchTree({ type: "TOGGLE_TABLE", key: `${schemaName}.${table.name}` });
                                           }}
                                           onDoubleClick={() => {
                                             const q = `SELECT * FROM ${schemaName}.${table.name} LIMIT 100`;
@@ -3452,11 +3437,7 @@ function handleCellCommit(
                                   <div key={`${table.schema ?? "public"}.${table.name}`}>
                                     <div
                                       onClick={() => {
-                                        const next = new Set(expandedTables);
-                                        next.has(table.name)
-                                          ? next.delete(table.name)
-                                          : next.add(table.name);
-                                        setExpandedTables(next);
+                                        dispatchTree({ type: "TOGGLE_TABLE", key: table.name });
                                       }}
                                       onDoubleClick={() => {
                                         const q = conn.engine === "sqlserver"
