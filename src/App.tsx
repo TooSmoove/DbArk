@@ -790,13 +790,7 @@ function App() {
     newTab.sql        = fullScript;
     newTab.connection = conn;
 
-    setTabs(prev => {
-      const updated = prev.map(t =>
-        t.id === activeTabId ? { ...t, sql: currentSql } : t
-      );
-      return [...updated, newTab];
-    });
-    setActiveTabId(newTab.id);
+    dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabId, saveSql: currentSql });
     setTimeout(() => editorRef.current?.setValue(fullScript), 0);
   }
 
@@ -956,7 +950,7 @@ function App() {
     // activeTabId at call time and must not be used for post-await writes here.
     const launchTabId = tab.id;
     const writeTab = (updates: Partial<Tab>) =>
-      setTabs(prev => prev.map(t => (t.id === launchTabId ? { ...t, ...updates } : t)));
+      dispatchTabs({ type: "UPDATE_TAB", id: launchTabId, updates });
 
     // ── Plan-mode wrapping ────────────────────────────────────────────────
     // If the per-tab Include Plan toggle is on AND we're on a DB connection
@@ -1242,9 +1236,7 @@ function App() {
     // Result auto-clear — targets the launching tab, not the active one.
     if (settings.resultClearMins > 0) {
       setTimeout(() => {
-        setTabs(prev => prev.map(t =>
-          t.id === launchTabId ? { ...t, results: [], error: null } : t
-        ));
+        dispatchTabs({ type: "UPDATE_TAB", id: launchTabId, updates: { results: [], error: null } });
       }, settings.resultClearMins * 60 * 1000);
     }
 
@@ -2143,8 +2135,7 @@ function App() {
         const newTab = createTab();
         // Inherit current connection so new tab is immediately usable
         if (activeTab.connection) newTab.connection = activeTab.connection;
-        setTabs(prev => [...prev, newTab]);
-        setActiveTabId(newTab.id);
+        dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab });
       },
     });
     items.push({
@@ -2262,7 +2253,7 @@ function App() {
         category: "tab",
         label: t.title || "Untitled",
         secondary: t.connection?.name ?? "",
-        onSelect: () => { setActiveTabId(t.id); },
+        onSelect: () => { dispatchTabs({ type: "SET_ACTIVE", id: t.id }); },
       });
     }
 
@@ -2397,14 +2388,7 @@ function App() {
       newTab.sql        = parsed.definition ?? "";
       newTab.connection = conn;
 
-      setTabs(prev => {
-        const updated = prev.map(t =>
-          t.id === activeTabId ? { ...t, sql: currentSql } : t
-        );
-        return [...updated, newTab];
-      });
-
-      setActiveTabId(newTab.id);
+      dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabId, saveSql: currentSql });
       setTimeout(() => {
         editorRef.current?.setValue(parsed.definition ?? "");
       }, 0);
@@ -2539,24 +2523,23 @@ function handleCellCommit(
     }
 
     // Apply edits to the result rows in state
-    setTabs(prev => prev.map(t => {
-      if (t.id !== activeTabId) return t;
-      const newResults = t.results.map((r, ri) => {
-        if (ri !== t.activeResult) return r;
-        const newRows = r.rows.map((row, rowIdx) => {
-          const rowEdits = tab.pendingEdits.filter(
-            e => e.rowIndex === rowIdx);
-          if (rowEdits.length === 0) return row;
-          const newRow = [...row];
-          for (const edit of rowEdits) {
-            newRow[edit.colIndex] = edit.newValue;
-          }
-          return newRow;
-        });
-        return { ...r, rows: newRows };
+    const newResults = tab.results.map((r, ri) => {
+      if (ri !== tab.activeResult) return r;
+      const newRows = r.rows.map((row, rowIdx) => {
+        const rowEdits = tab.pendingEdits.filter(e => e.rowIndex === rowIdx);
+        if (rowEdits.length === 0) return row;
+        const newRow = [...row];
+        for (const edit of rowEdits) {
+          newRow[edit.colIndex] = edit.newValue;
+        }
+        return newRow;
       });
-      return { ...t, results: newResults, pendingEdits: [], editingCell: null };
-    }));
+      return { ...r, rows: newRows };
+    });
+    dispatchTabs({
+      type: "UPDATE_ACTIVE_TAB",
+      updates: { results: newResults, pendingEdits: [], editingCell: null },
+    });
   }
 
   function handleRollbackAll() {
@@ -2807,13 +2790,7 @@ function handleCellCommit(
                   newTab.sql       = definition;
                   newTab.connection = conn;
 
-                  setTabs(prev => {
-                    const updated = prev.map(t =>
-                      t.id === activeTabId ? { ...t, sql: currentSql } : t
-                    );
-                    return [...updated, newTab];
-                  });
-                  setActiveTabId(newTab.id);
+                  dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabId, saveSql: currentSql });
                   setTimeout(() => editorRef.current?.setValue(definition), 0);
                   setSchemaContextMenu(null);
                 }}
