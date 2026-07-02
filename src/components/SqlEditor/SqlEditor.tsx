@@ -15,11 +15,16 @@ import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 
 // Local worker (no CDN) — keeps the zero-external-calls guarantee intact.
-self.MonacoEnvironment = {
+// Assigned through a cast: monaco only added its own `declare global` for
+// MonacoEnvironment around 0.55, so relying on the ambient declaration makes
+// this file compile or fail depending on the exact installed monaco version.
+// The cast is version-proof while `monaco.Environment` keeps the value typed.
+const monacoEnvironment: monaco.Environment = {
   getWorker() {
     return new editorWorker();
   },
 };
+(self as { MonacoEnvironment?: monaco.Environment }).MonacoEnvironment = monacoEnvironment;
 
 // Use the locally-bundled Monaco instead of fetching from jsdelivr.
 loader.config({ monaco });

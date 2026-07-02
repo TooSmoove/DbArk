@@ -230,7 +230,10 @@ public static class SqlServerExecutor
             JsonSerializer.Serialize(err, AppJsonContext.Default.ErrorResult));
     }
 
-    private static string GetDiagnostic(short handleType, IntPtr handle)
+    // Internal (not private) so other ODBC callers in this assembly — e.g.
+    // ActivityExecutor's kill path — surface real diagnostics instead of
+    // bare "X failed" messages. Works on any ODBC handle.
+    internal static string GetDiagnostic(short handleType, IntPtr handle)
     {
         IntPtr buf = Marshal.AllocHGlobal(1024 * 2);
         IntPtr state = Marshal.AllocHGlobal(12);

@@ -1,14 +1,15 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch } from "react";
 import type { ActivityRow } from "../types";
+import type { ActivityAction } from "../state/activityReducer";
 import { modalBackdrop } from "../ui/styles";
 
-export function KillSessionDialog({ killPending, setKillPending, killActivity }: { killPending: ActivityRow; setKillPending: Dispatch<SetStateAction<ActivityRow | null>>; killActivity: (row: ActivityRow) => void }) {
+export function KillSessionDialog({ killPending, dispatchActivity, killActivity }: { killPending: ActivityRow; dispatchActivity: Dispatch<ActivityAction>; killActivity: (row: ActivityRow) => void }) {
   return (
         <>
           <div
             style={modalBackdrop}
-            onClick={() => setKillPending(null)}
+            onClick={() => dispatchActivity({ type: "SET_KILL_PENDING", row: null })}
           />
           <div style={{
             position: "fixed", top: "50%", left: "50%",
@@ -54,7 +55,7 @@ export function KillSessionDialog({ killPending, setKillPending, killActivity }:
               <button
                 onClick={async () => {
                   const target = killPending;
-                  setKillPending(null);
+                  dispatchActivity({ type: "SET_KILL_PENDING", row: null });
                   if (target) await killActivity(target);
                 }}
                 style={{
@@ -68,7 +69,7 @@ export function KillSessionDialog({ killPending, setKillPending, killActivity }:
                 Kill session
               </button>
               <button
-                onClick={() => setKillPending(null)}
+                onClick={() => dispatchActivity({ type: "SET_KILL_PENDING", row: null })}
                 style={{
                   flex: 1, padding: "8px 0",
                   background: "transparent", color: "var(--text-secondary)",

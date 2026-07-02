@@ -401,14 +401,18 @@ public static class ActivityExecutor
             var rc = SQLDriverConnectW(hDbc, IntPtr.Zero, connectionString, SQL_NTS,
                                        IntPtr.Zero, 0, out _, 0);
             if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
-                throw new Exception("ODBC connect failed for kill_session");
+                throw new Exception("ODBC connect failed for kill_session: "
+                    + SqlServerExecutor.GetDiagnostic(SQL_HANDLE_DBC, hDbc));
             if (SQLAllocStmt(hDbc, out hStmt) != SQL_SUCCESS)
                 throw new Exception("Failed to allocate ODBC statement");
             SQLSetStmtAttrW(hStmt, SQL_ATTR_QUERY_TIMEOUT, new IntPtr(10), 0);
             // pid is already validated as numeric in KillSession before we get here
             rc = SQLExecDirectW(hStmt, $"KILL {pid}", SQL_NTS);
             if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO)
-                throw new Exception($"KILL {pid} failed");
+                // Surface the real ODBC diagnostic — a bare "failed" hides the
+                // actual reason (permission denied, own-process kill, stale SPID).
+                throw new Exception($"KILL {pid} failed: "
+                    + SqlServerExecutor.GetDiagnostic(SQL_HANDLE_STMT, hStmt));
         }
         finally
         {

@@ -24,5 +24,9 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Test files are type-checked by tsconfig.vitest.json (run via `npm test`),
+  // NOT by the production build — otherwise `cargo tauri build` fails on any
+  // machine without devDependencies (vitest) installed.
+  "exclude": ["src/**/*.test.ts"]
 }

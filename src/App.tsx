@@ -19,6 +19,7 @@ import { tabsReducer, initTabsState } from "./state/tabsReducer";
 import { schemaTreeReducer, initSchemaTreeState } from "./state/schemaTreeReducer";
 import { schemaDataReducer, initSchemaDataState } from "./state/schemaDataReducer";
 import { connectionsReducer, initConnectionsState, toggledGroup } from "./state/connectionsReducer";
+import { activityReducer, initActivityState } from "./state/activityReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
@@ -96,14 +97,14 @@ function App() {
   // Activity panel — bottom panel peer to results tabs.
   // Hidden for SQLite (no concept of server-side activity).
   // Polled every 5s only when open AND app focused.
-  const [showActivity, setShowActivity]     = useState(false);
-  const [activityRows, setActivityRows]     = useState<ActivityRow[]>([]);
-  const [activityError, setActivityError]   = useState<string | null>(null);
-  // Structured tag for the last activity error (e.g. "permission") so the panel
-  // can show an actionable notice rather than a generic error banner.
-  const [activityErrorCode, setActivityErrorCode] = useState<string | null>(null);
-  const [activityLoading, setActivityLoading] = useState(false);
-  const [killPending, setKillPending]       = useState<ActivityRow | null>(null);
+  // State lives in a tested reducer; the load lifecycle (rows/error/errorCode)
+  // is atomic and silent polls never touch the spinner.
+  const [activityState, dispatchActivity] = useReducer(activityReducer, undefined, initActivityState);
+  const {
+    showActivity, killPending,
+    rows: activityRows, error: activityError,
+    errorCode: activityErrorCode, loading: activityLoading,
+  } = activityState;
 
   // Diagram panel — virtual result tab at activeResult = -2.
   // Toggle from the schema sidebar header. Hidden when no connection
@@ -1549,7 +1550,7 @@ function App() {
       // No ref needed; toggle is a simple state flip with no closure issues.
       editor.addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyA,
-        () => { setShowActivity(prev => !prev); }
+        () => { dispatchActivity({ type: "TOGGLE_ACTIVITY" }); }
       );
 
       // Ctrl+P / Cmd+P — open command palette
@@ -1886,10 +1887,10 @@ function App() {
   // No-op when no connection, SQLite connection, or activity panel closed.
   async function loadActivity(conn: ConnectionConfig | null, silent = false) {
     if (!conn || conn.engine === "sqlite") {
-      setActivityRows([]);
+      dispatchActivity({ type: "SET_ROWS", rows: [] });
       return;
     }
-    if (!silent) setActivityLoading(true);
+    dispatchActivity({ type: "LOAD_START", silent });
     try {
       // Same tunnel handling as runQuery — if SSH is enabled we route via
       // 127.0.0.1:<tunnelPort> with SSL disabled (the tunnel is already
@@ -1899,9 +1900,7 @@ function App() {
       if (conn.sshEnabled) {
         const port = await openTunnel(conn);
         if (!port) {
-          setActivityError("SSH tunnel failed");
-          setActivityErrorCode(null);
-          setActivityRows([]);
+          dispatchActivity({ type: "LOAD_ERROR", error: "SSH tunnel failed", code: null });
           return;
         }
         tunnelPort = port;
@@ -1929,20 +1928,14 @@ function App() {
       });
 
       if (parsed.error) {
-        setActivityError(parsed.error);
-        setActivityErrorCode(parsed.code ?? null);
-        setActivityRows([]);
+        dispatchActivity({ type: "LOAD_ERROR", error: parsed.error, code: parsed.code ?? null });
       } else {
-        setActivityError(null);
-        setActivityErrorCode(null);
-        setActivityRows(parsed.rows ?? []);
+        dispatchActivity({ type: "LOAD_SUCCESS", rows: parsed.rows ?? [] });
       }
     } catch (e) {
-      setActivityError(toIpcError(e).message);
-      setActivityErrorCode(null);
-      setActivityRows([]);
+      dispatchActivity({ type: "LOAD_ERROR", error: toIpcError(e).message, code: null });
     } finally {
-      if (!silent) setActivityLoading(false);
+      dispatchActivity({ type: "LOAD_DONE", silent });
     }
   }
 
@@ -1959,7 +1952,7 @@ function App() {
       if (conn.sshEnabled) {
         const port = await openTunnel(conn);
         if (!port) {
-          setActivityError("SSH tunnel failed");
+          dispatchActivity({ type: "SET_ERROR", error: "SSH tunnel failed" });
           return;
         }
         tunnelPort = port;
@@ -1987,17 +1980,14 @@ function App() {
         pid:    row.pid,
       });
       if (parsed.error) {
-        setActivityError(parsed.error);
-        setActivityErrorCode(null);
+        dispatchActivity({ type: "KILL_ERROR", error: parsed.error });
       } else {
-        setActivityError(null);
-        setActivityErrorCode(null);
+        dispatchActivity({ type: "CLEAR_ERROR" });
         // Refresh silently so the user sees the kill take effect immediately
         await loadActivity(conn, true);
       }
     } catch (e) {
-      setActivityError(toIpcError(e).message);
-      setActivityErrorCode(null);
+      dispatchActivity({ type: "KILL_ERROR", error: toIpcError(e).message });
     }
   }
 
@@ -2052,7 +2042,7 @@ function App() {
       category: "command",
       label: showActivity ? "Hide Activity panel" : "Show Activity panel",
       secondary: "Ctrl+Shift+A",
-      onSelect: () => { setShowActivity(v => !v); },
+      onSelect: () => { dispatchActivity({ type: "TOGGLE_ACTIVITY" }); },
     });
     items.push({
       id: "cmd:settings",
@@ -2773,7 +2763,7 @@ function handleCellCommit(
       {/* END Schema object context menu */}
       {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} dispatchConn={dispatchConn} dispatchTabs={dispatchTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
       {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} dispatchSchema={dispatchSchema} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} dispatchTree={dispatchTree} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
-      {killPending && <KillSessionDialog killPending={killPending} setKillPending={setKillPending} killActivity={killActivity} />}
+      {killPending && <KillSessionDialog killPending={killPending} dispatchActivity={dispatchActivity} killActivity={killActivity} />}
 
       {showPalette && <CommandPalette setShowPalette={setShowPalette} paletteQuery={paletteQuery} setPaletteQuery={setPaletteQuery} paletteIndex={paletteIndex} setPaletteIndex={setPaletteIndex} filteredPalette={filteredPalette} />}
       {showSettings && <SettingsModal setShowSettings={setShowSettings} settingsDraft={settingsDraft} setSettingsDraft={setSettingsDraft} themePreference={themePreference} setThemePreference={setThemePreference} setSettings={setSettings} setAuditLogEnabled={setAuditLogEnabled} />}
@@ -4181,7 +4171,7 @@ function handleCellCommit(
                   <span
                     onClick={(e) => {
                       e.stopPropagation();
-                      setShowActivity(false);
+                      dispatchActivity({ type: "SET_ACTIVITY_OPEN", open: false });
                       // If user was viewing activity, drop them back on first result
                       if (activeTab.activeResult === -1) {
                         updateActiveTab({ activeResult: 0 });
@@ -4273,7 +4263,7 @@ function handleCellCommit(
                   errorCode={activityErrorCode}
                   engine={activeTab.connection?.engine ?? ""}
                   onRefresh={() => loadActivity(activeTab.connection, false)}
-                  onKillRequest={(row) => setKillPending(row)}
+                  onKillRequest={(row) => dispatchActivity({ type: "SET_KILL_PENDING", row })}
                 />
               );
             }

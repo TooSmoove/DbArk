@@ -1,0 +1,12 @@
+{
+  // Type-checks the test files with the SAME strict settings as the app
+  // (extends tsconfig.app.json), re-including what the app config excludes.
+  // Wired into `npm test` so tests never lose type-checking — they are just
+  // no longer part of the production build (`tsc -b` / cargo tauri build).
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.vitest.tsbuildinfo"
+  },
+  "include": ["src"],
+  "exclude": []
+}
