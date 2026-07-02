@@ -1,7 +1,6 @@
 // Extracted from App.tsx (code-audit item A-1).
 import type { Dispatch, RefObject } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { toIpcError } from "../ipc";
+import { toIpcError, ipc, extractPayloadError } from "../ipc";
 import type { ConnectionConfig, Tab, DropConfirm } from "../types";
 import type { SchemaTreeAction } from "../state/schemaTreeReducer";
 import type { SchemaDataAction } from "../state/schemaDataReducer";
@@ -61,7 +60,12 @@ export function DropObjectDialog({ dropConfirm, dispatchSchema, purgeSchemaCache
                 onClick={async () => {
                   try {
                     const conn = dropConfirm.connection;
-                    await invoke("drop_object", {
+                    // Drop against the database the schema tree is showing —
+                    // NOT the connection default. The schema reload below uses
+                    // the same expression; they must agree or the drop targets
+                    // a different database than the one being browsed.
+                    const targetDb = activeTabRef.current.activeDatabase ?? conn.database;
+                    const raw = await ipc<string>("drop_object", {
                       objectName:    dropConfirm.name,
                       objectType:    dropConfirm.type,
                       schemaName:    dropConfirm.schema,
@@ -71,13 +75,23 @@ export function DropObjectDialog({ dropConfirm, dispatchSchema, purgeSchemaCache
                         engine:        conn.engine,
                         host:          conn.host,
                         port:          conn.port,
-                        database:      conn.database,
+                        database:      targetDb,
                         username:      conn.username,
                         sslMode:       conn.sslMode ?? "prefer",
                         sqlInstance:   conn.sqlInstance ?? "",
                         windowsAuth:   conn.windowsAuth ?? false,
                       },
                     });
+
+                    // The executor reports statement failures in-band — the
+                    // IPC call resolves even when the DROP itself failed.
+                    // Ignoring this is how a failed drop silently "succeeded".
+                    const dbError = extractPayloadError(raw);
+                    if (dbError) {
+                      updateActiveTab({ error: `Drop failed: ${dbError}` });
+                      dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: null });
+                      return;
+                    }
 
                     // Invalidate schema cache and reload
                     purgeSchemaCache(conn.id);

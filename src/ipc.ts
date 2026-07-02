@@ -83,3 +83,31 @@ export async function ipcJson<T>(cmd: string, args?: InvokeArgs): Promise<T> {
     throw { code: "internal", message: `Malformed response from ${cmd}` } as IpcError;
   }
 }
+
+/**
+ * Dig a database-level error out of a query-executor payload. The executor
+ * reports statement failures *in-band* — a MultiResult with a top-level
+ * `error` or an `error` on one of its `results` — while the IPC call itself
+ * still resolves successfully. A caller that ignores the payload therefore
+ * treats a failed statement as success (this is how a failed DROP silently
+ * "succeeded" — see DropObjectDialog).
+ *
+ * Returns the error message, or `null` if the payload reports success.
+ * A payload that isn't JSON at all is a legacy-path bare error string
+ * (successful executions always serialize to JSON), so it is returned as-is.
+ */
+export function extractPayloadError(raw: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw; // legacy path: bare error string, never valid JSON on success
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const p = parsed as { error?: unknown; results?: { error?: unknown }[] };
+  if (typeof p.error === "string" && p.error.length > 0) return p.error;
+  const failed = p.results?.find(
+    (r) => typeof r?.error === "string" && r.error.length > 0,
+  );
+  return failed ? (failed.error as string) : null;
+}
