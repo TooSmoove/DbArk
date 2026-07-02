@@ -5,7 +5,7 @@ import type {
   ColumnInfo, TableInfo, ProcedureInfo, ViewInfo, TriggerInfo,
   IndexInfo, SchemaResult, HistoryEntry, ActivityRow,
   PaletteItem, Tab, AppSettings, PendingEdit,
-  ThemePreference, ResolvedTheme,
+  ThemePreference, ResolvedTheme, SchemaContextMenu,
 } from "./types";
 import { wrapPlanSql, PlanResultRenderer } from "./plan";
 import { Spinner, EngineBadge, SchemaSection, LockOverlay, SidebarFooter } from "./ui";
@@ -17,6 +17,7 @@ import {
 import { createTab, DEFAULT_SETTINGS } from "./appState";
 import { tabsReducer, initTabsState } from "./state/tabsReducer";
 import { schemaTreeReducer, initSchemaTreeState } from "./state/schemaTreeReducer";
+import { schemaDataReducer, initSchemaDataState } from "./state/schemaDataReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
@@ -66,15 +67,15 @@ function App() {
     () => resolveTheme(readStoredTheme())
   );
   const [connectionsFolder, setConnectionsFolder] = useState("");
-  const [schema, setSchema] = useState<SchemaResult | null>(null);
-  const [schemaLoading, setSchemaLoading] = useState(false);
-  // Database list for the currently-active connection.
-  const [databases, setDatabases] = useState<string[]>([]);
-  const [databasesLoading, setDatabasesLoading] = useState(false);
+  // Schema-explorer data, loading flags, and menus live in a tested reducer.
+  // LOAD_START actions make "clear data + raise loading flag" atomic.
+  const [schemaData, dispatchSchema] = useReducer(schemaDataReducer, undefined, initSchemaDataState);
+  const { schema, schemaLoading, databases, databasesLoading, dbFilter, schemaContextMenu, dropConfirm } = schemaData;
+  const openSchemaMenu = (menu: SchemaContextMenu) => dispatchSchema({ type: "SET_SCHEMA_MENU", menu });
+  const closeSchemaMenu = () => dispatchSchema({ type: "SET_SCHEMA_MENU", menu: null });
   const dbListCache = useRef<Map<string, string[]>>(new Map());
   // Free-text filter over the database list — the scalability unlock for
   // servers with many databases. Reset whenever the active connection changes.
-  const [dbFilter, setDbFilter] = useState("");
   // Whether the active database's tree is collapsed. The active database is
   // always the one whose schema is loaded; collapsing hides its tree inline
   // (chevron ▸) without changing which database queries run against.
@@ -183,16 +184,6 @@ function App() {
     x: number;
     y: number;
     connection: ConnectionConfig;
-  } | null>(null);
-
-  const [schemaContextMenu, setSchemaContextMenu] = useState<{
-    x: number;
-    y: number;
-    name: string;
-    type: string; // table | procedure | function | view | trigger | index
-    schema: string;
-    connection: ConnectionConfig;
-    extra?: any;
   } | null>(null);
 
   const tablesBySchema = useMemo(() => {
@@ -463,15 +454,6 @@ function App() {
   //Active Tab helper - load schema when connection changes
   const schemaConnectionId = useRef<string | null>(null);
 
-  const [dropConfirm, setDropConfirm] = useState<{
-    name:       string;
-    type:       string;
-    schema:     string;
-    tableName:  string;
-    dropSql:    string;
-    connection: ConnectionConfig;
-  } | null>(null);
-
   function buildDropSql(
     engine: string, type: string,
     name: string, schema: string, table: string
@@ -523,7 +505,7 @@ function App() {
     if (conn) {
       if (schemaConnectionId.current === conn.id) return; // already loaded
       schemaConnectionId.current = conn.id;
-      setSchema(null);
+      dispatchSchema({ type: "SET_SCHEMA", schema: null });
       dispatchTree({ type: "COLLAPSE_TABLES" });
       // Load the server's database list, then the schema for this tab's active
       // database (or the connection default if the tab hasn't picked one yet).
@@ -531,9 +513,9 @@ function App() {
       loadDatabases(conn, activeTab.activeDatabase ?? conn.database);
     } else {
       schemaConnectionId.current = null;
-      setSchema(null);
+      dispatchSchema({ type: "SET_SCHEMA", schema: null });
       dispatchTree({ type: "COLLAPSE_TABLES" });
-      setDatabases([]);
+      dispatchSchema({ type: "SET_DATABASES", databases: [] });
     }
   }, [activeTabId]);
 
@@ -582,7 +564,7 @@ function App() {
           const freshConn = parsed.connections.find(c => c.id === currentConn.id);
           if (freshConn) {
             schemaConnectionId.current = null;
-            setSchema(null);
+            dispatchSchema({ type: "SET_SCHEMA", schema: null });
             dispatchTree({ type: "COLLAPSE_TABLES" });
             loadDatabases(freshConn, activeTabRef.current.activeDatabase ?? freshConn.database);
           }
@@ -1633,7 +1615,7 @@ function App() {
     const cacheKey = `${conn.id}::${db}`;
 
     if (schemaCache.current.has(cacheKey)) {
-      setSchema(schemaCache.current.get(cacheKey)!);
+      dispatchSchema({ type: "SET_SCHEMA", schema: schemaCache.current.get(cacheKey)! });
       return;
     }
 
@@ -1643,8 +1625,7 @@ function App() {
     }
 
     dispatchTree({ type: "RESET_SCHEMAS" });
-    setSchema(null);
-    setSchemaLoading(true);
+    dispatchSchema({ type: "SCHEMA_LOAD_START" });
 
     try {
       // Open SSH tunnel first if needed
@@ -1652,8 +1633,8 @@ function App() {
       if (conn.sshEnabled) {
         const port = await openTunnel(conn);
         if (!port) {
-          setSchema({ tables: [], procedures: [], functions: [], views: [], triggers: [], indexes: [], error: "SSH tunnel not open — run a query first to establish the tunnel" });
-          setSchemaLoading(false);
+          dispatchSchema({ type: "SET_SCHEMA", schema: { tables: [], procedures: [], functions: [], views: [], triggers: [], indexes: [], error: "SSH tunnel not open — run a query first to establish the tunnel" } });
+          dispatchSchema({ type: "SET_SCHEMA_LOADING", loading: false });
           return;
         }
         tunnelPort = port;
@@ -1726,11 +1707,11 @@ function App() {
       }
 
       schemaCache.current.set(cacheKey, parsed);
-      setSchema(parsed);
+      dispatchSchema({ type: "SET_SCHEMA", schema: parsed });
     } catch (e) {
       console.error("Schema load failed:", e);
     } finally {
-      setSchemaLoading(false);
+      dispatchSchema({ type: "SET_SCHEMA_LOADING", loading: false });
     }
   }
 
@@ -1753,20 +1734,19 @@ function App() {
 
     // SQLite has no server-side database list — go straight to the schema.
     if (conn.engine === "sqlite") {
-      setDatabases([]);
+      dispatchSchema({ type: "SET_DATABASES", databases: [] });
       loadSchema(conn, defaultDb);
       return;
     }
 
     // Serve a cached list instantly, but still (re)load the schema.
     if (dbListCache.current.has(conn.id)) {
-      setDatabases(dbListCache.current.get(conn.id)!);
+      dispatchSchema({ type: "SET_DATABASES", databases: dbListCache.current.get(conn.id)! });
       loadSchema(conn, defaultDb);
       return;
     }
 
-    setDatabases([]);
-    setDatabasesLoading(true);
+    dispatchSchema({ type: "DATABASES_LOAD_START" });
 
     try {
       let tunnelPort: number | undefined;
@@ -1805,13 +1785,13 @@ function App() {
       }
 
       dbListCache.current.set(conn.id, list);
-      setDatabases(list);
+      dispatchSchema({ type: "SET_DATABASES", databases: list });
     } catch (e) {
       console.error("Database list load failed:", e);
       // Fall back to just the saved database so the user can still browse it.
-      setDatabases(defaultDb ? [defaultDb] : []);
+      dispatchSchema({ type: "SET_DATABASES", databases: defaultDb ? [defaultDb] : [] });
     } finally {
-      setDatabasesLoading(false);
+      dispatchSchema({ type: "SET_DATABASES_LOADING", loading: false });
       loadSchema(conn, defaultDb);
     }
   }
@@ -1833,7 +1813,7 @@ function App() {
             return;
           }
           updateActiveTab({ activeDatabase: db });
-          setSchema(null);
+          dispatchSchema({ type: "SET_SCHEMA", schema: null });
           dispatchTree({ type: "COLLAPSE_TABLES" });
           dispatchTree({ type: "COLLAPSE_SECTIONS" });
           dispatchTree({ type: "RESET_SCHEMAS" });
@@ -2568,7 +2548,7 @@ function handleCellCommit(
         <>
           <div
             style={{ position: "fixed", inset: 0, zIndex: 999 }}
-            onClick={() => setSchemaContextMenu(null)}
+            onClick={() => closeSchemaMenu()}
           />
           <div style={{
             position: "fixed",
@@ -2604,7 +2584,7 @@ function handleCellCommit(
                     schemaContextMenu.connection,
                     schemaContextMenu.extra,
                   );
-                  setSchemaContextMenu(null);
+                  closeSchemaMenu();
                 }}
                 className="menu-item"
               >
@@ -2623,7 +2603,7 @@ function handleCellCommit(
                     schemaContextMenu.connection,
                     schemaContextMenu.extra,
                   );
-                  setSchemaContextMenu(null);
+                  closeSchemaMenu();
                 }}
                 className="menu-item"
               >
@@ -2648,7 +2628,7 @@ function handleCellCommit(
                       key={type}
                       onClick={() => {
                         setEditorScript(scriptTable(table, type, engine));
-                        setSchemaContextMenu(null);
+                        closeSchemaMenu();
                       }}
                       className="menu-item"
                     >
@@ -2668,7 +2648,7 @@ function handleCellCommit(
                     ? `SELECT TOP 100 * FROM ${schemaContextMenu.name}`
                     : `SELECT * FROM ${schemaContextMenu.name} LIMIT 100`;
                   setEditorScript(limit);
-                  setSchemaContextMenu(null);
+                  closeSchemaMenu();
                 }}
                 className="menu-item"
               >
@@ -2688,7 +2668,7 @@ function handleCellCommit(
                   <button
                     onClick={() => {
                       setEditorScript(scriptExecute(proc, engine));
-                      setSchemaContextMenu(null);
+                      closeSchemaMenu();
                     }}
                     className="menu-item"
                   >
@@ -2710,7 +2690,7 @@ function handleCellCommit(
                     schemaContextMenu.connection,
                     schemaContextMenu.extra,
                   );
-                  setSchemaContextMenu(null);
+                  closeSchemaMenu();
                 }}
                 className="menu-item"
               >
@@ -2745,7 +2725,7 @@ function handleCellCommit(
                     JSON.parse(raw);
                   if (parsed.error) {
                     updateActiveTab({ error: parsed.error });
-                    setSchemaContextMenu(null);
+                    closeSchemaMenu();
                     return;
                   }
 
@@ -2771,7 +2751,7 @@ function handleCellCommit(
 
                   dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabId, saveSql: currentSql });
                   setTimeout(() => editorRef.current?.setValue(definition), 0);
-                  setSchemaContextMenu(null);
+                  closeSchemaMenu();
                 }}
                 className="menu-item"
               >
@@ -2790,15 +2770,15 @@ function handleCellCommit(
                   schemaContextMenu.schema,
                   schemaContextMenu.extra?.tableName ?? "",
                 );
-                setDropConfirm({
+                dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: {
                   name:      schemaContextMenu.name,
                   type:      schemaContextMenu.type,
                   schema:    schemaContextMenu.schema,
                   tableName: schemaContextMenu.extra?.tableName ?? "",
                   dropSql,
                   connection: schemaContextMenu.connection,
-                });
-                setSchemaContextMenu(null);
+                } });
+                closeSchemaMenu();
               }}
               className="menu-item menu-item--danger"
             >
@@ -2809,7 +2789,7 @@ function handleCellCommit(
       )}
       {/* END Schema object context menu */}
       {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} setDeletingConnection={setDeletingConnection} dispatchTabs={dispatchTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
-      {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} setDropConfirm={setDropConfirm} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} setSchema={setSchema} dispatchTree={dispatchTree} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
+      {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} dispatchSchema={dispatchSchema} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} dispatchTree={dispatchTree} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
       {killPending && <KillSessionDialog killPending={killPending} setKillPending={setKillPending} killActivity={killActivity} />}
 
       {showPalette && <CommandPalette setShowPalette={setShowPalette} paletteQuery={paletteQuery} setPaletteQuery={setPaletteQuery} paletteIndex={paletteIndex} setPaletteIndex={setPaletteIndex} filteredPalette={filteredPalette} />}
@@ -3020,10 +3000,10 @@ function handleCellCommit(
                         error:      null,
                         activeDatabase: conn.database,
                       });
-                      setSchema(null);
+                      dispatchSchema({ type: "SET_SCHEMA", schema: null });
                       dispatchTree({ type: "COLLAPSE_TABLES" });
                       dispatchTree({ type: "COLLAPSE_SECTIONS" });
-                      setDbFilter("");
+                      dispatchSchema({ type: "SET_DB_FILTER", filter: "" });
                       dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
                       loadDatabases(conn, conn.database);
                     }}
@@ -3133,7 +3113,7 @@ function handleCellCommit(
                                 <span style={{ fontSize: 10, color: "var(--text-disabled)", flexShrink: 0 }}>⌕</span>
                                 <input
                                   value={dbFilter}
-                                  onChange={(e) => setDbFilter(e.target.value)}
+                                  onChange={(e) => dispatchSchema({ type: "SET_DB_FILTER", filter: e.target.value })}
                                   placeholder="Filter databases…"
                                   spellCheck={false}
                                   style={{
@@ -3144,7 +3124,7 @@ function handleCellCommit(
                                 />
                                 {dbFilter && (
                                   <span
-                                    onClick={() => setDbFilter("")}
+                                    onClick={() => dispatchSchema({ type: "SET_DB_FILTER", filter: "" })}
                                     title="Clear filter"
                                     style={{ fontSize: 10, color: "var(--text-disabled)", cursor: "pointer", flexShrink: 0 }}
                                   >✕</span>
@@ -3363,7 +3343,7 @@ function handleCellCommit(
                                           }}
                                           onContextMenu={(e) => {
                                             e.preventDefault();
-                                            setSchemaContextMenu({
+                                            openSchemaMenu({
                                               x: e.clientX, y: e.clientY,
                                               name: table.name,
                                               type: "table",
@@ -3448,7 +3428,7 @@ function handleCellCommit(
                                       }}
                                       onContextMenu={(e) => {
                                         e.preventDefault();
-                                        setSchemaContextMenu({
+                                        openSchemaMenu({
                                           x: e.clientX, y: e.clientY,
                                           name: table.name, type: "table",
                                           schema: table.schema || "dbo",
@@ -3530,7 +3510,7 @@ function handleCellCommit(
                               <div key={`${proc.schema}.${proc.name}`}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
-                                  setSchemaContextMenu({
+                                  openSchemaMenu({
                                     x: e.clientX, y: e.clientY,
                                     name: proc.name, type: "procedure",
                                     schema: proc.schema, connection: conn,
@@ -3569,7 +3549,7 @@ function handleCellCommit(
                               <div key={`${fn.schema}.${fn.name}`}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
-                                  setSchemaContextMenu({
+                                  openSchemaMenu({
                                     x: e.clientX, y: e.clientY,
                                     name: fn.name, type: "function",
                                     schema: fn.schema, connection: conn,
@@ -3609,7 +3589,7 @@ function handleCellCommit(
                               <div key={`${view.schema}.${view.name}`}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
-                                  setSchemaContextMenu({
+                                  openSchemaMenu({
                                     x: e.clientX, y: e.clientY,
                                     name: view.name, type: "view",
                                     schema: view.schema, connection: conn,
@@ -3650,7 +3630,7 @@ function handleCellCommit(
                               <div key={trigger.name}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
-                                  setSchemaContextMenu({
+                                  openSchemaMenu({
                                     x: e.clientX, y: e.clientY,
                                     name: trigger.name, type: "trigger",
                                     schema: trigger.tableName, connection: conn,
@@ -3687,7 +3667,7 @@ function handleCellCommit(
                               <div key={`${idx.tableName}.${idx.name}`}
                                 onContextMenu={(e) => {
                                   e.preventDefault();
-                                  setSchemaContextMenu({
+                                  openSchemaMenu({
                                     x: e.clientX, y: e.clientY,
                                     name: idx.name, type: "index",
                                     schema: idx.tableName, connection: conn,

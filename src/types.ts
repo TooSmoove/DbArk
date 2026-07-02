@@ -257,6 +257,17 @@ export interface DropConfirm {
   connection: ConnectionConfig;
 }
 
+// Right-click context menu on a schema-explorer object.
+export interface SchemaContextMenu {
+  x: number;
+  y: number;
+  name: string;
+  type: string; // table | procedure | function | view | trigger | index
+  schema: string;
+  connection: ConnectionConfig;
+  extra?: any;
+}
+
 // Result of importing connections from DBeaver's data-sources.json.
 export interface DbeaverImportResult {
   imported: { name: string; engine: string; host: string; port: number;

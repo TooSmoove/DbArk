@@ -1,17 +1,18 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, SetStateAction, RefObject } from "react";
+import type { Dispatch, RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toIpcError } from "../ipc";
-import type { ConnectionConfig, SchemaResult, Tab, DropConfirm } from "../types";
+import type { ConnectionConfig, Tab, DropConfirm } from "../types";
 import type { SchemaTreeAction } from "../state/schemaTreeReducer";
+import type { SchemaDataAction } from "../state/schemaDataReducer";
 import { modalBackdrop } from "../ui/styles";
 
-export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache, schemaConnectionIdRef, setSchema, dispatchTree, loadSchema, activeTabRef, updateActiveTab }: { dropConfirm: DropConfirm; setDropConfirm: Dispatch<SetStateAction<DropConfirm | null>>; purgeSchemaCache: (connId: string) => void; schemaConnectionIdRef: RefObject<string | null>; setSchema: Dispatch<SetStateAction<SchemaResult | null>>; dispatchTree: Dispatch<SchemaTreeAction>; loadSchema: (conn: ConnectionConfig, database?: string) => void; activeTabRef: RefObject<Tab>; updateActiveTab: (updates: Partial<Tab>) => void }) {
+export function DropObjectDialog({ dropConfirm, dispatchSchema, purgeSchemaCache, schemaConnectionIdRef, dispatchTree, loadSchema, activeTabRef, updateActiveTab }: { dropConfirm: DropConfirm; dispatchSchema: Dispatch<SchemaDataAction>; purgeSchemaCache: (connId: string) => void; schemaConnectionIdRef: RefObject<string | null>; dispatchTree: Dispatch<SchemaTreeAction>; loadSchema: (conn: ConnectionConfig, database?: string) => void; activeTabRef: RefObject<Tab>; updateActiveTab: (updates: Partial<Tab>) => void }) {
   return (
         <>
           <div
             style={modalBackdrop}
-            onClick={() => setDropConfirm(null)}
+            onClick={() => dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: null })}
           />
           <div style={{
             position: "fixed", top: "50%", left: "50%",
@@ -81,16 +82,16 @@ export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache
                     // Invalidate schema cache and reload
                     purgeSchemaCache(conn.id);
                     schemaConnectionIdRef.current = null;
-                    setSchema(null);
+                    dispatchSchema({ type: "SET_SCHEMA", schema: null });
                     dispatchTree({ type: "COLLAPSE_TABLES" });
                     dispatchTree({ type: "COLLAPSE_SECTIONS" });
                     loadSchema(conn, activeTabRef.current.activeDatabase ?? conn.database);
 
-                    setDropConfirm(null);
+                    dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: null });
                   } catch (e) {
                     // Show error in results area
                     updateActiveTab({ error: `Drop failed: ${toIpcError(e).message}` });
-                    setDropConfirm(null);
+                    dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: null });
                   }
                 }}
                 style={{
@@ -104,7 +105,7 @@ export function DropObjectDialog({ dropConfirm, setDropConfirm, purgeSchemaCache
                 Drop {dropConfirm.type}
               </button>
               <button
-                onClick={() => setDropConfirm(null)}
+                onClick={() => dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: null })}
                 style={{
                   flex: 1, padding: "8px 0",
                   background: "transparent", color: "var(--text-tertiary)",
