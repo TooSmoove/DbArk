@@ -1,22 +1,20 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, SetStateAction } from "react";
-import type { ConnectionConfig } from "../types";
+import type { Dispatch } from "react";
+import type { ConnectionMenu } from "../types";
+import type { ConnectionsAction } from "../state/connectionsReducer";
 
 export function ConnectionContextMenu({
-  contextMenu, setContextMenu, setEditingConnection, setShowAddForm, setDeletingConnection,
+  contextMenu, dispatchConn,
 }: {
-  contextMenu: { x: number; y: number; connection: ConnectionConfig };
-  setContextMenu: Dispatch<SetStateAction<{ x: number; y: number; connection: ConnectionConfig } | null>>;
-  setEditingConnection: Dispatch<SetStateAction<ConnectionConfig | null>>;
-  setShowAddForm: Dispatch<SetStateAction<boolean>>;
-  setDeletingConnection: Dispatch<SetStateAction<ConnectionConfig | null>>;
+  contextMenu: ConnectionMenu;
+  dispatchConn: Dispatch<ConnectionsAction>;
 }) {
   return (
         <>
           {/* Backdrop to close on click outside */}
           <div
             style={{ position: "fixed", inset: 0, zIndex: 999 }}
-            onClick={() => setContextMenu(null)}
+            onClick={() => dispatchConn({ type: "CLOSE_CONTEXT_MENU" })}
           />
           <div style={{
             position: "fixed",
@@ -32,9 +30,7 @@ export function ConnectionContextMenu({
           }}>
             <button
               onClick={() => {
-                setEditingConnection(contextMenu.connection);
-                setShowAddForm(true);
-                setContextMenu(null);
+                dispatchConn({ type: "OPEN_EDIT_FORM", connection: contextMenu.connection });
               }}
               className="menu-item"
             >
@@ -42,8 +38,7 @@ export function ConnectionContextMenu({
             </button>
             <button
               onClick={() => {
-                setDeletingConnection(contextMenu.connection);
-                setContextMenu(null);
+                dispatchConn({ type: "REQUEST_DELETE", connection: contextMenu.connection });
               }}
               className="menu-item menu-item--danger"
             >

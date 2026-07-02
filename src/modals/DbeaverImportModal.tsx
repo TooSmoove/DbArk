@@ -1,14 +1,15 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch } from "react";
 import type { DbeaverImportResult } from "../types";
+import type { ConnectionsAction } from "../state/connectionsReducer";
 import { modalBackdrop } from "../ui/styles";
 
-export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbeaverResult, handleDbeaverImport, dbeaverImporting }: { setShowDbeaverImport: Dispatch<SetStateAction<boolean>>; dbeaverResult: DbeaverImportResult | null; setDbeaverResult: Dispatch<SetStateAction<DbeaverImportResult | null>>; handleDbeaverImport: () => void; dbeaverImporting: boolean }) {
+export function DbeaverImportModal({ dispatchConn, dbeaverResult, handleDbeaverImport, dbeaverImporting }: { dispatchConn: Dispatch<ConnectionsAction>; dbeaverResult: DbeaverImportResult | null; handleDbeaverImport: () => void; dbeaverImporting: boolean }) {
   return (
         <>
           <div
             style={modalBackdrop}
-            onClick={() => { setShowDbeaverImport(false); setDbeaverResult(null); }}
+            onClick={() => dispatchConn({ type: "CLOSE_IMPORT" })}
           />
           <div style={{
             position: "fixed", top: "50%", left: "50%",
@@ -44,7 +45,7 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
                     {dbeaverImporting ? "Importing…" : "Import connections"}
                   </button>
                   <button
-                    onClick={() => setShowDbeaverImport(false)}
+                    onClick={() => dispatchConn({ type: "SET_IMPORT_OPEN", open: false })}
                     style={{
                       flex: 1, padding: "8px 0",
                       background: "transparent", color: "var(--text-tertiary)",
@@ -103,7 +104,7 @@ export function DbeaverImportModal({ setShowDbeaverImport, dbeaverResult, setDbe
                 )}
 
                 <button
-                  onClick={() => { setShowDbeaverImport(false); setDbeaverResult(null); }}
+                  onClick={() => dispatchConn({ type: "CLOSE_IMPORT" })}
                   style={{
                     width: "100%", padding: "8px 0",
                     background: "transparent", color: "var(--text-tertiary)",

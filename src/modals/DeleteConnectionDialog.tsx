@@ -1,15 +1,16 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch } from "react";
 import { ipc, toIpcError } from "../ipc";
 import type { ConnectionConfig } from "../types";
 import type { TabsAction } from "../state/tabsReducer";
+import type { ConnectionsAction } from "../state/connectionsReducer";
 import { modalBackdrop } from "../ui/styles";
 
-export function DeleteConnectionDialog({ deletingConnection, setDeletingConnection, dispatchTabs, loadConnections, connectionsFolder }: { deletingConnection: ConnectionConfig; setDeletingConnection: Dispatch<SetStateAction<ConnectionConfig | null>>; dispatchTabs: Dispatch<TabsAction>; loadConnections: (folder: string) => void; connectionsFolder: string }) {
+export function DeleteConnectionDialog({ deletingConnection, dispatchConn, dispatchTabs, loadConnections, connectionsFolder }: { deletingConnection: ConnectionConfig; dispatchConn: Dispatch<ConnectionsAction>; dispatchTabs: Dispatch<TabsAction>; loadConnections: (folder: string) => void; connectionsFolder: string }) {
   return (
         <>
           <div style={modalBackdrop}
-            onClick={() => setDeletingConnection(null)} />
+            onClick={() => dispatchConn({ type: "CLOSE_DELETE" })} />
           <div style={{
             position: "fixed", top: "50%", left: "50%",
             transform: "translate(-50%, -50%)",
@@ -46,7 +47,7 @@ export function DeleteConnectionDialog({ deletingConnection, setDeletingConnecti
                   }
                   // Clear from tabs if active
                   dispatchTabs({ type: "CLEAR_CONNECTION", connectionId: deletingConnection.id });
-                  setDeletingConnection(null);
+                  dispatchConn({ type: "CLOSE_DELETE" });
                   loadConnections(connectionsFolder);
                 }}
                 style={{
@@ -58,7 +59,7 @@ export function DeleteConnectionDialog({ deletingConnection, setDeletingConnecti
                 Delete
               </button>
               <button
-                onClick={() => setDeletingConnection(null)}
+                onClick={() => dispatchConn({ type: "CLOSE_DELETE" })}
                 style={{
                   flex: 1, padding: "8px 0", background: "transparent", color: "var(--text-tertiary)",
                   border: "1px solid var(--border)", borderRadius: 6, cursor: "pointer",

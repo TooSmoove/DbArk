@@ -268,6 +268,14 @@ export interface SchemaContextMenu {
   extra?: any;
 }
 
+// Right-click context menu on a sidebar connection. (Named ConnectionMenu to
+// avoid clashing with the ConnectionContextMenu component.)
+export interface ConnectionMenu {
+  x: number;
+  y: number;
+  connection: ConnectionConfig;
+}
+
 // Result of importing connections from DBeaver's data-sources.json.
 export interface DbeaverImportResult {
   imported: { name: string; engine: string; host: string; port: number;

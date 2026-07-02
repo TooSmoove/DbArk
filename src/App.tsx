@@ -18,6 +18,7 @@ import { createTab, DEFAULT_SETTINGS } from "./appState";
 import { tabsReducer, initTabsState } from "./state/tabsReducer";
 import { schemaTreeReducer, initSchemaTreeState } from "./state/schemaTreeReducer";
 import { schemaDataReducer, initSchemaDataState } from "./state/schemaDataReducer";
+import { connectionsReducer, initConnectionsState, toggledGroup } from "./state/connectionsReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
@@ -41,7 +42,15 @@ import { ellipsisLabel, microMutedLabel } from "./ui/styles";
 function App() {
   const editorRef = useRef<any>(null);
 
-  const [connections, setConnections] = useState<ConnectionConfig[]>([]);
+  // Connection-manager state (list, folder, form, menus, groups, DBeaver
+  // import) lives in a tested reducer. Multi-setter sequences like
+  // "set editee + open form + close menu" are single atomic actions.
+  const [connState, dispatchConn] = useReducer(connectionsReducer, undefined, initConnectionsState);
+  const {
+    connections, connectionsFolder, showAddForm, editingConnection,
+    deletingConnection, contextMenu, collapsedGroups,
+    showDbeaverImport, dbeaverImporting, dbeaverResult,
+  } = connState;
   // Tab state lives in a pure, unit-tested reducer (code-audit A-1, Tier 3).
   // The wrapper setters below keep every existing call site + child prop
   // working unchanged; they route through the tested APPLY_* passthrough
@@ -54,7 +63,6 @@ function App() {
   const sidebarDragging = useRef(false);
   const sidebarStartX = useRef(0);
   const sidebarStartW = useRef(220);
-  const [showAddForm, setShowAddForm] = useState(false);
   const { size: editorHeight, onMouseDown: onEditorDragStart } = useResizable(220, 80, 600);
   const [settings, setSettings]           = useState<AppSettings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings]   = useState(false);
@@ -66,7 +74,6 @@ function App() {
   const [resolvedTheme, setResolvedTheme]     = useState<ResolvedTheme>(
     () => resolveTheme(readStoredTheme())
   );
-  const [connectionsFolder, setConnectionsFolder] = useState("");
   // Schema-explorer data, loading flags, and menus live in a tested reducer.
   // LOAD_START actions make "clear data + raise loading flag" atomic.
   const [schemaData, dispatchSchema] = useReducer(schemaDataReducer, undefined, initSchemaDataState);
@@ -180,12 +187,6 @@ function App() {
     return sorted;
   }, [connections]);
 
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    connection: ConnectionConfig;
-  } | null>(null);
-
   const tablesBySchema = useMemo(() => {
   if (!schema?.tables) return new Map<string, TableInfo[]>();
   const map = new Map<string, TableInfo[]>();
@@ -203,8 +204,6 @@ function App() {
   }));
 }, [schema?.tables]);
 
-  const [editingConnection, setEditingConnection] = useState<ConnectionConfig | null>(null);
-  const [deletingConnection, setDeletingConnection] = useState<ConnectionConfig | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [tunnelPorts, setTunnelPorts] = useState<Record<string, number>>({});
   const tunnelPortsRef = useRef<Record<string, number>>({});
@@ -266,7 +265,7 @@ function App() {
 
           if (stored) {
             try {
-              setCollapsedGroups(new Set(JSON.parse(stored)));
+              dispatchConn({ type: "SET_COLLAPSED_GROUPS", groups: new Set(JSON.parse(stored)) });
             } catch { /* ignore */ }
           }
           
@@ -316,36 +315,20 @@ function App() {
     document.body.style.userSelect = "none";
   }
 
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   function toggleGroup(group: string) {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev);
-      next.has(group) ? next.delete(group) : next.add(group);
-      // Persist to localStorage
-      localStorage.setItem(
-        "dbark_collapsed_groups",
-        JSON.stringify([...next])
-      );
-      return next;
-    });
+    const next = toggledGroup(collapsedGroups, group);
+    // Persist to localStorage — a side effect, so it stays out of the reducer.
+    localStorage.setItem("dbark_collapsed_groups", JSON.stringify([...next]));
+    dispatchConn({ type: "SET_COLLAPSED_GROUPS", groups: next });
   }
 
   //DBeaver import state
-  const [showDbeaverImport, setShowDbeaverImport] = useState(false);
-  const [dbeaverImporting, setDbeaverImporting]   = useState(false);
-  const [dbeaverResult, setDbeaverResult]         = useState<{
-    imported: { name: string; engine: string; host: string; port: number;
-                database: string; username: string; password: string; }[];
-    skipped:  string[];
-    error?:   string;
-  } | null>(null);
-
   async function handleDbeaverImport() {
-    setDbeaverImporting(true);
+    dispatchConn({ type: "IMPORT_START" });
     try {
       const result = await ipcJson<{ imported: { name: string; engine: string; host: string; port: number; database: string; username: string; password: string; }[]; skipped: string[] }>("import_dbeaver_connections");
-      setDbeaverResult(result);
+      dispatchConn({ type: "SET_IMPORT_RESULT", result });
 
       if (result.imported.length > 0) {
         // Save each connection and store its password in the keychain
@@ -393,9 +376,9 @@ function App() {
         loadConnections(connectionsFolder);
       }
     } catch (e) {
-      setDbeaverResult({ imported: [], skipped: [], error: toIpcError(e).message });
+      dispatchConn({ type: "SET_IMPORT_RESULT", result: { imported: [], skipped: [], error: toIpcError(e).message } });
     } finally {
-      setDbeaverImporting(false);
+      dispatchConn({ type: "IMPORT_DONE" });
     }
   }
   //END DBeaver import
@@ -526,7 +509,7 @@ function App() {
       homeDir().then(async home => {
         const folder = await join(home, ".dbark", "connections");
         console.log("Connections folder:", folder);
-        setConnectionsFolder(folder);
+        dispatchConn({ type: "SET_CONNECTIONS_FOLDER", folder });
         loadConnections(folder);
       });
     });
@@ -536,7 +519,7 @@ function App() {
     if (!folder) return;
     try {
       const parsed = await ipcJson<ConnectionListResult>("list_connections", { folderPath: folder });
-      setConnections(parsed.connections ?? []);
+      dispatchConn({ type: "SET_CONNECTIONS", connections: parsed.connections ?? [] });
 
       if (parsed.connections?.length > 0) {
         const currentConn = activeTabRef.current.connection;
@@ -2542,7 +2525,7 @@ function handleCellCommit(
 
       {locked && <LockOverlay setLocked={setLocked} resetInactivityTimer={resetInactivityTimer} />}
 
-      {contextMenu && <ConnectionContextMenu contextMenu={contextMenu} setContextMenu={setContextMenu} setEditingConnection={setEditingConnection} setShowAddForm={setShowAddForm} setDeletingConnection={setDeletingConnection} />}
+      {contextMenu && <ConnectionContextMenu contextMenu={contextMenu} dispatchConn={dispatchConn} />}
       {/* Schema object context menu */}
       {schemaContextMenu && (
         <>
@@ -2788,14 +2771,14 @@ function handleCellCommit(
         </>
       )}
       {/* END Schema object context menu */}
-      {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} setDeletingConnection={setDeletingConnection} dispatchTabs={dispatchTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
+      {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} dispatchConn={dispatchConn} dispatchTabs={dispatchTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
       {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} dispatchSchema={dispatchSchema} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} dispatchTree={dispatchTree} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
       {killPending && <KillSessionDialog killPending={killPending} setKillPending={setKillPending} killActivity={killActivity} />}
 
       {showPalette && <CommandPalette setShowPalette={setShowPalette} paletteQuery={paletteQuery} setPaletteQuery={setPaletteQuery} paletteIndex={paletteIndex} setPaletteIndex={setPaletteIndex} filteredPalette={filteredPalette} />}
       {showSettings && <SettingsModal setShowSettings={setShowSettings} settingsDraft={settingsDraft} setSettingsDraft={setSettingsDraft} themePreference={themePreference} setThemePreference={setThemePreference} setSettings={setSettings} setAuditLogEnabled={setAuditLogEnabled} />}
         {saveQueryOpen && <SaveQueryModal saveQueryName={saveQueryName} setSaveQueryName={setSaveQueryName} saveQueryTags={saveQueryTags} setSaveQueryTags={setSaveQueryTags} saveQueryDesc={saveQueryDesc} setSaveQueryDesc={setSaveQueryDesc} handleSaveQuery={handleSaveQuery} setSaveQueryOpen={setSaveQueryOpen} />}
-        {showDbeaverImport && <DbeaverImportModal setShowDbeaverImport={setShowDbeaverImport} dbeaverResult={dbeaverResult} setDbeaverResult={setDbeaverResult} handleDbeaverImport={handleDbeaverImport} dbeaverImporting={dbeaverImporting} />}
+        {showDbeaverImport && <DbeaverImportModal dispatchConn={dispatchConn} dbeaverResult={dbeaverResult} handleDbeaverImport={handleDbeaverImport} dbeaverImporting={dbeaverImporting} />}
       {/* Sidebar */}
       <div style={{
         width: sidebarWidth, minWidth: sidebarWidth, maxWidth: sidebarWidth,
@@ -2816,13 +2799,11 @@ function handleCellCommit(
               connectionsFolder={connectionsFolder}
               editingConnection={editingConnection}
               onSave={() => {
-                setShowAddForm(false);
-                setEditingConnection(null);
+                dispatchConn({ type: "CLOSE_FORM" });
                 loadConnections(connectionsFolder);
               }}
               onCancel={() => {
-                setShowAddForm(false);
-                setEditingConnection(null);
+                dispatchConn({ type: "CLOSE_FORM" });
               }}
             />
           </div>
@@ -2896,7 +2877,7 @@ function handleCellCommit(
             {/* Connections section label */}
             <div style={{ padding: "8px 14px 4px", borderBottom: "1px solid var(--border)", fontSize: 10, fontWeight: 600, color: "var(--text-disabled)", textTransform: "uppercase", letterSpacing: ".06em" }}>
               Connections &nbsp;&nbsp;
-              <button onClick={() => setShowAddForm(v => !v)} title="Add connection" style={{
+              <button onClick={() => dispatchConn({ type: "TOGGLE_ADD_FORM" })} title="Add connection" style={{
                   background: "none", border: "1px solid var(--border)", borderRadius: 4,
                   color: "var(--text-secondary)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "2px 7px", flexShrink: 0,
                 }}>
@@ -2914,7 +2895,7 @@ function handleCellCommit(
                 📋
               </button>
               <button
-                onClick={() => setShowDbeaverImport(true)}
+                onClick={() => dispatchConn({ type: "SET_IMPORT_OPEN", open: true })}
                 title="Import from DBeaver"
                 style={{
                   background: "none", border: "1px solid var(--border)", borderRadius: 4,
@@ -3009,10 +2990,10 @@ function handleCellCommit(
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
-                      setContextMenu({
+                      dispatchConn({ type: "OPEN_CONTEXT_MENU", menu: {
                         x: e.clientX, y: e.clientY,
                         connection: conn,
-                      });
+                      } });
                     }}
                     style={{
                       padding: "9px 14px",
