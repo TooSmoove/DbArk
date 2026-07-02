@@ -34,6 +34,7 @@ chrono = { version = "0.4.44", features = ["std", "serde"] }
 rand = "0.8"
 rfd = "0.15"
 zeroize = { version = "1.8", features = ["derive"] }
+emnapi = { version = "1.11.1" }
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 
