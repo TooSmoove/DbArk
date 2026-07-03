@@ -94,3 +94,26 @@ one** error path. Do not reintroduce the old ambiguity:
   `internal`) are pinned by `ipc_error_tests` in `main.rs` and mirrored in the
   `IpcErrorCode` type in `src/ipc.ts`. Change both together, or the single parse
   path breaks silently.
+
+## State management pattern (audit item A-1 — closed)
+
+Frontend state lives in **pure, tested reducers** under `src/state/` — one per
+domain: tabs, schemaTree, schemaData, connections (incl. SSH tunnels),
+activity, settings, savedQueries, palette, history. Rules for new work:
+
+- **Multi-field transitions are reducer actions, not setter sequences.** If a
+  user action changes two or more pieces of state together (open-and-reset,
+  save-and-clear, error-and-clear-rows), it must be ONE dispatched action with
+  a unit test — never consecutive `setState` calls.
+- **Reducers stay pure.** No DOM, no IPC, no `localStorage` inside a reducer.
+  Side effects (invokes, persistence) live at the dispatch site; if the
+  persisted value must match the next state, compute it with an exported pure
+  helper (see `toggledGroup` in `connectionsReducer`).
+- **Every action must have a live dispatch site** — no speculative actions.
+  Every reducer file has a sibling `.test.ts`; `npm test` type-checks tests
+  via `tsconfig.vitest.json` before running them.
+- **Plain `useState` is still correct** for independent scalars with no
+  combined transitions (e.g. `sidebarWidth`, `locked`, `showDiagram`,
+  `showExportMenu`, `recentFiles`, and the theme pair, which is deliberately
+  effect-driven — see the comment in `src/types.ts`). Do not reducer-ify a
+  lone boolean for its own sake.

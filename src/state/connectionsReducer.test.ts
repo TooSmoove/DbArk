@@ -122,3 +122,16 @@ describe("plain setters", () => {
     expect(s.connectionsFolder).toBe("/home/u/.dbark/connections");
   });
 });
+
+describe("SSH tunnel state", () => {
+  it("SET_TUNNEL_LOADING merges per-connection flags", () => {
+    let s = connectionsReducer(base(), { type: "SET_TUNNEL_LOADING", connId: "c1", loading: true });
+    s = connectionsReducer(s, { type: "SET_TUNNEL_LOADING", connId: "c2", loading: true });
+    s = connectionsReducer(s, { type: "SET_TUNNEL_LOADING", connId: "c1", loading: false });
+    expect(s.tunnelLoading).toEqual({ c1: false, c2: true });
+  });
+  it("SET_TUNNEL_PORTS replaces the map", () => {
+    const s = connectionsReducer(base(), { type: "SET_TUNNEL_PORTS", ports: { c1: 15432 } });
+    expect(s.tunnelPorts).toEqual({ c1: 15432 });
+  });
+});

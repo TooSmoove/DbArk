@@ -1,14 +1,15 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch } from "react";
+import type { PaletteAction } from "../state/paletteReducer";
 import type { PaletteItem } from "../types";
 
-export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, paletteIndex, setPaletteIndex, filteredPalette }: { setShowPalette: Dispatch<SetStateAction<boolean>>; paletteQuery: string; setPaletteQuery: Dispatch<SetStateAction<string>>; paletteIndex: number; setPaletteIndex: Dispatch<SetStateAction<number>>; filteredPalette: PaletteItem[] }) {
+export function CommandPalette({ dispatchPalette, paletteQuery, paletteIndex, filteredPalette }: { dispatchPalette: Dispatch<PaletteAction>; paletteQuery: string; paletteIndex: number; filteredPalette: PaletteItem[] }) {
   return (
         <>
           <div
             style={{ position: "fixed", inset: 0, zIndex: 999,
               background: "var(--scrim)" }}
-            onClick={() => setShowPalette(false)}
+            onClick={() => dispatchPalette({ type: "CLOSE_PALETTE" })}
           />
           <div style={{
             position: "fixed", top: 120, left: "50%",
@@ -25,22 +26,22 @@ export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, 
               autoFocus
               type="text"
               value={paletteQuery}
-              onChange={e => { setPaletteQuery(e.target.value); setPaletteIndex(0); }}
+              onChange={e => dispatchPalette({ type: "SET_QUERY", query: e.target.value })}
               onKeyDown={e => {
                 if (e.key === "Escape") {
                   e.preventDefault();
-                  setShowPalette(false);
+                  dispatchPalette({ type: "CLOSE_PALETTE" });
                 } else if (e.key === "ArrowDown") {
                   e.preventDefault();
-                  setPaletteIndex(i => Math.min(i + 1, filteredPalette.length - 1));
+                  dispatchPalette({ type: "MOVE_SELECTION", delta: 1, max: filteredPalette.length });
                 } else if (e.key === "ArrowUp") {
                   e.preventDefault();
-                  setPaletteIndex(i => Math.max(i - 1, 0));
+                  dispatchPalette({ type: "MOVE_SELECTION", delta: -1, max: filteredPalette.length });
                 } else if (e.key === "Enter") {
                   e.preventDefault();
                   const item = filteredPalette[paletteIndex];
                   if (item) {
-                    setShowPalette(false);
+                    dispatchPalette({ type: "CLOSE_PALETTE" });
                     // Defer the action to next tick so the modal can unmount
                     // before the action mutates state that the modal touched
                     // (e.g. setActiveTabId, which would otherwise re-render
@@ -83,9 +84,9 @@ export function CommandPalette({ setShowPalette, paletteQuery, setPaletteQuery, 
                         el.scrollIntoView({ block: "nearest" });
                       }
                     }}
-                    onMouseEnter={() => setPaletteIndex(i)}
+                    onMouseEnter={() => dispatchPalette({ type: "SET_INDEX", index: i })}
                     onClick={() => {
-                      setShowPalette(false);
+                      dispatchPalette({ type: "CLOSE_PALETTE" });
                       setTimeout(() => item.onSelect(), 0);
                     }}
                     style={{

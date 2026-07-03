@@ -30,6 +30,10 @@ export interface ConnectionsState {
   showDbeaverImport: boolean;
   dbeaverImporting: boolean;
   dbeaverResult: DbeaverImportResult | null;
+  /** Local port of each connection's open SSH tunnel, keyed by connection id. */
+  tunnelPorts: Record<string, number>;
+  /** Per-connection tunnel-opening flag, keyed by connection id. */
+  tunnelLoading: Record<string, boolean>;
 }
 
 export type ConnectionsAction =
@@ -52,7 +56,11 @@ export type ConnectionsAction =
   | { type: "CLOSE_IMPORT" }
   | { type: "IMPORT_START" }
   | { type: "SET_IMPORT_RESULT"; result: DbeaverImportResult }
-  | { type: "IMPORT_DONE" };
+  | { type: "IMPORT_DONE" }
+  /** Merge one connection's tunnel-opening flag. */
+  | { type: "SET_TUNNEL_LOADING"; connId: string; loading: boolean }
+  /** Replace the tunnel-port map (synced from tunnelPortsRef after open). */
+  | { type: "SET_TUNNEL_PORTS"; ports: Record<string, number> };
 
 /**
  * Toggle a group's membership, returning a new set. Exported so the dispatch
@@ -121,6 +129,15 @@ export function connectionsReducer(
     case "IMPORT_DONE":
       return { ...state, dbeaverImporting: false };
 
+    case "SET_TUNNEL_LOADING":
+      return {
+        ...state,
+        tunnelLoading: { ...state.tunnelLoading, [action.connId]: action.loading },
+      };
+
+    case "SET_TUNNEL_PORTS":
+      return { ...state, tunnelPorts: action.ports };
+
     default: {
       // Exhaustiveness guard — a new action type without a case fails the build.
       const _never: never = action;
@@ -142,5 +159,7 @@ export function initConnectionsState(): ConnectionsState {
     showDbeaverImport: false,
     dbeaverImporting: false,
     dbeaverResult: null,
+    tunnelPorts: {},
+    tunnelLoading: {},
   };
 }

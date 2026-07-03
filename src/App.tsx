@@ -22,6 +22,8 @@ import { connectionsReducer, initConnectionsState, toggledGroup } from "./state/
 import { activityReducer, initActivityState } from "./state/activityReducer";
 import { settingsReducer, initSettingsState } from "./state/settingsReducer";
 import { savedQueriesReducer, initSavedQueriesState } from "./state/savedQueriesReducer";
+import { paletteReducer, initPaletteState } from "./state/paletteReducer";
+import { historyReducer, initHistoryState } from "./state/historyReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
@@ -53,6 +55,7 @@ function App() {
     connections, connectionsFolder, showAddForm, editingConnection,
     deletingConnection, contextMenu, collapsedGroups,
     showDbeaverImport, dbeaverImporting, dbeaverResult,
+    tunnelPorts, tunnelLoading,
   } = connState;
   // Tab state lives in a pure, unit-tested reducer (code-audit A-1, Tier 3).
   // The wrapper setters below keep every existing call site + child prop
@@ -94,8 +97,8 @@ function App() {
   const [schemaTree, dispatchTree] = useReducer(schemaTreeReducer, undefined, initSchemaTreeState);
   const { expandedTables, expandedSchemas, expandedSections, dbTreeCollapsed } = schemaTree;
   const schemaRef = useRef<SchemaResult | null>(null);
-  const [showHistory, setShowHistory] = useState(false);
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyState, dispatchHistory] = useReducer(historyReducer, undefined, initHistoryState);
+  const { open: showHistory, entries: history } = historyState;
 
   // Activity panel — bottom panel peer to results tabs.
   // Hidden for SQLite (no concept of server-side activity).
@@ -121,9 +124,10 @@ function App() {
   // is O(connections + tables + tabs + saved + commands), tiny relative
   // to the cost of fuse.js running over it. Recompute fresh on every
   // render while the palette is open; closed → no work happens.
-  const [showPalette, setShowPalette]   = useState(false);
-  const [paletteQuery, setPaletteQuery] = useState("");
-  const [paletteIndex, setPaletteIndex] = useState(0);
+  // Palette state lives in a tested reducer: OPEN_PALETTE opens fresh
+  // (replacing the reset-on-open effect); navigation clamping is tested.
+  const [paletteState, dispatchPalette] = useReducer(paletteReducer, undefined, initPaletteState);
+  const { open: showPalette, query: paletteQuery, index: paletteIndex } = paletteState;
   const [locked, setLocked] = useState(false);
   // Save-dialog + query-library state lives in a tested reducer; the
   // save-success transition (close + clear all fields) is atomic.
@@ -210,9 +214,7 @@ function App() {
 }, [schema?.tables]);
 
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const [tunnelPorts, setTunnelPorts] = useState<Record<string, number>>({});
   const tunnelPortsRef = useRef<Record<string, number>>({});
-  const [tunnelLoading, setTunnelLoading] = useState<Record<string, boolean>>({});
   const wasRewritten = activeTab.results.some(r => r.wasRewritten);
 
   // Apply theme to <html data-theme>, persist to localStorage, and
@@ -391,7 +393,7 @@ function App() {
     if (!conn.sshEnabled) return null;
     if (tunnelPortsRef.current[conn.id]) return tunnelPortsRef.current[conn.id];
 
-    setTunnelLoading(prev => ({ ...prev, [conn.id]: true }));
+    dispatchConn({ type: "SET_TUNNEL_LOADING", connId: conn.id, loading: true });
     try {
       // Get SSH password from keychain if stored
       let sshPassword = "";
@@ -417,14 +419,14 @@ function App() {
 
       console.log("open_tunnel invoke result:", localPort);
       tunnelPortsRef.current = { ...tunnelPortsRef.current, [conn.id]: localPort };
-      setTunnelPorts({ ...tunnelPortsRef.current });
+      dispatchConn({ type: "SET_TUNNEL_PORTS", ports: { ...tunnelPortsRef.current } });
       return localPort;
     } catch (e) {
       console.error("open_tunnel invoke error:", e);
       updateActiveTab({ error: `SSH tunnel failed: ${toIpcError(e).message}` });
       return null;
     } finally {
-      setTunnelLoading(prev => ({ ...prev, [conn.id]: false }));
+      dispatchConn({ type: "SET_TUNNEL_LOADING", connId: conn.id, loading: false });
     }
   }
 
@@ -652,7 +654,7 @@ function App() {
     // to call from this mount-once handler.
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === "p" || e.key === "P")) {
       e.preventDefault();
-      setShowPalette(true);
+      dispatchPalette({ type: "OPEN_PALETTE" });
     }
 
     // Block WebView reload shortcuts at the document level. A native app
@@ -1569,7 +1571,7 @@ function App() {
       // No ref needed; setShowPalette is stable across renders.
       editor.addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP,
-        () => { setShowPalette(true); }
+        () => { dispatchPalette({ type: "OPEN_PALETTE" }); }
       );
 
       // F5 — alias for Run (SSMS muscle memory).
@@ -1878,7 +1880,7 @@ function App() {
   //Load query history for a connection
   async function loadHistory(conn: ConnectionConfig | null) {
     if (!conn) {
-      setHistory([]);
+      dispatchHistory({ type: "CLEAR_ENTRIES" });
       return;
     }
     try {
@@ -1887,7 +1889,7 @@ function App() {
         limit: 100,
       });
 
-      setHistory(parsed.entries ?? []);
+      dispatchHistory({ type: "SET_ENTRIES", entries: parsed.entries ?? [] });
     } catch (e) {
       console.error("Failed to load history:", e);
     }
@@ -2068,7 +2070,7 @@ function App() {
       category: "command",
       label: showHistory ? "Hide query history" : "Show query history",
       secondary: "",
-      onSelect: () => { setShowHistory(v => !v); },
+      onSelect: () => { dispatchHistory({ type: "TOGGLE_HISTORY" }); },
     });
     items.push({
       id: "cmd:newtab",
@@ -2250,18 +2252,9 @@ function App() {
   // a row that no longer exists.
   useEffect(() => {
     if (paletteIndex >= filteredPalette.length) {
-      setPaletteIndex(Math.max(0, filteredPalette.length - 1));
+      dispatchPalette({ type: "CLAMP_SELECTION", max: filteredPalette.length });
     }
   }, [filteredPalette.length, paletteIndex]);
-
-  // Reset query + cursor when the palette opens or closes — opening fresh
-  // should always start with an empty search, not whatever was there before.
-  useEffect(() => {
-    if (showPalette) {
-      setPaletteQuery("");
-      setPaletteIndex(0);
-    }
-  }, [showPalette]);
 
   async function exportResults(format: "csv" | "json") {
     const result = activeTab.results[activeTab.activeResult];
@@ -2774,7 +2767,7 @@ function handleCellCommit(
       {dropConfirm && <DropObjectDialog dropConfirm={dropConfirm} dispatchSchema={dispatchSchema} purgeSchemaCache={purgeSchemaCache} schemaConnectionIdRef={schemaConnectionId} dispatchTree={dispatchTree} loadSchema={loadSchema} activeTabRef={activeTabRef} updateActiveTab={updateActiveTab} />}
       {killPending && <KillSessionDialog killPending={killPending} dispatchActivity={dispatchActivity} killActivity={killActivity} />}
 
-      {showPalette && <CommandPalette setShowPalette={setShowPalette} paletteQuery={paletteQuery} setPaletteQuery={setPaletteQuery} paletteIndex={paletteIndex} setPaletteIndex={setPaletteIndex} filteredPalette={filteredPalette} />}
+      {showPalette && <CommandPalette dispatchPalette={dispatchPalette} paletteQuery={paletteQuery} paletteIndex={paletteIndex} filteredPalette={filteredPalette} />}
       {showSettings && <SettingsModal dispatchSettings={dispatchSettings} settingsDraft={settingsDraft} themePreference={themePreference} setThemePreference={setThemePreference} />}
         {saveQueryOpen && <SaveQueryModal saveQueryName={saveQueryName} saveQueryTags={saveQueryTags} saveQueryDesc={saveQueryDesc} handleSaveQuery={handleSaveQuery} dispatchSavedQueries={dispatchSavedQueries} />}
         {showDbeaverImport && <DbeaverImportModal dispatchConn={dispatchConn} dbeaverResult={dbeaverResult} handleDbeaverImport={handleDbeaverImport} dbeaverImporting={dbeaverImporting} />}
@@ -3909,7 +3902,7 @@ function handleCellCommit(
           {/* Show History Button */}
           <button
             onClick={() => {
-              setShowHistory(h => !h);
+              dispatchHistory({ type: "TOGGLE_HISTORY" });
               if (!showHistory) loadHistory(activeTab.connection);
             }}
             style={{
@@ -4030,7 +4023,7 @@ function handleCellCommit(
           )}
         </div>
         
-        {showHistory && <HistoryPanel activeTab={activeTab} history={history} setHistory={setHistory} setShowHistory={setShowHistory} editorRef={editorRef} />}
+        {showHistory && <HistoryPanel activeTab={activeTab} history={history} dispatchHistory={dispatchHistory} editorRef={editorRef} />}
 
         {/* Join tables panel — only shown when a file is active */}
         {activeTab.file && (

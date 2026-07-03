@@ -1,17 +1,17 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { Dispatch, RefObject } from "react";
 import { ipc, toIpcError } from "../ipc";
 import type { HistoryEntry, Tab } from "../types";
+import type { HistoryAction } from "../state/historyReducer";
 
 type EditorHandle = { getValue: () => string; setValue: (value: string) => void };
 
 export function HistoryPanel({
-  activeTab, history, setHistory, setShowHistory, editorRef,
+  activeTab, history, dispatchHistory, editorRef,
 }: {
   activeTab: Tab;
   history: HistoryEntry[];
-  setHistory: Dispatch<SetStateAction<HistoryEntry[]>>;
-  setShowHistory: Dispatch<SetStateAction<boolean>>;
+  dispatchHistory: Dispatch<HistoryAction>;
   editorRef: RefObject<EditorHandle | null>;
 }) {
   return (
@@ -43,7 +43,7 @@ export function HistoryPanel({
                     await ipc("clear_history", {
                       connectionId: activeTab.connection?.id ?? ""
                     });
-                    setHistory([]);
+                    dispatchHistory({ type: "CLEAR_ENTRIES" });
                   } catch (e) {
                     console.error("Clear history failed:", toIpcError(e).message);
                   }
@@ -67,7 +67,7 @@ export function HistoryPanel({
                   key={entry.id}
                   onClick={() => {
                     editorRef.current?.setValue(entry.sql);
-                    setShowHistory(false);
+                    dispatchHistory({ type: "SET_HISTORY_OPEN", open: false });
                   }}
                   style={{
                     padding: "8px 14px",
