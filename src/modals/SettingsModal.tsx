@@ -1,17 +1,17 @@
 // Extracted from App.tsx (code-audit item A-1).
 import type { Dispatch, SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { DEFAULT_SETTINGS } from "../appState";
 import { selectStyle, SettingsSection, SettingsRow } from "../ui";
 import type { AppSettings, ThemePreference } from "../types";
+import type { SettingsAction } from "../state/settingsReducer";
 import { icon14, modalBackdrop } from "../ui/styles";
 
-export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft, themePreference, setThemePreference, setSettings, setAuditLogEnabled }: { setShowSettings: Dispatch<SetStateAction<boolean>>; settingsDraft: AppSettings; setSettingsDraft: Dispatch<SetStateAction<AppSettings>>; themePreference: ThemePreference; setThemePreference: Dispatch<SetStateAction<ThemePreference>>; setSettings: Dispatch<SetStateAction<AppSettings>>; setAuditLogEnabled: Dispatch<SetStateAction<boolean>> }) {
+export function SettingsModal({ dispatchSettings, settingsDraft, themePreference, setThemePreference }: { dispatchSettings: Dispatch<SettingsAction>; settingsDraft: AppSettings; themePreference: ThemePreference; setThemePreference: Dispatch<SetStateAction<ThemePreference>> }) {
   return (
         <>
           <div
             style={modalBackdrop}
-            onClick={() => setShowSettings(false)}
+            onClick={() => dispatchSettings({ type: "SET_SETTINGS_OPEN", open: false })}
           />
           <div style={{
             position: "fixed", top: "50%", left: "50%",
@@ -34,7 +34,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 ⚙ Settings
               </div>
               <button
-                onClick={() => setShowSettings(false)}
+                onClick={() => dispatchSettings({ type: "SET_SETTINGS_OPEN", open: false })}
                 style={{ background: "none", border: "none",
                   color: "var(--text-tertiary)", cursor: "pointer", fontSize: 18 }}
               >
@@ -53,9 +53,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 >
                   <select
                     value={settingsDraft.queryTimeoutSecs}
-                    onChange={e => setSettingsDraft(s => ({
-                      ...s, queryTimeoutSecs: Number(e.target.value)
-                    }))}
+                    onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { queryTimeoutSecs: Number(e.target.value) } })}
                     style={selectStyle}
                   >
                     {[5, 15, 30, 60, 120, 300].map(v => (
@@ -70,9 +68,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 >
                   <select
                     value={settingsDraft.resultRowLimit}
-                    onChange={e => setSettingsDraft(s => ({
-                      ...s, resultRowLimit: Number(e.target.value)
-                    }))}
+                    onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { resultRowLimit: Number(e.target.value) } })}
                     style={selectStyle}
                   >
                     {[50000, 250000, 5000000, 0].map(v => (
@@ -89,9 +85,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 >
                   <select
                     value={settingsDraft.resultClearMins}
-                    onChange={e => setSettingsDraft(s => ({
-                      ...s, resultClearMins: Number(e.target.value)
-                    }))}
+                    onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { resultClearMins: Number(e.target.value) } })}
                     style={selectStyle}
                   >
                     <option value={1}>1 min</option>
@@ -111,9 +105,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 >
                   <select
                     value={settingsDraft.lockTimeoutMins}
-                    onChange={e => setSettingsDraft(s => ({
-                      ...s, lockTimeoutMins: Number(e.target.value)
-                    }))}
+                    onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { lockTimeoutMins: Number(e.target.value) } })}
                     style={selectStyle}
                   >
                     <option value={1}>1 min</option>
@@ -134,17 +126,13 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                     <input
                       type="checkbox"
                       checked={settingsDraft.clipboardClearEnabled}
-                      onChange={e => setSettingsDraft(s => ({
-                        ...s, clipboardClearEnabled: e.target.checked
-                      }))}
+                      onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { clipboardClearEnabled: e.target.checked } })}
                       style={icon14}
                     />
                     {settingsDraft.clipboardClearEnabled && (
                       <select
                         value={settingsDraft.clipboardClearSecs}
-                        onChange={e => setSettingsDraft(s => ({
-                          ...s, clipboardClearSecs: Number(e.target.value)
-                        }))}
+                        onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { clipboardClearSecs: Number(e.target.value) } })}
                         style={selectStyle}
                       >
                         <option value={30}>after 30s</option>
@@ -163,9 +151,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                   <input
                     type="checkbox"
                     checked={settingsDraft.auditLogEnabled}
-                    onChange={e => setSettingsDraft(s => ({
-                      ...s, auditLogEnabled: e.target.checked
-                    }))}
+                    onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { auditLogEnabled: e.target.checked } })}
                     style={icon14}
                   />
                 </SettingsRow>
@@ -179,9 +165,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 >
                   <select
                     value={settingsDraft.historyRetentionDays}
-                    onChange={e => setSettingsDraft(s => ({
-                      ...s, historyRetentionDays: Number(e.target.value)
-                    }))}
+                    onChange={e => dispatchSettings({ type: "UPDATE_DRAFT", patch: { historyRetentionDays: Number(e.target.value) } })}
                     style={selectStyle}
                   >
                     <option value={7}>7 days</option>
@@ -236,9 +220,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                     await invoke("save_settings", {
                       settingsJson: JSON.stringify(toSave)
                     });
-                    setSettings(settingsDraft);
-                    setAuditLogEnabled(settingsDraft.auditLogEnabled);
-                    setShowSettings(false);
+                    dispatchSettings({ type: "COMMIT_DRAFT" });
                   } catch (e) {
                     console.error("Failed to save settings:", e);
                   }
@@ -254,7 +236,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 Save
               </button>
               <button
-                onClick={() => setShowSettings(false)}
+                onClick={() => dispatchSettings({ type: "SET_SETTINGS_OPEN", open: false })}
                 style={{
                   flex: 1, padding: "8px 0",
                   background: "transparent", color: "var(--text-secondary)",
@@ -266,7 +248,7 @@ export function SettingsModal({ setShowSettings, settingsDraft, setSettingsDraft
                 Cancel
               </button>
               <button
-                onClick={() => setSettingsDraft(DEFAULT_SETTINGS)}
+                onClick={() => dispatchSettings({ type: "RESET_DRAFT" })}
                 style={{
                   padding: "8px 14px",
                   background: "transparent", color: "var(--text-tertiary)",

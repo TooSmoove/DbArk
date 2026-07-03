@@ -1,13 +1,11 @@
 // Extracted from App.tsx (code-audit item A-1).
-import type { Dispatch, SetStateAction } from "react";
-import type { AppSettings } from "../types";
+import type { Dispatch } from "react";
+import type { SettingsAction } from "../state/settingsReducer";
 
 export function SidebarFooter({
-  settings, setSettingsDraft, setShowSettings,
+  dispatchSettings,
 }: {
-  settings: AppSettings;
-  setSettingsDraft: Dispatch<SetStateAction<AppSettings>>;
-  setShowSettings: Dispatch<SetStateAction<boolean>>;
+  dispatchSettings: Dispatch<SettingsAction>;
 }) {
   return (
       <div style={{
@@ -20,8 +18,7 @@ export function SidebarFooter({
       }}>
         <button
           onClick={() => {
-            setSettingsDraft({ ...settings });
-            setShowSettings(true);
+            dispatchSettings({ type: "OPEN_SETTINGS" });
           }}
           title="Settings"
           style={{

@@ -14,12 +14,13 @@ import {
   CommandPalette, SettingsModal, SaveQueryModal, DbeaverImportModal,
   ConnectionContextMenu,
 } from "./modals";
-import { createTab, DEFAULT_SETTINGS } from "./appState";
+import { createTab } from "./appState";
 import { tabsReducer, initTabsState } from "./state/tabsReducer";
 import { schemaTreeReducer, initSchemaTreeState } from "./state/schemaTreeReducer";
 import { schemaDataReducer, initSchemaDataState } from "./state/schemaDataReducer";
 import { connectionsReducer, initConnectionsState, toggledGroup } from "./state/connectionsReducer";
 import { activityReducer, initActivityState } from "./state/activityReducer";
+import { settingsReducer, initSettingsState } from "./state/settingsReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
@@ -65,9 +66,10 @@ function App() {
   const sidebarStartX = useRef(0);
   const sidebarStartW = useRef(220);
   const { size: editorHeight, onMouseDown: onEditorDragStart } = useResizable(220, 80, 600);
-  const [settings, setSettings]           = useState<AppSettings>(DEFAULT_SETTINGS);
-  const [showSettings, setShowSettings]   = useState(false);
-  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(DEFAULT_SETTINGS);
+  // Settings (committed + modal draft + audit flag) live in a tested reducer;
+  // the draft/commit dance (open-snapshot, edit, save-promote) is atomic.
+  const [settingsState, dispatchSettings] = useReducer(settingsReducer, undefined, initSettingsState);
+  const { settings, showSettings, draft: settingsDraft, auditLogEnabled } = settingsState;
 
   // Theme — preference is what the user chose (system/light/dark);
   // resolved is the actual rendered theme (light/dark) after resolving "system".
@@ -209,7 +211,6 @@ function App() {
   const [tunnelPorts, setTunnelPorts] = useState<Record<string, number>>({});
   const tunnelPortsRef = useRef<Record<string, number>>({});
   const [tunnelLoading, setTunnelLoading] = useState<Record<string, boolean>>({});
-  const [auditLogEnabled, setAuditLogEnabled] = useState(false);
   const wasRewritten = activeTab.results.some(r => r.wasRewritten);
 
   // Apply theme to <html data-theme>, persist to localStorage, and
@@ -270,8 +271,7 @@ function App() {
             } catch { /* ignore */ }
           }
           
-          setSettings(mapped);
-          setAuditLogEnabled(mapped.auditLogEnabled);
+          dispatchSettings({ type: "LOAD_SETTINGS", settings: mapped });
         } catch { /* use defaults */ }
       })
       .catch(() => { /* use defaults */ });
@@ -279,7 +279,7 @@ function App() {
 
   useEffect(() => {
     const stored = localStorage.getItem("dbark_audit_log");
-    if (stored === "true") setAuditLogEnabled(true);
+    if (stored === "true") dispatchSettings({ type: "SET_AUDIT_LOG", enabled: true });
   }, []);
 
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
@@ -641,6 +641,16 @@ function App() {
       e.preventDefault();
       //const sql = editorRef.current?.getValue()?.trim() ?? "";
       setSaveQueryOpen(true);
+    }
+
+    // Ctrl+P / Cmd+P — open the command palette from ANY focus state, and
+    // block the WebView's default (the print dialog). Monaco's addCommand
+    // only intercepts this when the editor is focused — same reasoning as
+    // the F5 block below. setShowPalette is a stable setter, so it is safe
+    // to call from this mount-once handler.
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === "p" || e.key === "P")) {
+      e.preventDefault();
+      setShowPalette(true);
     }
 
     // Block WebView reload shortcuts at the document level. A native app
@@ -2049,7 +2059,7 @@ function App() {
       category: "command",
       label: "Open Settings",
       secondary: "",
-      onSelect: () => { setShowSettings(true); },
+      onSelect: () => { dispatchSettings({ type: "SET_SETTINGS_OPEN", open: true }); },
     });
     items.push({
       id: "cmd:history",
@@ -2766,7 +2776,7 @@ function handleCellCommit(
       {killPending && <KillSessionDialog killPending={killPending} dispatchActivity={dispatchActivity} killActivity={killActivity} />}
 
       {showPalette && <CommandPalette setShowPalette={setShowPalette} paletteQuery={paletteQuery} setPaletteQuery={setPaletteQuery} paletteIndex={paletteIndex} setPaletteIndex={setPaletteIndex} filteredPalette={filteredPalette} />}
-      {showSettings && <SettingsModal setShowSettings={setShowSettings} settingsDraft={settingsDraft} setSettingsDraft={setSettingsDraft} themePreference={themePreference} setThemePreference={setThemePreference} setSettings={setSettings} setAuditLogEnabled={setAuditLogEnabled} />}
+      {showSettings && <SettingsModal dispatchSettings={dispatchSettings} settingsDraft={settingsDraft} themePreference={themePreference} setThemePreference={setThemePreference} />}
         {saveQueryOpen && <SaveQueryModal saveQueryName={saveQueryName} setSaveQueryName={setSaveQueryName} saveQueryTags={saveQueryTags} setSaveQueryTags={setSaveQueryTags} saveQueryDesc={saveQueryDesc} setSaveQueryDesc={setSaveQueryDesc} handleSaveQuery={handleSaveQuery} setSaveQueryOpen={setSaveQueryOpen} />}
         {showDbeaverImport && <DbeaverImportModal dispatchConn={dispatchConn} dbeaverResult={dbeaverResult} handleDbeaverImport={handleDbeaverImport} dbeaverImporting={dbeaverImporting} />}
       {/* Sidebar */}
@@ -3767,7 +3777,7 @@ function handleCellCommit(
         )}
       </div>
 
-      <SidebarFooter settings={settings} setSettingsDraft={setSettingsDraft} setShowSettings={setShowSettings} />
+      <SidebarFooter dispatchSettings={dispatchSettings} />
 
       {/* Sidebar resize handle */}
       <div
@@ -3922,7 +3932,7 @@ function handleCellCommit(
           <button
             onClick={() => {
               const next = !auditLogEnabled;
-              setAuditLogEnabled(next);
+              dispatchSettings({ type: "SET_AUDIT_LOG", enabled: next });
               localStorage.setItem("dbark_audit_log", String(next));
             }}
             title={auditLogEnabled ? "Audit log ON — click to disable" : "Audit log OFF — click to enable"}
