@@ -21,6 +21,7 @@ import { schemaDataReducer, initSchemaDataState } from "./state/schemaDataReduce
 import { connectionsReducer, initConnectionsState, toggledGroup } from "./state/connectionsReducer";
 import { activityReducer, initActivityState } from "./state/activityReducer";
 import { settingsReducer, initSettingsState } from "./state/settingsReducer";
+import { savedQueriesReducer, initSavedQueriesState } from "./state/savedQueriesReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel } from "./connections";
@@ -124,16 +125,17 @@ function App() {
   const [paletteQuery, setPaletteQuery] = useState("");
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [locked, setLocked] = useState(false);
-  const [saveQueryOpen, setSaveQueryOpen] = useState(false);
-  const [saveQueryName, setSaveQueryName] = useState("");
-  const [saveQueryTags, setSaveQueryTags] = useState("");
-  const [saveQueryDesc, setSaveQueryDesc] = useState("");
+  // Save-dialog + query-library state lives in a tested reducer; the
+  // save-success transition (close + clear all fields) is atomic.
+  const [savedQueryState, dispatchSavedQueries] = useReducer(savedQueriesReducer, undefined, initSavedQueriesState);
+  const {
+    saveOpen: saveQueryOpen, name: saveQueryName,
+    tags: saveQueryTags, desc: saveQueryDesc,
+    queries: savedQueries, search: querySearch, showLibrary: showQueryLibrary,
+  } = savedQueryState;
   // Saved-query library state — kept here with other saveQuery state so it's
   // declared before any consumer (the command palette references savedQueries
   // during its render-time item assembly).
-  const [savedQueries, setSavedQueries]         = useState<any[]>([]);
-  const [querySearch, setQuerySearch]           = useState("");
-  const [showQueryLibrary, setShowQueryLibrary] = useState(false);
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTabRef = useRef<Tab>(activeTab);
   const tabsRef = useRef<Tab[]>(tabs);
@@ -640,7 +642,7 @@ function App() {
     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
       e.preventDefault();
       //const sql = editorRef.current?.getValue()?.trim() ?? "";
-      setSaveQueryOpen(true);
+      dispatchSavedQueries({ type: "SET_SAVE_OPEN", open: true });
     }
 
     // Ctrl+P / Cmd+P — open the command palette from ANY focus state, and
@@ -2501,16 +2503,13 @@ function handleCellCommit(
       updated_at:  now,
     };
     await invoke("save_query", { id, sql, metaJson: JSON.stringify(meta) });
-    setSaveQueryOpen(false);
-    setSaveQueryName("");
-    setSaveQueryTags("");
-    setSaveQueryDesc("");
+    dispatchSavedQueries({ type: "SAVE_COMPLETE" });
     loadSavedQueries(); // refresh the library panel
   }
 
   async function loadSavedQueries() {
     const raw = await invoke<string>("list_queries");
-    setSavedQueries(JSON.parse(raw));
+    dispatchSavedQueries({ type: "SET_QUERIES", queries: JSON.parse(raw) });
   }
 
   // Load on mount
@@ -2777,7 +2776,7 @@ function handleCellCommit(
 
       {showPalette && <CommandPalette setShowPalette={setShowPalette} paletteQuery={paletteQuery} setPaletteQuery={setPaletteQuery} paletteIndex={paletteIndex} setPaletteIndex={setPaletteIndex} filteredPalette={filteredPalette} />}
       {showSettings && <SettingsModal dispatchSettings={dispatchSettings} settingsDraft={settingsDraft} themePreference={themePreference} setThemePreference={setThemePreference} />}
-        {saveQueryOpen && <SaveQueryModal saveQueryName={saveQueryName} setSaveQueryName={setSaveQueryName} saveQueryTags={saveQueryTags} setSaveQueryTags={setSaveQueryTags} saveQueryDesc={saveQueryDesc} setSaveQueryDesc={setSaveQueryDesc} handleSaveQuery={handleSaveQuery} setSaveQueryOpen={setSaveQueryOpen} />}
+        {saveQueryOpen && <SaveQueryModal saveQueryName={saveQueryName} saveQueryTags={saveQueryTags} saveQueryDesc={saveQueryDesc} handleSaveQuery={handleSaveQuery} dispatchSavedQueries={dispatchSavedQueries} />}
         {showDbeaverImport && <DbeaverImportModal dispatchConn={dispatchConn} dbeaverResult={dbeaverResult} handleDbeaverImport={handleDbeaverImport} dbeaverImporting={dbeaverImporting} />}
       {/* Sidebar */}
       <div style={{
@@ -2814,7 +2813,7 @@ function handleCellCommit(
               <input
                 placeholder="Search queries..."
                 value={querySearch}
-                onChange={e => setQuerySearch(e.target.value)}
+                onChange={e => dispatchSavedQueries({ type: "SET_SEARCH", search: e.target.value })}
                 style={{
                   width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
                   borderRadius: 4, padding: "4px 8px", color: "var(--text)",
@@ -2884,7 +2883,7 @@ function handleCellCommit(
                   {showAddForm ? "×" : "+"}
               </button>
               <button
-                onClick={() => setShowQueryLibrary(v => !v)}
+                onClick={() => dispatchSavedQueries({ type: "TOGGLE_LIBRARY" })}
                 title="Saved queries"
                 style={{
                   background: showQueryLibrary ? "var(--accent-bg)" : "transparent",
