@@ -23,9 +23,8 @@ using System.Linq;
 /// into FileQueryEngine (which uses it) and into the test project (which tests it).
 ///
 /// Trade-off note: floating-point and decimal source columns both fold to DOUBLE.
-/// That preserves ordering for joins/comparisons (the thing C-5 is about) and loses
-/// decimal exactness — acceptable for a cross-engine query tool, and integer keys (the
-/// common join case and the C-5 regression test) stay exact.
+/// That preserves ordering for joins/comparisons and loses
+/// decimal exactness — acceptable for a cross-engine query tool, and integer keys stay exact.
 /// </summary>
 public static class DuckDbTableBuilder
 {

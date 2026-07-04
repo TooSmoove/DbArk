@@ -62,6 +62,10 @@ jobs:
         shell: bash
         run: bash scripts/check-ipc-contract.sh
 
+      - name: Fail on FFI signature drift
+        shell: bash
+        run: bash scripts/check-ffi-arity.sh
+
       - name: Fail if native binaries are committed
         shell: bash
         run: |

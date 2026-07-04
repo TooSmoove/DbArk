@@ -401,9 +401,7 @@ public static class FileQueryEngineLib
 
     private static string ExecuteSqliteDb(string connectionString, string sql)
     {
-        string path = connectionString;
-        if (connectionString.StartsWith("Data Source=", StringComparison.OrdinalIgnoreCase))
-            path = connectionString["Data Source=".Length..].Trim();
+        string path = SqliteConnectionString.ExtractPath(connectionString);
 
         IntPtr db = IntPtr.Zero;
         SqliteOpen(path, ref db);

@@ -54,6 +54,12 @@ export function AddConnectionForm({
     mysql: 3306, mariadb: 3306, sqlserver: 1433, postgres: 5432, cockroachdb: 26257, sqlite: 0,
   };
 
+  // SQLite is a bare file path: no host, port, credentials, SSL, or SSH tunnel.
+  // The form hides those fields and the save/test paths strip their values so a
+  // half-filled MySQL form switched to SQLite can't leak stale host/user data
+  // into the TOML.
+  const isSqlite = form.engine === "sqlite";
+
   const fieldStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", background: "var(--bg)",
     border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)",
@@ -73,10 +79,10 @@ export function AddConnectionForm({
       const request = {
         name:        form.name,
         engine:      form.engine,
-        host:        form.host,
-        port:        parseInt(form.port) || defaultPort[form.engine] || 3306,
+        host:        isSqlite ? "" : form.host,
+        port:        isSqlite ? 0  : (parseInt(form.port) || defaultPort[form.engine] || 3306),
         database:    form.database,
-        username:    form.username,
+        username:    isSqlite ? "" : form.username,
         color:       form.color,
         group:       form.group,
         folderPath:  connectionsFolder,
@@ -86,7 +92,7 @@ export function AddConnectionForm({
         windowsAuth: form.windowsAuth,
         // Pass existing filePath when editing so ConnectionManager overwrites it
         existingFilePath: editingConnection?.filePath ?? "",
-        sshEnabled:  form.sshEnabled,
+        sshEnabled:  isSqlite ? false : form.sshEnabled,
         sshHost:     form.sshHost,
         sshPort:     parseInt(form.sshPort) || 22,
         sshUser:     form.sshUser,
@@ -104,7 +110,7 @@ export function AddConnectionForm({
 
       const newRef = `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`;
 
-      if (form.sshEnabled && form.sshPassword) {
+      if (!isSqlite && form.sshEnabled && form.sshPassword) {
         await ipc("store_credential", {
           target:   `dbark-ssh:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.sshUser}`,
           username: form.sshUser,
@@ -112,7 +118,7 @@ export function AddConnectionForm({
         });
       }
 
-      if (form.password) {
+      if (!isSqlite && form.password) {
         // User entered a new password — store it under the new ref
         await ipc("store_credential", {
           target:   newRef,
@@ -123,7 +129,7 @@ export function AddConnectionForm({
         if (editingConnection && editingConnection.credentialRef !== newRef) {
           await ipc("delete_credential", { target: editingConnection.credentialRef });
         }
-      } else if (editingConnection) {
+      } else if (!isSqlite && editingConnection) {
         // No new password — migrate old credential to new ref if name changed
         const oldRef = editingConnection.credentialRef;
         if (oldRef !== newRef) {
@@ -149,12 +155,82 @@ export function AddConnectionForm({
         {editingConnection ? "Edit connection" : "Add connection"}
       </div>
 
+     {/* Engine sits directly under Name: choosing it decides which of the
+         fields below exist at all, so it has to come before them. */}
      {[
         { label: "Name",     key: "name",     placeholder: "My Database", type: "text" },
-        { label: "Host",     key: "host",     placeholder: "localhost",   type: "text" },
-        { label: "Port",     key: "port",     placeholder: "3306",        type: "text" },
-        { label: "Database", key: "database", placeholder: "mydb",        type: "text" },
-        ...(!form.windowsAuth ? [
+      ].map(({ label, key, placeholder, type }) => (
+        <label key={key} style={labelStyle}>
+          {label}
+          <input
+            style={fieldStyle} type={type}
+            value={form[key as keyof typeof form] as string}
+            onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+            placeholder={placeholder}
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+          />
+        </label>
+      ))}
+
+      <label style={labelStyle}>
+        Engine
+        <select style={fieldStyle} value={form.engine}
+          onChange={e => setForm(f => ({ ...f, engine: e.target.value }))}>
+          <option value="mysql">MySQL</option>
+          <option value="mariadb">MariaDB</option>
+          <option value="sqlserver">SQL Server</option>
+          <option value="postgres">PostgreSQL</option>
+          <option value="cockroachdb">CockroachDB</option>
+          <option value="sqlite">SQLite</option>
+        </select>
+      </label>
+
+      {/* SQLite: the database IS a file — pick it, done. */}
+      {isSqlite && (
+        <label style={labelStyle}>
+          Database file
+          <div style={{ display: "flex", gap: 6, marginTop: 3 }}>
+            <input
+              style={{ ...fieldStyle, marginTop: 0, flex: 1 }}
+              type="text"
+              value={form.database}
+              onChange={e => setForm(f => ({ ...f, database: e.target.value }))}
+              placeholder="C:\Users\keith\dbark_test.db"
+              autoCorrect="off" autoCapitalize="off" spellCheck={false}
+            />
+            <button
+              type="button"
+              onClick={async () => {
+                const { open } = await import("@tauri-apps/plugin-dialog");
+                const selected = await open({
+                  multiple: false,
+                  filters: [{ name: "SQLite database", extensions: ["db", "sqlite", "sqlite3", "db3"] }],
+                });
+                if (selected && typeof selected === "string")
+                  setForm(f => ({ ...f, database: selected }));
+              }}
+              style={{
+                padding: "6px 10px", background: "var(--surface-2)",
+                border: "1px solid var(--border)", borderRadius: 6,
+                color: "var(--text-secondary)", cursor: "pointer", fontSize: 11,
+                fontFamily: "var(--mono)", flexShrink: 0,
+              }}
+            >
+              Browse
+            </button>
+          </div>
+        </label>
+      )}
+
+     {[
+        ...(!isSqlite ? [
+          { label: "Host",     key: "host",     placeholder: "localhost", type: "text" },
+          { label: "Port",     key: "port",     placeholder: "3306",      type: "text" },
+          { label: "Database", key: "database", placeholder: "mydb",      type: "text" },
+        ] : []),
+        ...(!isSqlite && !form.windowsAuth ? [
           { label: "Username", key: "username", placeholder: "root", type: "text" },
         ] : []),
         { label: "Group", key: "group", placeholder: "Production", type: "text" },
@@ -174,7 +250,7 @@ export function AddConnectionForm({
       ))}
 
       {/* Password field — rendered separately for full control */}
-      {!form.windowsAuth && (
+      {!isSqlite && !form.windowsAuth && (
         <label style={labelStyle}>
           Password
           <div style={{ position: "relative", marginTop: 3 }}>
@@ -211,19 +287,6 @@ export function AddConnectionForm({
         </label>
       )}
 
-      <label style={labelStyle}>
-        Engine
-        <select style={fieldStyle} value={form.engine}
-          onChange={e => setForm(f => ({ ...f, engine: e.target.value }))}>
-          <option value="mysql">MySQL</option>
-          <option value="mariadb">MariaDB</option>
-          <option value="sqlserver">SQL Server</option>
-          <option value="postgres">PostgreSQL</option>
-          <option value="cockroachdb">CockroachDB</option>
-          <option value="sqlite">SQLite</option>
-        </select>
-      </label>
-
       {/*SQL Server Specific Settings*/}
       {form.engine === "sqlserver" && (
         <>
@@ -255,6 +318,7 @@ export function AddConnectionForm({
         </>
       )}
 
+      {!isSqlite && (
       <label style={labelStyle}>
         SSL Mode
         {form.sshEnabled && (
@@ -286,8 +350,10 @@ export function AddConnectionForm({
           <option value="verify-full">Verify Full — encrypt + verify cert</option>
         </select>
       </label>
+      )}
 
-      {/* SSH Tunnel */}
+      {/* SSH Tunnel — meaningless for a local file, hidden for SQLite */}
+      {!isSqlite && (
       <div style={{
         borderTop: "1px solid var(--border)",
         marginTop: 8, paddingTop: 8,
@@ -385,6 +451,7 @@ export function AddConnectionForm({
           </>
         )}
       </div>
+      )}
       {/* END SSH Tunnel */}
 
       {/* Read-only connection */}
@@ -420,9 +487,11 @@ export function AddConnectionForm({
       <div style={{ marginBottom: 8 }}>
         <button
           onClick={async () => {
-            if (!form.host || !form.database) {
+            if (!form.database || (!isSqlite && !form.host)) {
               setTestResult("error");
-              setTestMessage("Host and database are required to test");
+              setTestMessage(isSqlite
+                ? "Database file is required to test"
+                : "Host and database are required to test");
               return;
             }
             setTesting(true);
@@ -434,10 +503,10 @@ export function AddConnectionForm({
                   credentialRef: editingConnection?.credentialRef ??
                     `dbark:${form.name.toLowerCase().replace(/\s+/g, "-")}:${form.username}`,
                   engine:      form.engine,
-                  host:        form.host,
-                  port:        parseInt(form.port) || defaultPort[form.engine] || 3306,
+                  host:        isSqlite ? "" : form.host,
+                  port:        isSqlite ? 0  : (parseInt(form.port) || defaultPort[form.engine] || 3306),
                   database:    form.database,
-                  username:    form.username,
+                  username:    isSqlite ? "" : form.username,
                   sslMode:     form.sslMode,
                   sqlInstance: form.sqlInstance,
                   windowsAuth: form.windowsAuth,

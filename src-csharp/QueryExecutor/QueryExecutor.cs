@@ -465,7 +465,7 @@ public static class QueryExecutor
             if (string.IsNullOrEmpty(connectionString))
                 return Marshal.StringToCoTaskMemUTF8("ERROR: empty connection string");
 
-            string path = ExtractSqlitePath(connectionString);
+            string path = SqliteConnectionString.ExtractPath(connectionString);
 
             int rc = sqlite3_open(path, out IntPtr db);
             if (rc != 0)
@@ -512,7 +512,7 @@ public static class QueryExecutor
     // and wasted allocations on every query.
     private static QueryResult ExecuteSqliteCore(string connectionString, string sql)
     {
-        string path = ExtractSqlitePath(connectionString);
+        string path = SqliteConnectionString.ExtractPath(connectionString);
 
         int rc = sqlite3_open(path, out IntPtr db);
         if (rc != 0)
@@ -604,7 +604,7 @@ public static class QueryExecutor
     }
     private static List<QueryResult> ExecuteSqliteMulti(string connectionString, string sql)
     {
-        string path = ExtractSqlitePath(connectionString);
+        string path = SqliteConnectionString.ExtractPath(connectionString);
 
         int rc = sqlite3_open(path, out IntPtr db);
         if (rc != 0)
@@ -746,13 +746,6 @@ public static class QueryExecutor
         return p != IntPtr.Zero
             ? (Marshal.PtrToStringUTF8(p) ?? "SQLite error")
             : "SQLite error";
-    }
-
-    private static string ExtractSqlitePath(string connectionString)
-    {
-        if (connectionString.StartsWith("Data Source=", StringComparison.OrdinalIgnoreCase))
-            return connectionString["Data Source=".Length..].Trim();
-        return connectionString.Trim();
     }
 
     // ── Read-only guard ─────────────────────────────────────────────────────

@@ -69,6 +69,56 @@ unsafe fn read_and_free(lib: &libloading::Library, ptr: *const c_char) -> String
     owned
 }
 
+/// The single FFI gateway to QueryExecutor's `execute_query` export (audit A-3).
+///
+/// The export takes FIVE pointer args — conn, sql, engine, read_only, row_limit.
+/// Declaring or calling it with any other arity makes the C# side read a garbage
+/// stack slot and dereference it, which is an instant AccessViolation fail-fast
+/// (the "Test Connection" crash-to-desktop). Exactly that happened when the
+/// row_limit arg was added: the main query path was updated, and four hand-copied
+/// call sites silently kept the old four-arg shape. Every call MUST go through
+/// this helper so the signature lives in one place; never re-declare the symbol
+/// at a call site.
+fn call_execute_query(
+    conn_str: &str,
+    sql: &str,
+    engine: &str,
+    read_only: bool,
+    row_limit: u32,
+) -> Result<String, IpcError> {
+    let nul_err =
+        || IpcError::validation("input contains a NUL byte and cannot be passed to the native layer");
+    unsafe {
+        let func: libloading::Symbol<
+            unsafe extern "C" fn(
+                *const c_char,
+                *const c_char,
+                *const c_char,
+                *const c_char,
+                *const c_char,
+            ) -> *const c_char,
+        > = get_query_executor().get(b"execute_query").map_err(|e| {
+            IpcError::native(format!(
+                "Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})"
+            ))
+        })?;
+        let c_conn = CString::new(conn_str).map_err(|_| nul_err())?;
+        let c_sql = CString::new(sql).map_err(|_| nul_err())?;
+        let c_engine = CString::new(engine).map_err(|_| nul_err())?;
+        let c_ro = CString::new(if read_only { "true" } else { "false" }).map_err(|_| nul_err())?;
+        let c_limit = CString::new(row_limit.to_string()).map_err(|_| nul_err())?;
+        let ptr = func(
+            c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr(), c_limit.as_ptr(),
+        );
+        // A null pointer is a native-layer failure (the command could not run at
+        // all); per-statement errors travel inside the JSON payload as data.
+        if ptr.is_null() {
+            return Err(IpcError::native("Query executor returned no response"));
+        }
+        Ok(read_and_free(get_query_executor(), ptr))
+    }
+}
+
 /// Canonical error envelope for fallible IPC commands (audit H-3).
 ///
 /// Every fallible `#[tauri::command]` returns `Result<T, IpcError>`. Tauri
@@ -378,6 +428,14 @@ fn build_pg_conn(host: &str, port: u16, database: &str, username: &str, password
     )
 }
 
+/// The single builder for DbArk's SQLite connection string (audit A-3). The C#
+/// side parses this back out with `SqliteConnectionString.ExtractPath` in
+/// `src-csharp/Shared/SqliteConnectionString.cs` — keep the two in sync.
+/// SQLite has no host/credentials: `database` is the file path, used verbatim.
+fn build_sqlite_conn(database: &str) -> String {
+    format!("Data Source={}", database)
+}
+
 #[cfg(windows)]
 fn odbc_driver_installed(name: &str) -> bool {
     use winreg::enums::HKEY_LOCAL_MACHINE;
@@ -563,27 +621,15 @@ fn get_sqlcipher() -> &'static libloading::Library {
 #[tauri::command]
 async fn execute_query(connection_string: String, sql: String, engine: String, read_only: Option<bool>, row_limit: Option<u32>) -> Result<String, IpcError> {
     let connection_string = Zeroizing::new(connection_string);
-    let read_only_str = if read_only.unwrap_or(false) { "true" } else { "false" };
-    // Row cap from the user's resultRowLimit setting; passed as a string over FFI
-    // (like read_only). C# clamps a zero/garbage value to its default.
-    let row_limit_str = row_limit.unwrap_or(10_000).to_string();
-    let result = unsafe {
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char, *const c_char, *const c_char, *const c_char,
-        ) -> *const c_char> = get_query_executor().get(b"execute_query").map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
-        let c_conn   = CString::new(connection_string.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_sql    = CString::new(sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_engine = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_ro     = CString::new(read_only_str).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_limit  = CString::new(row_limit_str).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(), c_engine.as_ptr(), c_ro.as_ptr(), c_limit.as_ptr());
-        // A null pointer is a native-layer failure (the command could not run at
-        // all). Per-statement and connection errors that the C# side does produce
-        // travel inside the JSON payload as data (see the result-set exception in
-        // AGENTS.md); only the no-response case becomes a command failure.
-        if ptr.is_null() { Err(IpcError::native("Query executor returned no response")) }
-        else { Ok(read_and_free(get_query_executor(), ptr)) }
-    };
+    // Row cap from the user's resultRowLimit setting; the C# side clamps a
+    // zero/garbage value to its own default.
+    let result = call_execute_query(
+        connection_string.as_str(),
+        &sql,
+        &engine,
+        read_only.unwrap_or(false),
+        row_limit.unwrap_or(10_000),
+    );
     result
 }
 
@@ -778,7 +824,7 @@ fn build_connection_string(params: ConnectionParams) -> Result<String, IpcError>
             host: &effective_host, port: effective_port, instance: &instance, database: &database,
             username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
         }),
-        "sqlite" => format!("Data Source={}", database),
+        "sqlite" => build_sqlite_conn(&database),
         _ => return Err(IpcError::validation(format!("Unsupported engine: {}", engine))),
     };
 
@@ -838,7 +884,7 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
     let connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, password.as_str(), "SslMode=Preferred;"),
         "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, password.as_str(), "SSL Mode=Prefer;"),
-        "sqlite"                   => format!("Data Source={}", database),
+        "sqlite"                   => build_sqlite_conn(&database),
         "sqlserver"                => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
@@ -884,7 +930,7 @@ async fn query_file_with_db(
     let connection_string = match engine.to_lowercase().as_str() {
         "mysql" | "mariadb"        => build_mysql_conn(&host, port, &database, &username, password.as_str(), "SslMode=Preferred;"),
         "postgres" | "cockroachdb" => build_pg_conn(&host, port, &database, &username, password.as_str(), "SSL Mode=Prefer;"),
-        "sqlite"                   => format!("Data Source={}", database),
+        "sqlite"                   => build_sqlite_conn(&database),
         "sqlserver"                => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
@@ -956,7 +1002,7 @@ async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
         // CockroachDB insecure: add SSL Mode=Allow so Npgsql connects plain
         // without sending an SSLRequest (avoids 30-second connection timeout).
         "cockroachdb"  => build_pg_conn(&host, port, &database, &username, password.as_str(), "SSL Mode=Allow;"),
-        "sqlite"   => format!("Data Source={}", database),
+        "sqlite"   => build_sqlite_conn(&database),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
@@ -1147,7 +1193,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
             build_pg_conn(&host, port, &database, &username, password.as_str(),
                 &format!("{}Timeout=5;", ssl_param))
         },
-        "sqlite" => format!("Data Source={}", database),
+        "sqlite" => build_sqlite_conn(&database),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
@@ -1164,24 +1210,7 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
         _           => "SELECT 1",
     };
 
-    let result = unsafe {
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char,
-            *const c_char, *const c_char,
-        ) -> *const c_char> = get_query_executor()
-            .get(b"execute_query")
-            .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
-
-        let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_sql    = CString::new(test_sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_engine = CString::new(engine).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_ro     = CString::new("false").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-
-        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
-                       c_engine.as_ptr(), c_ro.as_ptr());
-        if ptr.is_null() { return Err(IpcError::native("No response")); }
-        read_and_free(get_query_executor(), ptr)
-    };
+    let result = call_execute_query(conn_str.as_str(), test_sql, &engine, false, 1)?;
 
     let parsed: serde_json::Value = serde_json::from_str(&result)
         .unwrap_or(serde_json::Value::Null);
@@ -1536,26 +1565,9 @@ async fn get_object_definition(
             sqlite_type
         );
 
-        let conn_str = format!("Data Source={}", database);
+        let conn_str = build_sqlite_conn(&database);
 
-        let raw = unsafe {
-            let func: libloading::Symbol<unsafe extern "C" fn(
-                *const c_char, *const c_char,
-                *const c_char, *const c_char,
-            ) -> *const c_char> = get_query_executor()
-                .get(b"execute_query")
-                .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
-
-            let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-            let c_sql    = CString::new(sql.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-            let c_engine = CString::new("sqlite").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-            let c_ro     = CString::new("true").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-
-            let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
-                           c_engine.as_ptr(), c_ro.as_ptr());
-            if ptr.is_null() { return Err(IpcError::native("null response")); }
-            read_and_free(get_query_executor(), ptr)
-        };
+        let raw = call_execute_query(conn_str.as_str(), sql.as_str(), "sqlite", true, 100)?;
 
         // Parse the result — first row, first column is the definition
         let parsed: serde_json::Value = serde_json::from_str(&raw)
@@ -1682,7 +1694,7 @@ fn scrub_sql_for_log(sql: &str) -> String {
 
 #[tauri::command]
 async fn get_sqlite_objects(database: String) -> Result<String, IpcError> {
-    let conn_str = format!("Data Source={}", database);
+    let conn_str = build_sqlite_conn(&database);
 
     // Single query fetches all programmable objects at once
     let sql = "SELECT type, name, tbl_name \
@@ -1691,24 +1703,9 @@ async fn get_sqlite_objects(database: String) -> Result<String, IpcError> {
                AND name NOT LIKE 'sqlite_%' \
                ORDER BY type, name";
 
-    let raw = unsafe {
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char,
-            *const c_char, *const c_char,
-        ) -> *const c_char> = get_query_executor()
-            .get(b"execute_query")
-            .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
-
-        let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_sql    = CString::new(sql).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_engine = CString::new("sqlite").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_ro     = CString::new("true").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-
-        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
-                       c_engine.as_ptr(), c_ro.as_ptr());
-        if ptr.is_null() { return Err(IpcError::native("null response")); }
-        read_and_free(get_query_executor(), ptr)
-    };
+    // Row cap: sqlite_master listings are small, but leave generous headroom
+    // for pathological schemas rather than silently truncating the tree.
+    let raw = call_execute_query(conn_str.as_str(), sql, "sqlite", true, 100_000)?;
 
     Ok(raw)
 }
@@ -1741,7 +1738,7 @@ async fn drop_object(
     let conn_str = match engine.to_lowercase().as_str() {
         "mysql"    => build_mysql_conn(&host, port, &database, &username, password.as_str(), ""),
         "postgres" => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
-        "sqlite"   => format!("Data Source={}", database),
+        "sqlite"   => build_sqlite_conn(&database),
         "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
             host: &host, port, instance: &instance, database: &database,
             username: &username, password: password.as_str(), win_auth, ssl_mode: ssl.as_str(),
@@ -1756,24 +1753,7 @@ async fn drop_object(
     let drop_sql = build_drop_statement(
         &engine, &object_type, &object_name, &schema, &table)?;
 
-    let result = unsafe {
-        let func: libloading::Symbol<unsafe extern "C" fn(
-            *const c_char, *const c_char,
-            *const c_char, *const c_char,
-        ) -> *const c_char> = get_query_executor()
-            .get(b"execute_query")
-            .map_err(|e| IpcError::native(format!("Native export `execute_query` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
-
-        let c_conn   = CString::new(conn_str.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_sql    = CString::new(drop_sql.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_engine = CString::new(engine.as_str()).map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-        let c_ro     = CString::new("false").map_err(|_| IpcError::validation("input contains a NUL byte and cannot be passed to the native layer"))?;
-
-        let ptr = func(c_conn.as_ptr(), c_sql.as_ptr(),
-                       c_engine.as_ptr(), c_ro.as_ptr());
-        if ptr.is_null() { return Err(IpcError::native("null response")); }
-        Ok(read_and_free(get_query_executor(), ptr))
-    };
+    let result = call_execute_query(conn_str.as_str(), drop_sql.as_str(), &engine, false, 1);
 
 
     result
@@ -2512,9 +2492,31 @@ fn main() {
 #[cfg(test)]
 mod conn_string_tests {
     use super::{
-        build_mysql_conn, build_pg_conn, build_sqlserver_odbc, escape_kv_value, escape_odbc_value,
-        SqlServerOdbcArgs,
+        build_mysql_conn, build_pg_conn, build_sqlite_conn, build_sqlserver_odbc,
+        escape_kv_value, escape_odbc_value, SqlServerOdbcArgs,
     };
+
+    // ---- build_sqlite_conn (audit A-3) ----
+
+    #[test]
+    fn sqlite_conn_is_the_shared_data_source_contract() {
+        // The C# side (SqliteConnectionString.ExtractPath) parses this exact
+        // shape back out — this test pins the producing half of the contract.
+        assert_eq!(
+            build_sqlite_conn(r"C:\data\app.db"),
+            r"Data Source=C:\data\app.db"
+        );
+    }
+
+    #[test]
+    fn sqlite_conn_passes_paths_with_spaces_and_quotes_verbatim() {
+        // Paths like /Users/O'Brien/my data.db must survive untouched; the
+        // consumer trims but never unquotes (regression guard for audit H-1).
+        assert_eq!(
+            build_sqlite_conn("/Users/O'Brien/my data.db"),
+            "Data Source=/Users/O'Brien/my data.db"
+        );
+    }
 
     // ---- escape_kv_value (Npgsql / MySqlConnector) ----
 

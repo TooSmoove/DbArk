@@ -16,6 +16,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="../Shared/NativeString.cs" Link="NativeString.cs" />
+    <Compile Include="../Shared/SqliteConnectionString.cs" Link="SqliteConnectionString.cs" />
     <Compile Include="../Shared/SqlIdentifier.cs" Link="SqlIdentifier.cs" />
   </ItemGroup>
 </Project>

@@ -427,10 +427,7 @@ public static class SchemaExplorerLib
     }
     private static List<ForeignKeyInfo> GetSqliteForeignKeys(string connectionString)
     {
-        string path = connectionString;
-        if (connectionString.StartsWith("Data Source=",
-            StringComparison.OrdinalIgnoreCase))
-            path = connectionString["Data Source=".Length..].Trim();
+        string path = SqliteConnectionString.ExtractPath(connectionString);
 
         var fks = new List<ForeignKeyInfo>();
 
@@ -641,10 +638,7 @@ public static class SchemaExplorerLib
 
     private static List<TableInfo> GetSqliteSchema(string connectionString)
     {
-        string path = connectionString;
-        if (connectionString.StartsWith("Data Source=",
-            StringComparison.OrdinalIgnoreCase))
-            path = connectionString["Data Source=".Length..].Trim();
+        string path = SqliteConnectionString.ExtractPath(connectionString);
 
         var tables = new List<TableInfo>();
 
@@ -1158,52 +1152,6 @@ public static class SchemaExplorerLib
         return list;
     }
 
-    // ---- SQLITE ---------------------------------------------------
-
-    // Minimal SQLite query helper using existing P/Invoke declarations
-    private static List<List<string?>> SqliteQuery(string connectionString, string sql)
-    {
-        var results = new List<List<string?>>();
-        IntPtr db = IntPtr.Zero;
-
-        try
-        {
-            if (SqliteOpen(connectionString
-                    .Replace("Data Source=", "")
-                    .Replace("data source=", ""), ref db) != 0)
-                return results;
-
-            IntPtr stmt = IntPtr.Zero;
-            if (SqlitePrepareV2(db, sql, -1, ref stmt, IntPtr.Zero) != 0)
-                return results;
-
-            try
-            {
-                while (SqliteStep(stmt) == 100) // SQLITE_ROW
-                {
-                    int cols = SqliteStep(stmt);
-                    var row = new List<string?>();
-                    for (int i = 0; i < cols; i++)
-                    {
-                        var ptr = SqliteColumnText(stmt, i);
-                        row.Add(ptr == IntPtr.Zero ? null
-                            : System.Runtime.InteropServices.Marshal.PtrToStringUTF8(ptr));
-                    }
-                    results.Add(row);
-                }
-            }
-            finally
-            {
-                SqliteFinalize(stmt);
-            }
-        }
-        finally
-        {
-            if (db != IntPtr.Zero) SqliteClose(db);
-        }
-
-        return results;
-    }
     [UnmanagedCallersOnly(EntryPoint = "get_object_definition")]
     public static IntPtr GetObjectDefinition(
     IntPtr connectionStringPtr,

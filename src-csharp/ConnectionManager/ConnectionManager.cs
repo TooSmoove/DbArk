@@ -120,12 +120,6 @@ public static class ConnectionManagerLib
                 : request.FolderPath;
 
             // Validate before writing
-            if (!IsValidHost(request.Host))
-                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid host '{request.Host}' — only alphanumeric characters, dots, hyphens allowed");
-
-            if (!IsValidPort(request.Port > 0 ? request.Port : GetDefaultPort(request.Engine)))
-                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid port '{request.Port}'");
-
             if (request.Engine?.ToLower() == "sqlite")
             {
                 // SQLite uses a file path — validate it's not empty and doesn't contain dangerous chars
@@ -146,6 +140,14 @@ public static class ConnectionManagerLib
             // SQLite has no username; only validate for engines that use one.
             if (request.Engine != "sqlite" && !request.WindowsAuth && !IsValidIdentifier(request.Username))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid username '{request.Username}' — only alphanumeric characters, underscores, hyphens, dots allowed");
+
+            // SQLite has no host; only validate for engines that use one.
+            if (request.Engine != "sqlite" &&!IsValidHost(request.Host))
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid host '{request.Host}' — only alphanumeric characters, dots, hyphens allowed");
+
+            // SQLite has no port; only validate for engines that use one.
+            if (request.Engine != "sqlite" && !IsValidPort(request.Port > 0 ? request.Port : GetDefaultPort(request.Engine)))
+                return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid port '{request.Port}'");
 
 
             if (request.Engine is not null)
