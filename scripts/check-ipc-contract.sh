@@ -23,12 +23,25 @@ ALLOWLIST="$ROOT/scripts/ipc-contract-allowlist.txt"
 allowed="$(grep -vE '^\s*(#|$)' "$ALLOWLIST" | tr -d ' ' || true)"
 
 # Find every `#[tauri::command]` whose fn signature returns bare String or bool,
-# and capture the fn name. (-A2 covers the optional `async fn` line wrap.)
+# and capture the fn name. The signature is accumulated from the attribute to
+# the body's opening `{` so MULTILINE signatures are seen too — a fixed grep
+# window (-A2) let `migrate_credential (-> bool)` hide for months until
+# rustfmt collapsed its signature onto one line.
 offenders="$(
-  grep -A2 '#\[tauri::command\]' "$MAIN_RS" \
-    | grep -E 'fn ' \
-    | grep -E '\-> (String|bool) ?\{' \
-    | sed -E 's/.*fn ([a-z_]+).*-> (String|bool).*/\1 \2/' || true
+  awk '
+    /#\[tauri::command\]/ { collecting = 1; sig = ""; next }
+    collecting {
+      sig = sig " " $0
+      if (index($0, "{")) {
+        if (sig ~ /-> *(String|bool) *\{/ && match(sig, /fn [a-z_]+/)) {
+          name  = substr(sig, RSTART + 3, RLENGTH - 3)
+          rtype = (sig ~ /-> *String *\{/) ? "String" : "bool"
+          print name, rtype
+        }
+        collecting = 0
+      }
+    }
+  ' "$MAIN_RS" || true
 )"
 
 fail=0

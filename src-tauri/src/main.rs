@@ -1435,13 +1435,10 @@ async fn add_history_entry(
     duration_ms: i32,
     row_count: i32,
     success: bool,
-) -> bool {
+) -> Result<(), IpcError> {
     unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(*const c_char) -> i32> =
-            match get_query_history().get(b"add_history_entry") {
-                Ok(f) => f,
-                Err(_) => return false,
-            };
+            get_query_history().get(b"add_history_entry").map_err(|e| IpcError::native(format!("Native export `add_history_entry` is unavailable — your DbArk install may be corrupt; reinstall. ({e})")))?;
         let json = format!(
             r#"{{"connectionId":"{}","connectionName":"{}","sql":"{}","executedAt":{},"durationMs":{},"rowCount":{},"success":{}}}"#,
             connection_id.replace('"', "\\\""),
@@ -1454,13 +1451,18 @@ async fn add_history_entry(
             row_count,
             success
         );
-        let c_json = match CString::new(json) {
-            Ok(c) => c,
-            // Interior NUL in the history JSON is pathological; skip logging rather
-            // than crash a fire-and-forget telemetry write.
-            Err(_) => return false,
-        };
-        func(c_json.as_ptr()) == 1
+        // Interior NUL in the history JSON is pathological — report it instead
+        // of silently skipping the write.
+        let c_json = CString::new(json).map_err(|_| {
+            IpcError::validation(
+                "input contains a NUL byte and cannot be passed to the native layer",
+            )
+        })?;
+        if func(c_json.as_ptr()) == 1 {
+            Ok(())
+        } else {
+            Err(IpcError::native("Query history write failed"))
+        }
     }
 }
 
@@ -1605,29 +1607,35 @@ async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
 }
 
 #[tauri::command]
-fn migrate_credential(old_target: String, new_target: String, username: String) -> bool {
-    // Read password from old entry
+fn migrate_credential(
+    old_target: String,
+    new_target: String,
+    username: String,
+) -> Result<bool, IpcError> {
+    // A missing OLD credential is not an error — there is simply nothing to
+    // migrate (Ok(false)). Only a failed write to the NEW entry is a real
+    // failure, because it would strand the user's password under the old ref.
     let old_entry = match keyring::Entry::new(&old_target, &username) {
         Ok(e) => e,
-        Err(_) => return false,
+        Err(_) => return Ok(false),
     };
     let password = match old_entry.get_password() {
         Ok(p) => p,
-        Err(_) => return false, // no old credential — nothing to migrate
+        Err(_) => return Ok(false), // no old credential — nothing to migrate
     };
 
     // Write to new entry
-    let new_entry = match keyring::Entry::new(&new_target, &username) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    if new_entry.set_password(&password).is_err() {
-        return false;
-    }
+    let new_entry = keyring::Entry::new(&new_target, &username)
+        .map_err(|e| IpcError::native(format!("Keychain error: {e}")))?;
+    new_entry.set_password(&password).map_err(|e| {
+        IpcError::native(format!(
+            "Could not write credential '{new_target}' to the OS keychain: {e}"
+        ))
+    })?;
 
-    // Delete old entry
+    // Delete old entry (best-effort — a leftover old entry is harmless)
     let _ = old_entry.delete_password();
-    true
+    Ok(true)
 }
 
 /// The application's per-user data directory: `~/.dbark`.
@@ -1914,13 +1922,11 @@ fn append_audit_log(
     row_count: i32,
     duration_ms: i32,
     success: bool,
-) -> bool {
+) -> Result<(), IpcError> {
     use std::io::Write;
 
-    let home: std::path::PathBuf = match dirs::home_dir() {
-        Some(h) => h,
-        None => return false,
-    };
+    let home: std::path::PathBuf = dirs::home_dir()
+        .ok_or_else(|| IpcError::io("Cannot resolve the home directory for the audit log"))?;
 
     let log_path = home.join(".dbark").join("audit.log");
 
@@ -1934,16 +1940,14 @@ fn append_audit_log(
         timestamp, status, connection_name, engine, duration_ms, row_count, scrubbed
     );
 
-    let mut file = match std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
-    {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
+        .map_err(|e| IpcError::io(format!("Cannot open audit log: {e}")))?;
 
-    file.write_all(entry.as_bytes()).is_ok()
+    file.write_all(entry.as_bytes())
+        .map_err(|e| IpcError::io(format!("Cannot write audit log: {e}")))
 }
 
 #[tauri::command]
