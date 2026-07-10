@@ -21,6 +21,27 @@ harness (script + pass criterion) instead of skipping coverage entirely.
 - Heavy/manual verification: a script under `scripts/` with an explicit pass
   criterion (see `scripts/soak_ffi.ps1`).
 
+## CI gates (audit §6 — closed)
+
+Every push/PR to `main` must pass, in `.github/workflows/build.yml`:
+
+- `frontend-checks` — `npm run lint` (eslint, 0 errors), `npm test`
+  (tsc + vitest), `npm run build` (production type-check + bundle).
+- `dotnet-tests` — `dotnet test` on `src-csharp/QueryExecutor.Tests`
+  (runs on windows-latest to match the pinned win-x64 RID).
+- `rust-fmt` — `cargo fmt --check` (parses only; needs no staged natives).
+- `cargo clippy -- -D warnings` and `cargo test` — inside the platform build
+  jobs, *after* natives are staged, because `build.rs` intentionally fails
+  when `natives/` is incomplete. macOS runs `cargo test` too, to cover the
+  OS-conditional paths.
+- The platform builds `needs:` all of the above — a build cannot go green
+  while tests or linters fail. Do not remove a gate to get a red build
+  passing; fix the code, or discuss the rule change in a PR that touches
+  only the workflow.
+
+New logic ships with tests per the section above; the gates exist so those
+tests actually run.
+
 ## Keep code modular and professional
 
 - One responsibility per type/function; no god classes or god components.

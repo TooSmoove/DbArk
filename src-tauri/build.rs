@@ -44,9 +44,8 @@ fn resolve_native(natives: &Path, base: &str, ext: &str) -> Option<PathBuf> {
 }
 
 fn generate_dll_hashes() {
-    let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
-    );
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let natives = manifest_dir.join("natives");
     let ext = native_ext();
 

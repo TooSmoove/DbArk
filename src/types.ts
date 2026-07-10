@@ -265,7 +265,17 @@ export interface SchemaContextMenu {
   type: string; // table | procedure | function | view | trigger | index
   schema: string;
   connection: ConnectionConfig;
-  extra?: any;
+  extra?: SchemaMenuIndexExtra;
+}
+
+// Index metadata attached when right-clicking an index in the schema
+// explorer (non-SQLite engines; SQLite fetches from sqlite_master instead).
+// Mirrors IndexInfo minus `name` (columns is the comma-joined list).
+export interface SchemaMenuIndexExtra {
+  tableName: string;
+  columns:   string;
+  isUnique:  boolean;
+  isPrimary: boolean;
 }
 
 // Right-click context menu on a sidebar connection. (Named ConnectionMenu to

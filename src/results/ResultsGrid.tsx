@@ -14,7 +14,8 @@ import type {
 } from "../types";
 
 // Stable identity so the header-only table doesn't rebuild each render.
-export const EMPTY_ROWS: (string | null)[][] = [];
+// (module-private: exporting non-components breaks Fast Refresh)
+const EMPTY_ROWS: (string | null)[][] = [];
 
 // ---- Results grid -----------------------------------------
 export function ResultsGrid({
@@ -44,7 +45,7 @@ export function ResultsGrid({
   // Detect table name from result.sql (best effort)
   const tableName = useMemo(() => {
     const sql = result.sql ?? "";
-    const match = sql.match(/FROM\s+(?:\w+\.)*[\[\`"]?(\w+)[\]\`"]?/i);
+    const match = sql.match(/FROM\s+(?:\w+\.)*[[`"]?(\w+)[\]`"]?/i);
     return match?.[1] ?? "";
   }, [result.sql]);
 

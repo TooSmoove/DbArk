@@ -66,7 +66,13 @@ export function parsePostgresPlan(json: string): PlanNode | null {
   }
 }
 
-function convertPostgresNode(n: any): PlanNode {
+// Raw engine-emitted plan JSON. Shapes vary by engine and version and the
+// converters below probe them dynamically, so one documented escape hatch
+// here beats scattering `any` across every parser.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type RawPlanNode = any;
+
+function convertPostgresNode(n: RawPlanNode): PlanNode {
   // Build a "detail" line — for a Seq Scan that's the table name, for a
   // Hash Join it's the join condition, etc. Keeping it short and readable
   // is more useful than dumping every property.
@@ -199,9 +205,9 @@ function convertSqlServerNode(el: Element): PlanNode {
       // back to the LogicalOp when label is the PhysicalOp.
       return physical && logical && physical !== logical ? `(${logical})` : "";
     }
-    const schema = (objectEl.getAttribute("Schema") ?? "").replace(/[\[\]]/g, "");
-    const table  = (objectEl.getAttribute("Table")  ?? "").replace(/[\[\]]/g, "");
-    const index  = (objectEl.getAttribute("Index")  ?? "").replace(/[\[\]]/g, "");
+    const schema = (objectEl.getAttribute("Schema") ?? "").replace(/[[\]]/g, "");
+    const table  = (objectEl.getAttribute("Table")  ?? "").replace(/[[\]]/g, "");
+    const index  = (objectEl.getAttribute("Index")  ?? "").replace(/[[\]]/g, "");
     const parts: string[] = [];
     if (table) parts.push(`on ${schema && schema !== "dbo" ? schema + "." : ""}${table}`);
     if (index) parts.push(`using ${index}`);
@@ -309,7 +315,7 @@ export function parseMysqlPlan(json: string): PlanNode | null {
 // `operation` is a human-readable label MySQL has already formatted
 // (e.g. "Table scan on db", "Limit: 100 row(s)", "Nested loop inner join").
 // Children are uniformly in `inputs[]` — no irregular wrappers to probe.
-function convertMysqlV2Node(n: any): PlanNode {
+function convertMysqlV2Node(n: RawPlanNode): PlanNode {
   const op: string = n.operation ?? n.access_type ?? "Node";
   const label = shortenMysqlV2Label(op);
 
@@ -363,7 +369,7 @@ function shortenMysqlV2Label(op: string): string {
     .join(" ");
 }
 
-function convertMysqlBlock(block: any): PlanNode {
+function convertMysqlBlock(block: RawPlanNode): PlanNode {
   // Try each wrapper key in priority order — these mirror MySQL's
   // documented EXPLAIN JSON structure. The outermost wrapper becomes the
   // operator label.
@@ -374,7 +380,7 @@ function convertMysqlBlock(block: any): PlanNode {
       cost: 0,
       rows: 0,
       children: (block.union_result.query_specifications ?? [])
-        .map((s: any) => convertMysqlBlock(s.query_block ?? s)),
+        .map((s: RawPlanNode) => convertMysqlBlock(s.query_block ?? s)),
       meta: {},
     };
   }
@@ -406,7 +412,7 @@ function convertMysqlBlock(block: any): PlanNode {
       detail: `${block.nested_loop.length} tables`,
       cost: parseFloat(block.cost_info?.query_cost ?? "0"),
       rows: 0,
-      children: block.nested_loop.map((nl: any) => convertMysqlTable(nl.table ?? nl)),
+      children: block.nested_loop.map((nl: RawPlanNode) => convertMysqlTable(nl.table ?? nl)),
       meta: {},
     };
   }
@@ -424,7 +430,7 @@ function convertMysqlBlock(block: any): PlanNode {
   };
 }
 
-function convertMysqlTable(t: any): PlanNode {
+function convertMysqlTable(t: RawPlanNode): PlanNode {
   // Each table node has:
   //   access_type: "ALL" | "index" | "ref" | "range" | "const" | "eq_ref" | ...
   //   table_name, key (index name), rows_examined_per_scan, filtered (%)

@@ -19,5 +19,6 @@
     <Compile Include="../Shared/DuckDbTableBuilder.cs" Link="DuckDbTableBuilder.cs" />
     <Compile Include="../Shared/DuckDbFileScan.cs" Link="DuckDbFileScan.cs" />
     <Compile Include="../Shared/SqlIdentifier.cs" Link="SqlIdentifier.cs" />
+    <Compile Include="../ConnectionManager/InputValidation.cs" Link="InputValidation.cs" />
   </ItemGroup>
 </Project>

@@ -138,21 +138,21 @@ public static class ConnectionManagerLib
             }
 
             // SQLite has no username; only validate for engines that use one.
-            if (request.Engine != "sqlite" && !request.WindowsAuth && !IsValidIdentifier(request.Username))
+            if (request.Engine != "sqlite" && !request.WindowsAuth && !InputValidation.IsValidIdentifier(request.Username))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid username '{request.Username}' — only alphanumeric characters, underscores, hyphens, dots allowed");
 
             // SQLite has no host; only validate for engines that use one.
-            if (request.Engine != "sqlite" &&!IsValidHost(request.Host))
+            if (request.Engine != "sqlite" &&!InputValidation.IsValidHost(request.Host))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid host '{request.Host}' — only alphanumeric characters, dots, hyphens allowed");
 
             // SQLite has no port; only validate for engines that use one.
-            if (request.Engine != "sqlite" && !IsValidPort(request.Port > 0 ? request.Port : GetDefaultPort(request.Engine)))
+            if (request.Engine != "sqlite" && !InputValidation.IsValidPort(request.Port > 0 ? request.Port : InputValidation.GetDefaultPort(request.Engine)))
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid port '{request.Port}'");
 
 
             if (request.Engine is not null)
             {
-                if (!IsValidEngine(request.Engine))
+                if (!InputValidation.IsValidEngine(request.Engine))
                     return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid engine '{request.Engine}'");
             }
             else
@@ -160,7 +160,7 @@ public static class ConnectionManagerLib
                 return Marshal.StringToCoTaskMemUTF8("ERROR: Engine is required");
             }
 
-            if (!IsValidSslMode(request.SslMode))
+            if (!InputValidation.IsValidSslMode(request.SslMode))
                 request.SslMode = "prefer";
 
             // SQLite database is a file path — different validation rules
@@ -172,7 +172,7 @@ public static class ConnectionManagerLib
                 if (request.Database.Contains(';') || request.Database.Contains('='))
                     return Marshal.StringToCoTaskMemUTF8("ERROR: Invalid characters in SQLite path");
             }
-            else if (!string.IsNullOrEmpty(request.Database) && !IsValidIdentifier(request.Database))
+            else if (!string.IsNullOrEmpty(request.Database) && !InputValidation.IsValidIdentifier(request.Database))
             {
                 return Marshal.StringToCoTaskMemUTF8($"ERROR: Invalid database name '{request.Database}' — only alphanumeric characters, underscores, hyphens, dots allowed");
             }
@@ -206,7 +206,7 @@ public static class ConnectionManagerLib
                 : $"dbark:{safeName}:{request.Username}";
 
             // SQLite has no port; other engines default by engine when unset.
-            int port = isSqlite ? 0 : (request.Port > 0 ? request.Port : GetDefaultPort(request.Engine));
+            int port = isSqlite ? 0 : (request.Port > 0 ? request.Port : InputValidation.GetDefaultPort(request.Engine));
 
             // SQLite has no username — never write a stray value (e.g. "none")
             // that would end up in the credential ref or confuse connection logic.
@@ -297,17 +297,6 @@ public static class ConnectionManagerLib
         return path;
     }
 
-    private static int GetDefaultPort(string engine) => engine.ToLower() switch
-    {
-        "sqlserver" => 1433,
-        "mysql" => 3306,
-        "mariadb" => 3306,
-        "postgres" => 5432,
-        "cockroachdb" => 26257,
-        "sqlite" => 0,
-        _ => 3306
-    };
-
     private static ConnectionConfig? ParseTomlFile(string filePath)
     {
         string toml = File.ReadAllText(filePath);
@@ -341,52 +330,26 @@ public static class ConnectionManagerLib
 
         // Validate all fields before returning
         // SQLite is a file path — it has no host, port, or username to validate.
-        if (config.Engine != "sqlite" && !IsValidHost(config.Host))
+        if (config.Engine != "sqlite" && !InputValidation.IsValidHost(config.Host))
             throw new Exception($"Invalid host value in {Path.GetFileName(filePath)}: '{config.Host}'");
 
-        if (config.Engine != "sqlite" && !IsValidPort(config.Port))
+        if (config.Engine != "sqlite" && !InputValidation.IsValidPort(config.Port))
             throw new Exception($"Invalid port value in {Path.GetFileName(filePath)}: '{config.Port}'");
 
-        if (config.Engine != "sqlite" && !string.IsNullOrEmpty(config.Database) && !IsValidIdentifier(config.Database))
+        if (config.Engine != "sqlite" && !string.IsNullOrEmpty(config.Database) && !InputValidation.IsValidIdentifier(config.Database))
             throw new Exception($"Invalid database value in {Path.GetFileName(filePath)}: '{config.Database}'");
 
-        if (config.Engine != "sqlite" && !config.WindowsAuth && !IsValidIdentifier(config.Username))
+        if (config.Engine != "sqlite" && !config.WindowsAuth && !InputValidation.IsValidIdentifier(config.Username))
             throw new Exception($"Invalid username value in {Path.GetFileName(filePath)}: '{config.Username}'");
 
-        if (!IsValidEngine(config.Engine))
+        if (!InputValidation.IsValidEngine(config.Engine))
             throw new Exception($"Invalid engine value in {Path.GetFileName(filePath)}: '{config.Engine}'");
 
-        if (!IsValidSslMode(config.SslMode))
+        if (!InputValidation.IsValidSslMode(config.SslMode))
             config.SslMode = "prefer";
 
         return config;
     }
-    private static bool IsValidHost(string host)
-    {
-        if (string.IsNullOrWhiteSpace(host)) return false;
-        // Allow hostnames, IP addresses, and localhost
-        // Reject semicolons, equals signs, and other connection string injection characters
-        return System.Text.RegularExpressions.Regex.IsMatch(
-            host, @"^[a-zA-Z0-9._\-]{1,253}$");
-    }
-
-    private static bool IsValidPort(int port) => port >= 0 && port <= 65535;
-
-    private static bool IsValidIdentifier(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return false;
-        // Allow alphanumeric, underscores, hyphens, and dots
-        // Reject semicolons, equals, quotes — anything that could break a connection string
-        return System.Text.RegularExpressions.Regex.IsMatch(
-            value, @"^[a-zA-Z0-9_\-\.]{1,128}$");
-    }
-
-    private static bool IsValidEngine(string engine) =>
-        engine is "mysql" or "mariadb" or "postgres" or "cockroachdb" or "sqlite" or "sqlserver";
-
-    private static bool IsValidSslMode(string sslMode) =>
-    sslMode is "none" or "prefer" or "require" or "verify-full";
-
     private static Dictionary<string, string> ParseToml(string toml)
     {
         var result = new Dictionary<string, string>(

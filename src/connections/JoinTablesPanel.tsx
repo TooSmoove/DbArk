@@ -30,16 +30,22 @@ export function JoinTablesPanel({
   onToggle: (table: string, next: boolean) => void;
   onInsert: (table: string) => void;
 }) {
-  const [tables, setTables] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Single async-only state: the effect below never calls setState
+  // synchronously (react-hooks/set-state-in-effect), so loading/error/tables
+  // are all DERIVED from the last completed fetch instead of reset manually.
+  const [loaded, setLoaded] = useState<{
+    connId: string;
+    tables: string[];
+    error: string | null;
+  } | null>(null);
 
   // Load tables the moment a connection is available — no expand gate.
   useEffect(() => {
-    if (!activeConnection) { setTables([]); setError(null); return; }
+    // No connection → render's "connect a database" branch takes over; any
+    // stale result stays unrendered and is overwritten on reconnect.
+    if (!activeConnection) return;
+    const connId = activeConnection.id;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     invoke<string>("list_db_tables", {
       params: {
         credentialRef: activeConnection.credentialRef,
@@ -56,13 +62,22 @@ export function JoinTablesPanel({
       .then((result) => {
         if (cancelled) return;
         const parsed = JSON.parse(result);
-        if (parsed.error) { setError(parsed.error); return; }
-        setTables(parsed.tables ?? []);
+        setLoaded(parsed.error
+          ? { connId, tables: [], error: parsed.error }
+          : { connId, tables: parsed.tables ?? [], error: null });
       })
-      .catch((e) => { if (!cancelled) setError(toIpcError(e).message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .catch((e) => {
+        if (!cancelled) setLoaded({ connId, tables: [], error: toIpcError(e).message });
+      });
     return () => { cancelled = true; };
   }, [activeConnection]);
+
+  // Derived view of the fetch: a result only counts if it belongs to the
+  // connection currently shown (stale-while-revalidate on reconnect).
+  const current = activeConnection && loaded?.connId === activeConnection.id ? loaded : null;
+  const loading = !!activeConnection && !current;
+  const error   = current?.error ?? null;
+  const tables  = current?.tables ?? [];
 
   const selectedSet = new Set(selected);
 

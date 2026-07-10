@@ -6,6 +6,7 @@ import type {
   IndexInfo, SchemaResult, HistoryEntry, ActivityRow,
   PaletteItem, Tab, AppSettings, PendingEdit,
   ThemePreference, ResolvedTheme, SchemaContextMenu,
+  SchemaMenuIndexExtra,
 } from "./types";
 import { wrapPlanSql, PlanResultRenderer } from "./plan";
 import { Spinner, EngineBadge, SchemaSection, LockOverlay, SidebarFooter } from "./ui";
@@ -36,6 +37,7 @@ import type * as monacoEditor from "monaco-editor";
 
 const SqlEditor = lazy(() => import("./components/SqlEditor/SqlEditor"));
 import { format as formatSql } from "sql-formatter";
+import type { SqlLanguage } from "sql-formatter";
 import Fuse from "fuse.js";
 import "./theme.css";   // colors — must come first
 import "./index.css";   // typography & layout
@@ -45,7 +47,7 @@ import { ellipsisLabel, microMutedLabel } from "./ui/styles";
 
 // ---- Main App ---------------------------------------------
 function App() {
-  const editorRef = useRef<any>(null);
+  const editorRef = useRef<monacoEditor.editor.IStandaloneCodeEditor | null>(null);
 
   // Connection-manager state (list, folder, form, menus, groups, DBeaver
   // import) lives in a tested reducer. Multi-setter sequences like
@@ -724,7 +726,7 @@ function App() {
     type: string,
     schema: string,
     conn: ConnectionConfig,
-    extra?: { tableName: string; columns: string; isUnique: boolean; isPrimary: boolean; }
+    extra?: SchemaMenuIndexExtra
   ) {
     // Get the CREATE definition first
     const raw = await invoke<string>("get_object_definition", {
@@ -1275,9 +1277,7 @@ function App() {
     let formatted: string;
     try {
       formatted = formatSql(sourceText, {
-        // Cast: sql-formatter's SqlLanguage union isn't worth importing
-        // just to retype the same string we already validated above.
-        language: language as any,
+        language: language as SqlLanguage,
         keywordCase: "upper",
         indentStyle: "standard",
         linesBetweenQueries: 2,
@@ -2291,7 +2291,7 @@ function App() {
     type: string,
     schema: string,
     conn: ConnectionConfig,
-    _extra: any
+    _extra: unknown
   ) {
     try {
       const raw = await invoke<string>("get_object_definition", {
@@ -2381,7 +2381,7 @@ function handleCellCommit(
 
     // Find table info
     const sqlText  = result.sql ?? "";
-    const match    = sqlText.match(/FROM\s+(?:\w+\.)*[\[\`"]?(\w+)[\]\`"]?/i);
+    const match    = sqlText.match(/FROM\s+(?:\w+\.)*[[`"]?(\w+)[\]`"]?/i);
     const tableName = match?.[1] ?? "";
     const tableInfo = schema?.tables.find(
       t => t.name.toLowerCase() === tableName.toLowerCase());
@@ -4252,7 +4252,7 @@ function handleCellCommit(
             // Renders the ER diagram for the connection's schema.
             if (activeTab.activeResult === -2 && showDiagram && schema) {
               return (
-                <ErDiagram schema={schema as any} />
+                <ErDiagram schema={schema} />
               );
             }
 

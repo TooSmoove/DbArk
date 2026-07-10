@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# A newer push to the same branch/PR supersedes the running workflow.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   naming-guard:
     runs-on: ubuntu-latest
@@ -77,7 +82,68 @@ jobs:
           fi
           echo "OK: no native binaries tracked in git."
 
+  # ---------------------------------------------------------------------
+  # Test & lint gates (code audit §6): builds are not allowed to go green
+  # while the test suites and linters rot. Every job below is a required
+  # check for the platform builds via `needs`.
+  # ---------------------------------------------------------------------
+
+  frontend-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Lint (eslint — errors fail the build)
+        run: npm run lint
+
+      - name: Type-check + unit tests (tsc + vitest)
+        run: npm test
+
+      - name: Production type-check + bundle (tsc -b + vite)
+        run: npm run build
+
+  dotnet-tests:
+    # windows-latest matches the primary target and the RID pinned in the
+    # engine csproj files (win-x64); `dotnet test` builds IL only, so no
+    # NativeAOT publish or native DLLs are needed here.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Run C# unit tests
+        run: dotnet test src-csharp/QueryExecutor.Tests/QueryExecutorTests.Tests.csproj -c Release --nologo
+
+  rust-fmt:
+    # rustfmt parses source only — build.rs never runs, so no staged
+    # natives are required and this stays a fast ubuntu job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
   build-windows:
+    needs: [naming-guard, frontend-checks, dotnet-tests, rust-fmt]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -142,6 +208,15 @@ jobs:
         shell: pwsh
         run: ./scripts/stage-natives.ps1
 
+      # clippy/test must run AFTER natives are staged: build.rs fails loudly
+      # when natives/ is incomplete (that failure mode is by design — see
+      # AGENTS.md on the integrity check).
+      - name: cargo clippy (warnings are errors)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Build Tauri app
         run: cargo tauri build
         env:
@@ -149,6 +224,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: placeholder
 
   build-macos:
+    needs: [naming-guard, frontend-checks, dotnet-tests, rust-fmt]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -184,7 +260,7 @@ jobs:
           node-version: "20"
 
       - name: Install frontend deps
-        run: npm install
+        run: npm ci
 
       - name: Build C# NativeAOT projects
         run: |
@@ -206,6 +282,12 @@ jobs:
 
       - name: Stage third-party natives (DuckDB + SQLCipher)
         run: bash scripts/stage-natives.sh
+
+      # Runs the same #[cfg(test)] suites as Windows — catches the
+      # OS-conditional paths (dylib resolution, path handling) the audit
+      # flagged as unproven off-Windows.
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin
 
       - name: Build Tauri app
         run: cargo tauri build --target aarch64-apple-darwin
