@@ -2,8 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ipc, ipcJson, toIpcError } from "./ipc";
 import type {
   ConnectionConfig, ConnectionListResult, FileSession,
-  TableInfo, ViewInfo, TriggerInfo,
-  IndexInfo, SchemaResult, HistoryEntry, ActivityRow,
+  TableInfo,
   PaletteItem, Tab, AppSettings, PendingEdit,
   ThemePreference, ResolvedTheme, SchemaContextMenu,
   SchemaMenuIndexExtra,
@@ -27,17 +26,17 @@ import {
 } from "./schema/SchemaTreeSections";
 import { TablesSection } from "./schema/TablesSection";
 import { tabsReducer, initTabsState } from "./state/tabsReducer";
-import { schemaTreeReducer, initSchemaTreeState } from "./state/schemaTreeReducer";
-import { schemaDataReducer, initSchemaDataState } from "./state/schemaDataReducer";
-import { connectionsReducer, initConnectionsState, toggledGroup } from "./state/connectionsReducer";
-import { activityReducer, initActivityState } from "./state/activityReducer";
+import { useSchema } from "./data/useSchema";
+import { toggledGroup } from "./state/connectionsReducer";
+import { useConnections } from "./data/useConnections";
 import { settingsReducer, initSettingsState } from "./state/settingsReducer";
 import { savedQueriesReducer, initSavedQueriesState } from "./state/savedQueriesReducer";
 import { paletteReducer, initPaletteState } from "./state/paletteReducer";
-import { historyReducer, initHistoryState } from "./state/historyReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
 import { AddConnectionForm, JoinTablesPanel, ConnectionRow } from "./connections";
+import { useHistory } from "./data/useHistory";
+import { useActivity } from "./data/useActivity";
 import { ResultsGrid } from "./results/ResultsGrid";
 import { ActivityPanelBody } from "./activity/ActivityPanelBody";
 import { TabBar, HistoryPanel, QueryLibraryPanel } from "./editor";
@@ -62,7 +61,7 @@ function App() {
   // Connection-manager state (list, folder, form, menus, groups, DBeaver
   // import) lives in a tested reducer. Multi-setter sequences like
   // "set editee + open form + close menu" are single atomic actions.
-  const [connState, dispatchConn] = useReducer(connectionsReducer, undefined, initConnectionsState);
+  const { connState, dispatchConn, openTunnel } = useConnections({ updateActiveTab });
   const {
     connections, connectionsFolder, showAddForm, editingConnection,
     deletingConnection, contextMenu, collapsedGroups,
@@ -95,21 +94,22 @@ function App() {
   );
   // Schema-explorer data, loading flags, and menus live in a tested reducer.
   // LOAD_START actions make "clear data + raise loading flag" atomic.
-  const [schemaData, dispatchSchema] = useReducer(schemaDataReducer, undefined, initSchemaDataState);
+  const {
+    schemaData, dispatchSchema,
+    schemaTree, dispatchTree,
+    loadSchema, loadDatabases, purgeSchemaCache,
+    schemaCache, dbListCache, schemaConnectionId, schemaRef,
+  } = useSchema({ openTunnel });
   const { schema, schemaLoading, databases, databasesLoading, dbFilter, schemaContextMenu, dropConfirm } = schemaData;
   const openSchemaMenu = (menu: SchemaContextMenu) => dispatchSchema({ type: "SET_SCHEMA_MENU", menu });
   const closeSchemaMenu = () => dispatchSchema({ type: "SET_SCHEMA_MENU", menu: null });
-  const dbListCache = useRef<Map<string, string[]>>(new Map());
   // Free-text filter over the database list — the scalability unlock for
   // servers with many databases. Reset whenever the active connection changes.
   // Whether the active database's tree is collapsed. The active database is
   // always the one whose schema is loaded; collapsing hides its tree inline
   // (chevron ▸) without changing which database queries run against.
-  // Schema-explorer tree view state (expand/collapse) lives in a tested reducer.
-  const [schemaTree, dispatchTree] = useReducer(schemaTreeReducer, undefined, initSchemaTreeState);
   const { expandedTables, expandedSchemas, expandedSections, dbTreeCollapsed } = schemaTree;
-  const schemaRef = useRef<SchemaResult | null>(null);
-  const [historyState, dispatchHistory] = useReducer(historyReducer, undefined, initHistoryState);
+  const { state: historyState, dispatch: dispatchHistory, save: saveToHistory, load: loadHistory } = useHistory();
   const { open: showHistory, entries: history } = historyState;
 
   // Activity panel — bottom panel peer to results tabs.
@@ -117,7 +117,7 @@ function App() {
   // Polled every 5s only when open AND app focused.
   // State lives in a tested reducer; the load lifecycle (rows/error/errorCode)
   // is atomic and silent polls never touch the spinner.
-  const [activityState, dispatchActivity] = useReducer(activityReducer, undefined, initActivityState);
+  const { state: activityState, dispatch: dispatchActivity, load: loadActivity, kill: killActivity } = useActivity({ openTunnel, activeConnection: activeTab.connection });
   const {
     showActivity, killPending,
     rows: activityRows, error: activityError,
@@ -159,7 +159,6 @@ function App() {
   const runQueryRef = useRef<() => Promise<void>>(async () => {});
   const formatSqlRef = useRef<() => void>(() => {});
   const sqlSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const schemaCache = useRef<Map<string, SchemaResult>>(new Map());
   
   // Toggle one live table in/out of the join set (checkbox path: attach or
   // detach without touching the editor text).
@@ -226,7 +225,6 @@ function App() {
 }, [schema?.tables]);
 
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const tunnelPortsRef = useRef<Record<string, number>>({});
   const wasRewritten = activeTab.results.some(r => r.wasRewritten);
 
   // Apply theme to <html data-theme>, persist to localStorage, and
@@ -401,50 +399,6 @@ function App() {
   //END DBeaver import
 
   //BEGIN SSH Tunnel helper
-  async function openTunnel(conn: ConnectionConfig): Promise<number | null> {
-    if (!conn.sshEnabled) return null;
-    if (tunnelPortsRef.current[conn.id]) return tunnelPortsRef.current[conn.id];
-
-    dispatchConn({ type: "SET_TUNNEL_LOADING", connId: conn.id, loading: true });
-    try {
-      // Get SSH password from keychain if stored
-      let sshPassword = "";
-      try {
-        sshPassword = await invoke<string>("get_ssh_password", {
-          target:   `dbark-ssh:${conn.id}:${conn.sshUser}`,
-          username: conn.sshUser,
-        });
-      } catch { /* no SSH password stored — key-only auth */ }
-
-      const localPort = await invoke<number>("open_tunnel", {
-        params: {
-          tunnelId:    conn.id,
-          sshHost:     conn.sshHost,
-          sshPort:     conn.sshPort ?? 22,
-          sshUser:     conn.sshUser,
-          sshKeyPath:  conn.sshKeyPath ?? "",
-          sshPassword: sshPassword,
-          dbHost:      "127.0.0.1",
-          dbPort:      conn.port,
-        },
-      });
-
-      console.log("open_tunnel invoke result:", localPort);
-      tunnelPortsRef.current = { ...tunnelPortsRef.current, [conn.id]: localPort };
-      dispatchConn({ type: "SET_TUNNEL_PORTS", ports: { ...tunnelPortsRef.current } });
-      return localPort;
-    } catch (e) {
-      console.error("open_tunnel invoke error:", e);
-      updateActiveTab({ error: `SSH tunnel failed: ${toIpcError(e).message}` });
-      return null;
-    } finally {
-      dispatchConn({ type: "SET_TUNNEL_LOADING", connId: conn.id, loading: false });
-    }
-  }
-
-
-  useEffect(() => { schemaRef.current = schema; }, [schema]);
-
   useEffect(() => {
     if (showHistory) {
       loadHistory(activeTab.connection);
@@ -452,7 +406,6 @@ function App() {
   }, [activeTabId, activeTab.connection]);
 
   //Active Tab helper - load schema when connection changes
-  const schemaConnectionId = useRef<string | null>(null);
 
   useEffect(() => {
     const conn = activeTab.connection;
@@ -1369,192 +1322,6 @@ function App() {
   // Resolve which database to load: explicit arg wins, else the connection's
   // saved default. The cache is keyed by connection id + database so two
   // databases on the same server are cached independently.
-  async function loadSchema(conn: ConnectionConfig, database?: string) {
-    const db      = database ?? conn.database;
-    const cacheKey = `${conn.id}::${db}`;
-
-    if (schemaCache.current.has(cacheKey)) {
-      dispatchSchema({ type: "SET_SCHEMA", schema: schemaCache.current.get(cacheKey)! });
-      return;
-    }
-
-    if (schemaCache.current.size >= 5) {
-      const firstKey = schemaCache.current.keys().next().value;
-      schemaCache.current.delete(firstKey!);
-    }
-
-    dispatchTree({ type: "RESET_SCHEMAS" });
-    dispatchSchema({ type: "SCHEMA_LOAD_START" });
-
-    try {
-      // Open SSH tunnel first if needed
-      let tunnelPort: number | undefined;
-      if (conn.sshEnabled) {
-        const port = await openTunnel(conn);
-        if (!port) {
-          dispatchSchema({ type: "SET_SCHEMA", schema: { tables: [], procedures: [], functions: [], views: [], triggers: [], indexes: [], error: "SSH tunnel not open — run a query first to establish the tunnel" } });
-          dispatchSchema({ type: "SET_SCHEMA_LOADING", loading: false });
-          return;
-        }
-        tunnelPort = port;
-      }
-
-      const effectiveHost = tunnelPort !== undefined ? "127.0.0.1" : conn.host;
-      const effectivePort = tunnelPort ?? conn.port;
-      const effectiveSsl  = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
-
-      const raw = await invoke<string>("get_schema", {
-        params: {
-          credentialRef: conn.credentialRef,
-          engine:        conn.engine,
-          host:          effectiveHost,
-          port:          effectivePort,
-          database:      db,
-          username:      conn.username,
-          sslMode:       effectiveSsl,
-          sqlInstance:   conn.sqlInstance ?? "",
-          windowsAuth:   conn.windowsAuth ?? false,
-        },
-      });
-
-      const parsed: SchemaResult = JSON.parse(raw);
-
-      // For SQLite — fetch programmable objects separately via safe Rust path
-      if (conn.engine === "sqlite") {
-        try {
-          const objRaw = await invoke<string>("get_sqlite_objects", {
-            database: conn.database,
-          });
-
-          const objParsed = JSON.parse(objRaw);
-
-          // Multi-result shape — get the first result's rows
-          const rows: (string | null)[][] =
-            objParsed.results?.[0]?.rows ?? [];
-
-          const views: ViewInfo[]     = [];
-          const triggers: TriggerInfo[] = [];
-          const indexes: IndexInfo[]  = [];
-
-          for (const row of rows) {
-            const type    = row[0] ?? "";
-            const name    = row[1] ?? "";
-            const tblName = row[2] ?? "";
-
-            if (type === "view") {
-              views.push({ name, schema: "" });
-            } else if (type === "trigger") {
-              triggers.push({
-                name, tableName: tblName,
-                event: "", timing: "",
-              });
-            } else if (type === "index") {
-              indexes.push({
-                name, tableName: tblName,
-                columns: "", isUnique: false, isPrimary: false,
-              });
-            }
-          }
-
-          parsed.views    = views;
-          parsed.triggers = triggers;
-          parsed.indexes  = indexes;
-        } catch (e) {
-          console.error("Failed to load SQLite objects:", e);
-          // Non-fatal — tables still show correctly
-        }
-      }
-
-      schemaCache.current.set(cacheKey, parsed);
-      dispatchSchema({ type: "SET_SCHEMA", schema: parsed });
-    } catch (e) {
-      console.error("Schema load failed:", e);
-    } finally {
-      dispatchSchema({ type: "SET_SCHEMA_LOADING", loading: false });
-    }
-  }
-
-  // Drop every cached schema for a connection (all of its databases). Used when
-  // a connection is edited/refreshed so stale schemas across databases clear.
-  function purgeSchemaCache(connId: string) {
-    for (const key of [...schemaCache.current.keys()]) {
-      if (key === connId || key.startsWith(`${connId}::`)) {
-        schemaCache.current.delete(key);
-      }
-    }
-  }
-
-  // Fetch the list of databases on a connection's server, then load the schema
-  // for the tab's active database (defaulting to the connection's saved one).
-  // Called when a connection is selected. SQLite returns an empty list, in
-  // which case the sidebar shows tables directly with no database layer.
-  async function loadDatabases(conn: ConnectionConfig, preferredDb?: string) {
-    const defaultDb = preferredDb ?? conn.database;
-
-    // SQLite has no server-side database list — go straight to the schema.
-    if (conn.engine === "sqlite") {
-      dispatchSchema({ type: "SET_DATABASES", databases: [] });
-      loadSchema(conn, defaultDb);
-      return;
-    }
-
-    // Serve a cached list instantly, but still (re)load the schema.
-    if (dbListCache.current.has(conn.id)) {
-      dispatchSchema({ type: "SET_DATABASES", databases: dbListCache.current.get(conn.id)! });
-      loadSchema(conn, defaultDb);
-      return;
-    }
-
-    dispatchSchema({ type: "DATABASES_LOAD_START" });
-
-    try {
-      let tunnelPort: number | undefined;
-      if (conn.sshEnabled) {
-        const port = await openTunnel(conn);
-        if (port) tunnelPort = port;
-      }
-
-      const effectiveHost = tunnelPort !== undefined ? "127.0.0.1" : conn.host;
-      const effectivePort = tunnelPort ?? conn.port;
-      const effectiveSsl  = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
-
-      const raw = await invoke<string>("list_databases", {
-        params: {
-          credentialRef: conn.credentialRef,
-          engine:        conn.engine,
-          host:          effectiveHost,
-          port:          effectivePort,
-          database:      defaultDb,
-          username:      conn.username,
-          sslMode:       effectiveSsl,
-          sqlInstance:   conn.sqlInstance ?? "",
-          windowsAuth:   conn.windowsAuth ?? false,
-        },
-      });
-
-      const parsed: { databases?: string[]; error?: string } = JSON.parse(raw);
-      let list = parsed.databases ?? [];
-
-      // Always include the connection's saved database, even if the
-      // enumeration query couldn't see it (permissions, or it's a system DB
-      // we filtered out) — the user explicitly configured it, so it must be
-      // browsable. Keep it first so it reads as the default.
-      if (defaultDb && !list.includes(defaultDb)) {
-        list = [defaultDb, ...list];
-      }
-
-      dbListCache.current.set(conn.id, list);
-      dispatchSchema({ type: "SET_DATABASES", databases: list });
-    } catch (e) {
-      console.error("Database list load failed:", e);
-      // Fall back to just the saved database so the user can still browse it.
-      dispatchSchema({ type: "SET_DATABASES", databases: defaultDb ? [defaultDb] : [] });
-    } finally {
-      dispatchSchema({ type: "SET_DATABASES_LOADING", loading: false });
-      loadSchema(conn, defaultDb);
-    }
-  }
-
   // One collapsible database row in the sidebar accordion. The active database
   // (the one whose schema is loaded) shows expanded with its tree nested below
   // it; clicking its row toggles collapse. Clicking any other row switches the
@@ -1614,179 +1381,7 @@ function App() {
     />
   );
 
-  async function saveToHistory(
-    conn: ConnectionConfig,
-    sql: string,
-    durationMs: number,
-    rowCount: number,
-    success: boolean
-  ) {
-    try {
-      // Use setTimeout to ensure this runs after execute_query fully completes
-      await new Promise(resolve => setTimeout(resolve, 0));
 
-      await invoke("add_history_entry", {
-        connectionId:   conn.id,
-        connectionName: conn.name,
-        sql:            sql.trim(),
-        executedAt:     Date.now(),
-        durationMs,
-        rowCount,
-        success,
-      });
-    } catch (e) {
-      console.error("Failed to save history:", e);
-    }
-  }
-
-  //Load query history for a connection
-  async function loadHistory(conn: ConnectionConfig | null) {
-    if (!conn) {
-      dispatchHistory({ type: "CLEAR_ENTRIES" });
-      return;
-    }
-    try {
-      const parsed = await ipcJson<{ entries?: HistoryEntry[] }>("get_history", {
-        connectionId: conn?.id ?? "",
-        limit: 100,
-      });
-
-      dispatchHistory({ type: "SET_ENTRIES", entries: parsed.entries ?? [] });
-    } catch (e) {
-      console.error("Failed to load history:", e);
-    }
-  }
-
-  // ── Activity panel: load + kill ──────────────────────────────────────────
-  // Builds the connection string for the active tab's connection (same path
-  // as execute_query) and asks the C# side for currently-running queries.
-  // No-op when no connection, SQLite connection, or activity panel closed.
-  async function loadActivity(conn: ConnectionConfig | null, silent = false) {
-    if (!conn || conn.engine === "sqlite") {
-      dispatchActivity({ type: "SET_ROWS", rows: [] });
-      return;
-    }
-    dispatchActivity({ type: "LOAD_START", silent });
-    try {
-      // Same tunnel handling as runQuery — if SSH is enabled we route via
-      // 127.0.0.1:<tunnelPort> with SSL disabled (the tunnel is already
-      // encrypted). Passing tunnelPort:0 / a missing field to Rust trips
-      // its "port must be valid" check, hence the undefined fallback.
-      let tunnelPort: number | undefined;
-      if (conn.sshEnabled) {
-        const port = await openTunnel(conn);
-        if (!port) {
-          dispatchActivity({ type: "LOAD_ERROR", error: "SSH tunnel failed", code: null });
-          return;
-        }
-        tunnelPort = port;
-      }
-      const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
-
-      const connectionString = await invoke<string>("build_connection_string", {
-        params: {
-          credentialRef: conn.credentialRef,
-          engine:        conn.engine,
-          host:          conn.host,
-          port:          conn.port,
-          database:      conn.database,
-          username:      conn.username,
-          sslMode:       effectiveSslMode,
-          sqlInstance:   conn.sqlInstance ?? "",
-          windowsAuth:   conn.windowsAuth ?? false,
-          tunnelPort:    tunnelPort,
-        },
-      });
-
-      const parsed = await ipcJson<{ error?: string; code?: string; rows?: ActivityRow[] }>("get_activity", {
-        connectionString,
-        engine: conn.engine,
-      });
-
-      if (parsed.error) {
-        dispatchActivity({ type: "LOAD_ERROR", error: parsed.error, code: parsed.code ?? null });
-      } else {
-        dispatchActivity({ type: "LOAD_SUCCESS", rows: parsed.rows ?? [] });
-      }
-    } catch (e) {
-      dispatchActivity({ type: "LOAD_ERROR", error: toIpcError(e).message, code: null });
-    } finally {
-      dispatchActivity({ type: "LOAD_DONE", silent });
-    }
-  }
-
-  // Kill a session and immediately refresh the list. The DB enforces "you can
-  // only kill your own queries" via permission checks; we surface the error
-  // unchanged so the user sees the DB's own message.
-  async function killActivity(row: ActivityRow) {
-    const conn = activeTab.connection;
-    if (!conn || conn.engine === "sqlite") return;
-    try {
-      // Reuse the existing tunnel for this connection if one is open.
-      // openTunnel is idempotent via tunnelPortsRef cache, so this is cheap.
-      let tunnelPort: number | undefined;
-      if (conn.sshEnabled) {
-        const port = await openTunnel(conn);
-        if (!port) {
-          dispatchActivity({ type: "SET_ERROR", error: "SSH tunnel failed" });
-          return;
-        }
-        tunnelPort = port;
-      }
-      const effectiveSslMode = tunnelPort !== undefined ? "none" : (conn.sslMode ?? "prefer");
-
-      const connectionString = await invoke<string>("build_connection_string", {
-        params: {
-          credentialRef: conn.credentialRef,
-          engine:        conn.engine,
-          host:          conn.host,
-          port:          conn.port,
-          database:      conn.database,
-          username:      conn.username,
-          sslMode:       effectiveSslMode,
-          sqlInstance:   conn.sqlInstance ?? "",
-          windowsAuth:   conn.windowsAuth ?? false,
-          tunnelPort:    tunnelPort,
-        },
-      });
-
-      const parsed = await ipcJson<{ error?: string }>("kill_session", {
-        connectionString,
-        engine: conn.engine,
-        pid:    row.pid,
-      });
-      if (parsed.error) {
-        dispatchActivity({ type: "KILL_ERROR", error: parsed.error });
-      } else {
-        dispatchActivity({ type: "CLEAR_ERROR" });
-        // Refresh silently so the user sees the kill take effect immediately
-        await loadActivity(conn, true);
-      }
-    } catch (e) {
-      dispatchActivity({ type: "KILL_ERROR", error: toIpcError(e).message });
-    }
-  }
-
-  // 5-second poll: runs only when panel open, document visible, and there's
-  // a non-SQLite connection. setInterval is paused (cleared) when any of
-  // those conditions go false — no wasted DB connections in the background.
-  useEffect(() => {
-    if (!showActivity) return;
-    if (!activeTab.connection) return;
-    if (activeTab.connection.engine === "sqlite") return;
-
-    let active = true;
-    const tick = () => {
-      if (!active) return;
-      if (document.visibilityState !== "visible") return;
-      // Silent refresh — don't flash a spinner every 5s
-      loadActivity(activeTab.connection, true);
-    };
-    // Immediate load, then every 5s
-    tick();
-    const id = setInterval(tick, 5000);
-    return () => { active = false; clearInterval(id); };
-  }, [showActivity, activeTab.connection?.id]);
 
   // ── Command palette: item assembly + fuzzy search ──────────────────────
   //
