@@ -102,7 +102,7 @@ describe("scriptTable", () => {
   };
 
   it("builds a SELECT over all columns", () => {
-    expect(scriptTable(table, "select", "sqlserver")).toBe("SELECT [id], [email]nFROM [dbo].[Users]");
+    expect(scriptTable(table, "select", "sqlserver")).toBe("SELECT [id], [email]\nFROM [dbo].[Users]");
   });
 
   it("builds an INSERT over non-PK columns", () => {
@@ -120,7 +120,7 @@ describe("scriptTable", () => {
   });
 
   it("builds a DELETE keyed on the primary key", () => {
-    expect(scriptTable(table, "delete", "mysql")).toBe("DELETE FROM `Users`nWHERE `id` = <id, int>");
+    expect(scriptTable(table, "delete", "mysql")).toBe("DELETE FROM `Users`\nWHERE `id` = <id, int>");
   });
 
   it("falls back to a placeholder WHERE when there is no primary key", () => {
