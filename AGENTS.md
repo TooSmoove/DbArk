@@ -52,6 +52,25 @@ tests actually run.
   `<Compile Include>`-linked file like `src-csharp/Shared/NativeString.cs`).
 - Don't commit build artifacts, binaries, or IDE caches.
 
+### Decomposing large components (frontend)
+
+`App.tsx` is being reduced from a god component to a thin orchestration shell.
+When you touch it, extract rather than extend:
+
+- **Pure logic moves into tested modules.** SQL/DDL string building lives in
+  `src/sql/`, query-response and execution-plan reshaping in `src/query/` — each
+  a set of pure functions with a sibling `.test.ts`. Any logic that is a pure
+  function of its inputs (no refs, no IPC, no DOM) must move out of the component
+  and ship with unit tests. These never need a complicated harness, so per
+  "Regression tests are required" above the tests are mandatory, not optional.
+- **Presentational JSX becomes its own component** under `src/modals/`,
+  `src/editor/`, `src/ui/`, etc. No 200-line inline JSX blocks in `App.tsx`.
+- **Stateful concerns become custom hooks**, not more inline closures in the
+  component body.
+- Net direction: `App.tsx` only wires state, hooks, and a lean render tree. Do
+  not add new business logic directly to it — put it in a module or hook that
+  can be tested on its own.
+
 ## DLL integrity hashes (audit C-3 — do not regress)
 
 The startup integrity check (`verify_dll` in `src-tauri/src/main.rs`) compares each

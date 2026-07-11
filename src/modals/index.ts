@@ -6,3 +6,4 @@ export { SettingsModal } from "./SettingsModal";
 export { SaveQueryModal } from "./SaveQueryModal";
 export { DbeaverImportModal } from "./DbeaverImportModal";
 export { ConnectionContextMenu } from "./ConnectionContextMenu";
+export { SchemaObjectMenu } from "./SchemaObjectMenu";

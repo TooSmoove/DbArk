@@ -1,21 +1,31 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ipc, ipcJson, toIpcError } from "./ipc";
 import type {
-  ConnectionConfig, ConnectionListResult, QueryResult, FileSession,
-  ColumnInfo, TableInfo, ProcedureInfo, ViewInfo, TriggerInfo,
+  ConnectionConfig, ConnectionListResult, FileSession,
+  TableInfo, ViewInfo, TriggerInfo,
   IndexInfo, SchemaResult, HistoryEntry, ActivityRow,
   PaletteItem, Tab, AppSettings, PendingEdit,
   ThemePreference, ResolvedTheme, SchemaContextMenu,
   SchemaMenuIndexExtra,
 } from "./types";
 import { wrapPlanSql, PlanResultRenderer } from "./plan";
-import { Spinner, EngineBadge, SchemaSection, LockOverlay, SidebarFooter } from "./ui";
+import { Spinner, LockOverlay, SidebarFooter, DbRow } from "./ui";
 import {
   DeleteConnectionDialog, DropObjectDialog, KillSessionDialog,
   CommandPalette, SettingsModal, SaveQueryModal, DbeaverImportModal,
-  ConnectionContextMenu,
+  ConnectionContextMenu, SchemaObjectMenu,
 } from "./modals";
 import { createTab } from "./appState";
+import {
+  buildDropSql, buildDropIfExists, generateUpdateSql,
+} from "./sql/scripting";
+import {
+  normaliseQueryResponse, reshapeSqlServerPlan, appendExplainPlan,
+} from "./query/planReshape";
+import {
+  ProceduresSection, FunctionsSection, ViewsSection, TriggersSection, IndexesSection,
+} from "./schema/SchemaTreeSections";
+import { TablesSection } from "./schema/TablesSection";
 import { tabsReducer, initTabsState } from "./state/tabsReducer";
 import { schemaTreeReducer, initSchemaTreeState } from "./state/schemaTreeReducer";
 import { schemaDataReducer, initSchemaDataState } from "./state/schemaDataReducer";
@@ -27,10 +37,10 @@ import { paletteReducer, initPaletteState } from "./state/paletteReducer";
 import { historyReducer, initHistoryState } from "./state/historyReducer";
 import { THEME_STORAGE_KEY, readStoredTheme, resolveTheme } from "./theme";
 import { useResizable } from "./hooks";
-import { AddConnectionForm, JoinTablesPanel } from "./connections";
+import { AddConnectionForm, JoinTablesPanel, ConnectionRow } from "./connections";
 import { ResultsGrid } from "./results/ResultsGrid";
 import { ActivityPanelBody } from "./activity/ActivityPanelBody";
-import { TabBar, HistoryPanel } from "./editor";
+import { TabBar, HistoryPanel, QueryLibraryPanel } from "./editor";
 import { useState, useReducer, useCallback, useRef, useEffect, useMemo, lazy, Suspense } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type * as monacoEditor from "monaco-editor";
@@ -43,7 +53,7 @@ import "./theme.css";   // colors — must come first
 import "./index.css";   // typography & layout
 import "./App.css";     // component classes (.menu-item, etc.)
 import { ErDiagram } from "./components/ErDiagram/ErDiagram";
-import { ellipsisLabel, microMutedLabel } from "./ui/styles";
+import { microMutedLabel } from "./ui/styles";
 
 // ---- Main App ---------------------------------------------
 function App() {
@@ -444,52 +454,6 @@ function App() {
   //Active Tab helper - load schema when connection changes
   const schemaConnectionId = useRef<string | null>(null);
 
-  function buildDropSql(
-    engine: string, type: string,
-    name: string, schema: string, table: string
-  ): string {
-    switch (engine) {
-      case "sqlserver":
-        switch (type) {
-          case "procedure": return `DROP PROCEDURE [${schema}].[${name}]`;
-          case "function":  return `DROP FUNCTION [${schema}].[${name}]`;
-          case "view":      return `DROP VIEW [${schema}].[${name}]`;
-          case "trigger":   return `DROP TRIGGER [${name}]`;
-          case "index":     return `DROP INDEX [${name}] ON [${schema}].[${table}]`;
-          case "table":     return `DROP TABLE [${schema}].[${name}]`;
-          default:          return `DROP ${type} [${name}]`;
-        }
-      case "mysql":
-        switch (type) {
-          case "procedure": return `DROP PROCEDURE \`${name}\``;
-          case "function":  return `DROP FUNCTION \`${name}\``;
-          case "view":      return `DROP VIEW \`${name}\``;
-          case "trigger":   return `DROP TRIGGER \`${name}\``;
-          case "index":     return `DROP INDEX \`${name}\` ON \`${table}\``;
-          case "table":     return `DROP TABLE \`${name}\``;
-          default:          return `DROP ${type} \`${name}\``;
-        }
-      case "postgres":
-        switch (type) {
-          case "procedure": return `DROP PROCEDURE ${schema}.${name}`;
-          case "function":  return `DROP FUNCTION ${schema}.${name}`;
-          case "view":      return `DROP VIEW ${schema}.${name}`;
-          case "trigger":   return `DROP TRIGGER ${name} ON ${schema}.${table}`;
-          case "index":     return `DROP INDEX ${schema}.${name}`;
-          case "table":     return `DROP TABLE ${schema}.${name}`;
-          default:          return `DROP ${type} ${name}`;
-        }
-      default: // sqlite
-        switch (type) {
-          case "view":    return `DROP VIEW ${name}`;
-          case "trigger": return `DROP TRIGGER ${name}`;
-          case "index":   return `DROP INDEX ${name}`;
-          case "table":   return `DROP TABLE ${name}`;
-          default:        return `DROP ${type} ${name}`;
-        }
-    }
-  }
-
   useEffect(() => {
     const conn = activeTab.connection;
     if (conn) {
@@ -569,44 +533,6 @@ function App() {
     }
   }
 
-  function generateUpdateSql(
-    tableName:    string,
-    schemaName:   string,
-    edits:        PendingEdit[],
-    pkColumns:    ColumnInfo[],
-    pkValues:     (string | null)[],
-    engine:       string,
-  ): string {
-    const quote = (n: string) =>
-      engine === "sqlserver" ? `[${n}]`
-      : engine === "mysql"   ? `\`${n}\``
-      : n;
-
-    const quoteTable = () =>
-      engine === "sqlserver"
-        ? `[${schemaName || "dbo"}].[${tableName}]`
-        : engine === "mysql"
-        ? `\`${tableName}\``
-        : `${schemaName || "public"}.${tableName}`;
-
-    const quoteValue = (v: string | null) => {
-      if (v === null) return "NULL";
-      // Numeric — no quotes
-      if (/^-?\d+(\.\d+)?$/.test(v)) return v;
-      // Escape single quotes
-      return `'${v.replace(/'/g, "''")}'`;
-    };
-
-    const setClause = edits
-      .map(e => `    ${quote(e.colName)} = ${quoteValue(e.newValue)}`)
-      .join(",\n");
-
-    const whereClause = pkColumns
-      .map((pk, i) => `${quote(pk.name)} = ${quoteValue(pkValues[i])}`)
-      .join(" AND ");
-
-    return `UPDATE ${quoteTable()}\nSET\n${setClause}\nWHERE ${whereClause}`;
-  }
   
   // Update active tab helper
   function updateActiveTab(updates: Partial<Tab>) {
@@ -768,139 +694,77 @@ function App() {
     setTimeout(() => editorRef.current?.setValue(fullScript), 0);
   }
 
-  function buildDropIfExists(
-    engine: string, type: string,
-    name: string, schema: string, table: string
-  ): string {
-    switch (engine) {
-      case "sqlserver":
-        switch (type) {
-          case "procedure": return `DROP PROCEDURE IF EXISTS [${schema}].[${name}]`;
-          case "function":  return `DROP FUNCTION IF EXISTS [${schema}].[${name}]`;
-          case "view":      return `DROP VIEW IF EXISTS [${schema}].[${name}]`;
-          case "trigger":   return `DROP TRIGGER IF EXISTS [${name}]`;
-          case "table":     return `DROP TABLE IF EXISTS [${schema}].[${name}]`;
-          case "index":     return `DROP INDEX IF EXISTS [${name}] ON [${schema}].[${table}]`;
-          default:          return `DROP ${type} IF EXISTS [${name}]`;
-        }
-      case "mysql":
-        switch (type) {
-          case "procedure": return `DROP PROCEDURE IF EXISTS \`${name}\``;
-          case "function":  return `DROP FUNCTION IF EXISTS \`${name}\``;
-          case "view":      return `DROP VIEW IF EXISTS \`${name}\``;
-          case "trigger":   return `DROP TRIGGER IF EXISTS \`${name}\``;
-          case "table":     return `DROP TABLE IF EXISTS \`${name}\``;
-          case "index":     return `DROP INDEX IF EXISTS \`${name}\` ON \`${table}\``;
-          default:          return `DROP ${type} IF EXISTS \`${name}\``;
-        }
-      case "postgres":
-        switch (type) {
-          case "procedure": return `DROP PROCEDURE IF EXISTS ${schema}.${name}`;
-          case "function":  return `DROP FUNCTION IF EXISTS ${schema}.${name}`;
-          case "view":      return `DROP VIEW IF EXISTS ${schema}.${name}`;
-          case "trigger":   return `DROP TRIGGER IF EXISTS ${name} ON ${schema}.${table}`;
-          case "table":     return `DROP TABLE IF EXISTS ${schema}.${name}`;
-          case "index":     return `DROP INDEX IF EXISTS ${schema}.${name}`;
-          default:          return `DROP ${type} IF EXISTS ${name}`;
-        }
-      default: // SQLite
-        switch (type) {
-          case "view":    return `DROP VIEW IF EXISTS ${name}`;
-          case "trigger": return `DROP TRIGGER IF EXISTS ${name}`;
-          case "index":   return `DROP INDEX IF EXISTS ${name}`;
-          case "table":   return `DROP TABLE IF EXISTS ${name}`;
-          default:        return `DROP ${type} IF EXISTS ${name}`;
-        }
-    }
-  }
-
   //Generate CRUD Scripts for Various Db Objects
-  function scriptTable(
-    table: TableInfo,
-    scriptType: "select" | "insert" | "update" | "delete",
-    engine: string
-  ): string {
-    const cols     = table.columns ?? [];
-    const pkCols   = cols.filter(c => c.isPrimaryKey);
-    const dataCols = cols.filter(c => !c.isPrimaryKey);
 
-    const quoteName = (n: string) =>
-      engine === "sqlserver" ? `[${n}]`
-      : engine === "mysql"   ? `\`${n}\``
-      : n;
+  // Fetch an object's definition and open it in a new tab with an idempotent
+  // CREATE OR ALTER / CREATE OR REPLACE rewrite pre-applied. Extracted from the
+  // schema context-menu JSX so the menu stays presentational.
+  async function scriptCreateOrAlter(menu: SchemaContextMenu) {
+    const conn = menu.connection;
+    const raw  = await invoke<string>("get_object_definition", {
+      objectName:    menu.name,
+      objectType:    menu.type,
+      schemaName:    menu.schema || "dbo",
+      params: {
+        credentialRef: conn.credentialRef,
+        engine:        conn.engine,
+        host:          conn.host,
+        port:          conn.port,
+        database:      conn.database,
+        username:      conn.username,
+        sslMode:       conn.sslMode ?? "prefer",
+        sqlInstance:   conn.sqlInstance ?? "",
+        windowsAuth:   conn.windowsAuth ?? false,
+      },
+    });
 
-    const quoteTable = () =>
-      engine === "sqlserver"
-        ? `[${table.schema || "dbo"}].[${table.name}]`
-        : engine === "mysql"
-        ? `\`${table.name}\``
-        : `${table.schema || "public"}.${table.name}`;
-
-    const colList = (columns: ColumnInfo[]) =>
-      columns.map(c => quoteName(c.name)).join(", ");
-
-    const valueList = (columns: ColumnInfo[]) =>
-      columns.map(c => `<${c.name}, ${c.dataType}>`).join(", ");
-
-    const setList = (columns: ColumnInfo[]) =>
-      columns.map(c =>
-        `    ${quoteName(c.name)} = <${c.name}, ${c.dataType}>`
-      ).join(",\n");
-
-    const whereClause = (columns: ColumnInfo[]) =>
-      columns.length > 0
-        ? columns.map(c =>
-            `${quoteName(c.name)} = <${c.name}, ${c.dataType}>`
-          ).join(" AND ")
-        : `<primary_key> = <value>`;
-
-    const tbl = quoteTable();
-
-    switch (scriptType) {
-      case "select":
-        return `SELECT ${colList(cols)}\nFROM ${tbl}`;
-
-      case "insert":
-        return `INSERT INTO ${tbl}\n    (${colList(dataCols.length > 0 ? dataCols : cols)})\nVALUES\n    (${valueList(dataCols.length > 0 ? dataCols : cols)})`;
-
-      case "update":
-        return `UPDATE ${tbl}\nSET\n${setList(dataCols.length > 0 ? dataCols : cols)}\nWHERE ${whereClause(pkCols)}`;
-
-      case "delete":
-        return `DELETE FROM ${tbl}\nWHERE ${whereClause(pkCols)}`;
-
-      default:
-        return "";
+    const parsed: { definition?: string; error?: string } = JSON.parse(raw);
+    if (parsed.error) {
+      updateActiveTab({ error: parsed.error });
+      return;
     }
+
+    // Pre-apply idempotent rewrite
+    let definition = parsed.definition ?? "";
+    if (conn.engine === "sqlserver") {
+      definition = definition.replace(
+        /CREATE\s+(PROCEDURE|FUNCTION|VIEW|TRIGGER)/gi,
+        "CREATE OR ALTER $1"
+      );
+    } else {
+      definition = definition.replace(
+        /CREATE\s+(PROCEDURE|FUNCTION|VIEW)/gi,
+        "CREATE OR REPLACE $1"
+      );
+    }
+
+    const currentSql = editorRef.current?.getValue() ?? "";
+    const newTab      = createTab();
+    newTab.title      = menu.name;
+    newTab.sql        = definition;
+    newTab.connection = conn;
+
+    dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabId, saveSql: currentSql });
+    setTimeout(() => editorRef.current?.setValue(definition), 0);
   }
 
-  function scriptExecute(proc: ProcedureInfo, engine: string): string {
-    const paramList = proc.parameterCount > 0
-      ? Array.from({ length: proc.parameterCount },
-          (_, i) => `<param${i + 1}>`)
-      : [];
-
-    switch (engine) {
-      case "sqlserver":
-        return `EXECUTE [${proc.schema}].[${proc.name}]${
-          paramList.length > 0
-            ? "\n    " + paramList.map((p, i) =>
-                `@param${i + 1} = ${p}`).join(",\n    ")
-            : ""
-        }`;
-      case "mysql":
-      case "mariadb":
-        return `CALL \`${proc.name}\`(${paramList.join(", ")})`;
-      case "postgres":
-        return `CALL ${proc.schema}.${proc.name}(${paramList.join(", ")})`;
-      case "cockroachdb":
-        // CockroachDB v23.1+ supports CREATE PROCEDURE with CALL syntax.
-        // SQL-language procedures (SELECT-only) work on the free tier.
-        // DML procedures require LANGUAGE plpgsql (enterprise-only).
-        return `CALL ${proc.schema}.${proc.name}(${paramList.join(", ")})`;
-      default:
-        return `-- ${engine} does not support stored procedures`;
-    }
+  // Build the DROP SQL and open the drop-confirmation dialog for a schema object.
+  function handleRequestDrop(menu: SchemaContextMenu) {
+    const dropSql = buildDropSql(
+      menu.connection.engine,
+      menu.type,
+      menu.name,
+      menu.schema,
+      menu.extra?.tableName ?? "",
+    );
+    dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: {
+      name:       menu.name,
+      type:       menu.type,
+      schema:     menu.schema,
+      tableName:  menu.extra?.tableName ?? "",
+      dropSql,
+      connection: menu.connection,
+    } });
   }
 
   function setEditorScript(script: string) {
@@ -1078,122 +942,19 @@ function App() {
     const parsed = JSON.parse(raw);
 
     // File queries return single result shape — normalise to multi-result
-    const normalised: { results: QueryResult[]; rowCount?: number; error?: string } = 
-      parsed.results 
-        ? parsed  // already multi-result shape (DB query)
-        : parsed.error
-        ? { results: [], error: parsed.error }
-        : { results: [{ ...parsed, sql: "" }] }; // wrap single result
+    const normalised = normaliseQueryResponse(parsed);
 
     // Tag every result as a plan output when plan mode was on. The renderer
     // checks isPlan and routes through PlanResultRenderer instead of the
     // data grid. Engine is recorded so the right parser is selected.
     if (planMode && tab.connection) {
       const engine = tab.connection.engine;
-
       if (engine === "sqlserver") {
-        // SQL Server: STATISTICS XML returned data + plan in one call,
-        // and (after the C# fix) both arrive as separate entries in
-        // normalised.results. Find the XML cell, split data from plan,
-        // and tag the plan with isPlan.
-        let planResult: typeof normalised.results[0] | undefined;
-        let planCell = "";
-
-        console.log(
-          "[plan] SQL Server response — %d result set(s)",
-          normalised.results.length
-        );
-        normalised.results.forEach((r, i) => {
-          const colShape = r.columns?.length === 1
-            ? `1 col: "${r.columns[0]}"`
-            : `${r.columns?.length ?? 0} cols`;
-          const firstCells = (r.rows ?? []).slice(0, 2).map(row => {
-            const c = row[0];
-            return c === null ? "null"
-              : typeof c === "string"
-              ? c.length === 0 ? "empty" : `"${c.slice(0, 60)}${c.length > 60 ? "..." : ""}"`
-              : String(c);
-          });
-          console.log(
-            `[plan]   Result ${i}: ${colShape} · ${r.rows?.length ?? 0} row(s) · samples: [${firstCells.join(", ")}]`
-          );
-        });
-
-        for (const r of normalised.results) {
-          for (const row of r.rows ?? []) {
-            for (const cell of row) {
-              if (typeof cell === "string" && cell.trimStart().startsWith("<")) {
-                const head = cell.trimStart().slice(0, 200);
-                if (head.includes("ShowPlanXML") || head.includes("<?xml")) {
-                  planResult = r;
-                  planCell = cell;
-                  break;
-                }
-              }
-            }
-            if (planCell) break;
-          }
-          if (planCell) break;
-        }
-
-        if (planResult && planCell) {
-          console.log("[plan] ✓ Matched XML cell, reshaping result");
-          const dataResults = normalised.results.filter(
-            r => r !== planResult && !r.isMessage
-          );
-          const reshapedPlan: QueryResult = {
-            ...planResult,
-            columns: ["plan"],
-            rows: [[planCell]],
-            rowCount: 1,
-            isPlan: true,
-            planEngine: engine,
-          };
-          normalised.results = [...dataResults, reshapedPlan];
-        } else {
-          console.warn(
-            "[plan] ✗ No XML cell found. Permission/driver issue, or plan not being returned by C#."
-          );
-        }
+        // SQL Server returns data + ShowPlanXML in one call; split them out.
+        normalised.results = reshapeSqlServerPlan(normalised.results, engine);
       } else if (planRaw != null) {
-        // Postgres / MySQL / SQLite / CockroachDB: data came back from the
-        // first call as normalised.results; the plan is in planRaw from the
-        // second call. Append it as an extra result tagged isPlan.
-        try {
-          const planParsed = JSON.parse(planRaw);
-          if (planParsed.error) {
-            normalised.results.push({
-              columns: [],
-              rows: [],
-              rowCount: 0,
-              error: planParsed.error,
-              isPlan: true,
-              planEngine: engine,
-            });
-          } else {
-            const planResults: QueryResult[] =
-              planParsed.results ?? [planParsed];
-            // EXPLAIN against any of these engines produces exactly one
-            // result set; take the first and ignore extras defensively.
-            if (planResults[0]) {
-              normalised.results.push({
-                ...planResults[0],
-                isPlan: true,
-                planEngine: engine,
-              });
-            }
-          }
-        } catch (e) {
-          console.error("[plan] Failed to parse planRaw:", e);
-          normalised.results.push({
-            columns: [],
-            rows: [],
-            rowCount: 0,
-            error: `Plan parse failed: ${toIpcError(e).message}`,
-            isPlan: true,
-            planEngine: engine,
-          });
-        }
+        // Other engines: append the second EXPLAIN call's plan as an extra result.
+        normalised.results = appendExplainPlan(normalised.results, planRaw, engine);
       }
     }
     const ms = Math.round(performance.now() - start);
@@ -1799,58 +1560,59 @@ function App() {
   // it; clicking its row toggles collapse. Clicking any other row switches the
   // active database and loads its schema. Shared by the rows rendered above the
   // active database's tree and the rows rendered below it.
-  function renderDbRow(conn: ConnectionConfig, db: string, activeDb: string) {
-    const isActive = db === activeDb;
-    const expanded = isActive && !dbTreeCollapsed;
-    return (
-      <div
-        key={db}
-        onClick={() => {
-          if (isActive) {
-            dispatchTree({ type: "TOGGLE_DB_TREE" });
-            return;
-          }
-          updateActiveTab({ activeDatabase: db });
-          dispatchSchema({ type: "SET_SCHEMA", schema: null });
-          dispatchTree({ type: "COLLAPSE_TABLES" });
-          dispatchTree({ type: "COLLAPSE_SECTIONS" });
-          dispatchTree({ type: "RESET_SCHEMAS" });
-          dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
-          loadSchema(conn, db);
-        }}
-        title={isActive
-          ? `${db} — click to ${expanded ? "collapse" : "expand"}`
-          : `Browse ${db}`}
-        style={{
-          display: "flex", alignItems: "center", gap: 6,
-          padding: "5px 14px", cursor: "pointer",
-          borderLeft: `3px solid ${isActive ? conn.color : "transparent"}`,
-          background: isActive ? "var(--surface-3)" : "transparent",
-        }}
-      >
-        <span style={{
-          fontSize: 9, color: expanded ? "var(--accent)" : "var(--text-disabled)",
-          flexShrink: 0, width: 8,
-        }}>
-          {expanded ? "▾" : "▸"}
-        </span>
-        <span style={{
-          fontSize: 10, color: isActive ? "var(--accent)" : "var(--text-disabled)",
-          flexShrink: 0, width: 12,
-        }}>
-          🗄
-        </span>
-        <span style={{
-          fontSize: 11, flex: 1, fontFamily: "var(--mono)",
-          color: isActive ? "var(--text)" : "var(--text-secondary)",
-          fontWeight: isActive ? 600 : 400,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>
-          {db}
-        </span>
-      </div>
-    );
+  // Select a connection: point the active tab at it, reset schema/tree state,
+  // and load its database list. Extracted so ConnectionRow stays presentational.
+  function selectConnection(conn: ConnectionConfig) {
+    schemaConnectionId.current = conn.id;
+    updateActiveTab({
+      connection: conn,
+      file:       null,
+      title:      conn.name,
+      joinTables: [],
+      results:    [],
+      activeResult: 0,
+      error:      null,
+      activeDatabase: conn.database,
+    });
+    dispatchSchema({ type: "SET_SCHEMA", schema: null });
+    dispatchTree({ type: "COLLAPSE_TABLES" });
+    dispatchTree({ type: "COLLAPSE_SECTIONS" });
+    dispatchSchema({ type: "SET_DB_FILTER", filter: "" });
+    dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
+    loadDatabases(conn, conn.database);
   }
+
+  function handleConnContextMenu(e: React.MouseEvent, conn: ConnectionConfig) {
+    e.preventDefault();
+    dispatchConn({ type: "OPEN_CONTEXT_MENU", menu: {
+      x: e.clientX, y: e.clientY,
+      connection: conn,
+    } });
+  }
+
+  // Activate a database in the connection tree: point the active tab at it and
+  // reload its schema. Extracted so DbRow stays presentational.
+  function selectDatabase(conn: ConnectionConfig, db: string) {
+    updateActiveTab({ activeDatabase: db });
+    dispatchSchema({ type: "SET_SCHEMA", schema: null });
+    dispatchTree({ type: "COLLAPSE_TABLES" });
+    dispatchTree({ type: "COLLAPSE_SECTIONS" });
+    dispatchTree({ type: "RESET_SCHEMAS" });
+    dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
+    loadSchema(conn, db);
+  }
+
+  const renderDbRow = (conn: ConnectionConfig, db: string, activeDb: string) => (
+    <DbRow
+      key={db}
+      conn={conn}
+      db={db}
+      activeDb={activeDb}
+      dbTreeCollapsed={dbTreeCollapsed}
+      onToggle={() => dispatchTree({ type: "TOGGLE_DB_TREE" })}
+      onSelect={selectDatabase}
+    />
+  );
 
   async function saveToHistory(
     conn: ConnectionConfig,
@@ -2520,247 +2282,16 @@ function handleCellCommit(
       {contextMenu && <ConnectionContextMenu contextMenu={contextMenu} dispatchConn={dispatchConn} />}
       {/* Schema object context menu */}
       {schemaContextMenu && (
-        <>
-          <div
-            style={{ position: "fixed", inset: 0, zIndex: 999 }}
-            onClick={() => closeSchemaMenu()}
-          />
-          <div style={{
-            position: "fixed",
-            left: schemaContextMenu.x,
-            top: schemaContextMenu.y,
-            zIndex: 1000,
-            background: "var(--surface-2)",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            padding: "4px 0",
-            minWidth: 200,
-            boxShadow: "var(--shadow)",
-          }}>
-            {/* Header */}
-            <div style={{
-              padding: "6px 16px",
-              fontSize: 10, color: "var(--text-disabled)",
-              fontFamily: "var(--mono)",
-              borderBottom: "1px solid var(--border)",
-              marginBottom: 4,
-            }}>
-              {schemaContextMenu.type.toUpperCase()} · {schemaContextMenu.name}
-            </div>
-
-            {/* Open Definition — all types except index */}
-            {schemaContextMenu.type !== "index" && (
-              <button
-                onClick={() => {
-                  openDefinition(
-                    schemaContextMenu.name,
-                    schemaContextMenu.type,
-                    schemaContextMenu.schema,
-                    schemaContextMenu.connection,
-                    schemaContextMenu.extra,
-                  );
-                  closeSchemaMenu();
-                }}
-                className="menu-item"
-              >
-                📄 Open Definition
-              </button>
-            )}
-
-            {/* Index — Open Definition */}
-            {schemaContextMenu.type === "index" && (
-              <button
-                onClick={() => {
-                  openDefinition(
-                    schemaContextMenu.name,
-                    schemaContextMenu.type,
-                    schemaContextMenu.schema,
-                    schemaContextMenu.connection,
-                    schemaContextMenu.extra,
-                  );
-                  closeSchemaMenu();
-                }}
-                className="menu-item"
-              >
-                📄 Open Definition
-              </button>
-            )}
-
-            {/* Table-specific scripts */}
-            {schemaContextMenu.type === "table" && (() => {
-              const table = schema?.tables.find(
-                t => t.name === schemaContextMenu.name);
-              const engine = schemaContextMenu.connection.engine;
-              if (!table) return null;
-              return (
-                <>
-                  <div style={{
-                    height: 1, background: "var(--surface-3)",
-                    margin: "4px 0",
-                  }} />
-                  {(["select", "insert", "update", "delete"] as const).map(type => (
-                    <button
-                      key={type}
-                      onClick={() => {
-                        setEditorScript(scriptTable(table, type, engine));
-                        closeSchemaMenu();
-                      }}
-                      className="menu-item"
-                    >
-                      ✦ Script {type.toUpperCase()}
-                    </button>
-                  ))}
-                </>
-              );
-            })()}
-
-            {/* View — quick query */}
-            {schemaContextMenu.type === "view" && (
-              <button
-                onClick={() => {
-                  const engine = schemaContextMenu.connection.engine;
-                  const limit  = engine === "sqlserver"
-                    ? `SELECT TOP 100 * FROM ${schemaContextMenu.name}`
-                    : `SELECT * FROM ${schemaContextMenu.name} LIMIT 100`;
-                  setEditorScript(limit);
-                  closeSchemaMenu();
-                }}
-                className="menu-item"
-              >
-                ▶ Query View
-              </button>
-            )}
-
-            {/* Procedure — Script EXECUTE */}
-            {schemaContextMenu.type === "procedure" && (() => {
-              const proc = schema?.procedures.find(
-                p => p.name === schemaContextMenu.name);
-              const engine = schemaContextMenu.connection.engine;
-              if (!proc) return null;
-              return (
-                <>
-                  <div style={{ height: 1, background: "var(--surface-3)", margin: "4px 0" }} />
-                  <button
-                    onClick={() => {
-                      setEditorScript(scriptExecute(proc, engine));
-                      closeSchemaMenu();
-                    }}
-                    className="menu-item"
-                  >
-                    ▶ Script EXECUTE
-                  </button>
-                </>
-              );
-            })()}
-
-            {/* Drop and Create — tables, procedures, functions, views */}
-            {["table", "procedure", "function", "view"].includes(
-              schemaContextMenu.type) && (
-              <button
-                onClick={async () => {
-                  await scriptDropAndCreate(
-                    schemaContextMenu.name,
-                    schemaContextMenu.type,
-                    schemaContextMenu.schema,
-                    schemaContextMenu.connection,
-                    schemaContextMenu.extra,
-                  );
-                  closeSchemaMenu();
-                }}
-                className="menu-item"
-              >
-                ⬇ Script DROP and CREATE
-              </button>
-            )}
-
-            {/* Script CREATE OR ALTER — procedures, functions, views, triggers */}
-            {["procedure", "function", "view", "trigger"].includes(
-              schemaContextMenu.type) && (
-              <button
-                onClick={async () => {
-                  const conn = schemaContextMenu.connection;
-                  const raw  = await invoke<string>("get_object_definition", {
-                    objectName:    schemaContextMenu.name,
-                    objectType:    schemaContextMenu.type,
-                    schemaName:    schemaContextMenu.schema || "dbo",
-                    params: {
-                      credentialRef: conn.credentialRef,
-                      engine:        conn.engine,
-                      host:          conn.host,
-                      port:          conn.port,
-                      database:      conn.database,
-                      username:      conn.username,
-                      sslMode:       conn.sslMode ?? "prefer",
-                      sqlInstance:   conn.sqlInstance ?? "",
-                      windowsAuth:   conn.windowsAuth ?? false,
-                    },
-                  });
-
-                  const parsed: { definition?: string; error?: string } =
-                    JSON.parse(raw);
-                  if (parsed.error) {
-                    updateActiveTab({ error: parsed.error });
-                    closeSchemaMenu();
-                    return;
-                  }
-
-                  // Pre-apply idempotent rewrite
-                  let definition = parsed.definition ?? "";
-                  if (conn.engine === "sqlserver") {
-                    definition = definition.replace(
-                      /CREATE\s+(PROCEDURE|FUNCTION|VIEW|TRIGGER)/gi,
-                      "CREATE OR ALTER $1"
-                    );
-                  } else {
-                    definition = definition.replace(
-                      /CREATE\s+(PROCEDURE|FUNCTION|VIEW)/gi,
-                      "CREATE OR REPLACE $1"
-                    );
-                  }
-
-                  const currentSql = editorRef.current?.getValue() ?? "";
-                  const newTab     = createTab();
-                  newTab.title     = schemaContextMenu.name;
-                  newTab.sql       = definition;
-                  newTab.connection = conn;
-
-                  dispatchTabs({ type: "APPEND_ACTIVATE", tab: newTab, saveToId: activeTabId, saveSql: currentSql });
-                  setTimeout(() => editorRef.current?.setValue(definition), 0);
-                  closeSchemaMenu();
-                }}
-                className="menu-item"
-              >
-                ✦ Script CREATE OR ALTER
-              </button>
-            )}
-
-            {/* Drop — all types */}
-            <div style={{ height: 1, background: "var(--surface-3)", margin: "4px 0" }} />
-            <button
-              onClick={() => {
-                const dropSql = buildDropSql(
-                  schemaContextMenu.connection.engine,
-                  schemaContextMenu.type,
-                  schemaContextMenu.name,
-                  schemaContextMenu.schema,
-                  schemaContextMenu.extra?.tableName ?? "",
-                );
-                dispatchSchema({ type: "SET_DROP_CONFIRM", dropConfirm: {
-                  name:      schemaContextMenu.name,
-                  type:      schemaContextMenu.type,
-                  schema:    schemaContextMenu.schema,
-                  tableName: schemaContextMenu.extra?.tableName ?? "",
-                  dropSql,
-                  connection: schemaContextMenu.connection,
-                } });
-                closeSchemaMenu();
-              }}
-              className="menu-item menu-item--danger"
-            >
-              🗑️ Drop {schemaContextMenu.type}
-            </button>
-          </div>
-        </>
+        <SchemaObjectMenu
+          menu={schemaContextMenu}
+          schema={schema}
+          onClose={closeSchemaMenu}
+          onOpenDefinition={(m) => openDefinition(m.name, m.type, m.schema, m.connection, m.extra)}
+          onSetScript={setEditorScript}
+          onScriptDropAndCreate={(m) => scriptDropAndCreate(m.name, m.type, m.schema, m.connection, m.extra)}
+          onScriptCreateOrAlter={scriptCreateOrAlter}
+          onRequestDrop={handleRequestDrop}
+        />
       )}
       {/* END Schema object context menu */}
       {deletingConnection && <DeleteConnectionDialog deletingConnection={deletingConnection} dispatchConn={dispatchConn} dispatchTabs={dispatchTabs} loadConnections={loadConnections} connectionsFolder={connectionsFolder} />}
@@ -2802,70 +2333,14 @@ function handleCellCommit(
         ) : (
           <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
             {showQueryLibrary && (
-            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: 8, marginBottom: 8 }}>
-              <input
-                placeholder="Search queries..."
-                value={querySearch}
-                onChange={e => dispatchSavedQueries({ type: "SET_SEARCH", search: e.target.value })}
-                style={{
-                  width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
-                  borderRadius: 4, padding: "4px 8px", color: "var(--text)",
-                  fontSize: 12, boxSizing: "border-box", marginBottom: 6,
-                }}
+              <QueryLibraryPanel
+                queries={savedQueries}
+                search={querySearch}
+                onSearchChange={s => dispatchSavedQueries({ type: "SET_SEARCH", search: s })}
+                onSelect={sql => { editorRef.current?.setValue(sql); editorRef.current?.focus(); }}
+                onDelete={id => { invoke("delete_query", { id }).then(loadSavedQueries); }}
               />
-              {savedQueries
-                .filter(q => {
-                  const s = querySearch.toLowerCase();
-                  return !s
-                    || q.meta.name.toLowerCase().includes(s)
-                    || (q.meta.tags ?? []).some((t: string) => t.toLowerCase().includes(s));
-                })
-                .map(q => (
-                  <div key={q.id}
-                    style={{
-                      padding: "5px 8px", borderRadius: 4, cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = "var(--surface-2)")}
-                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-                    onClick={() => {
-                      editorRef.current?.setValue(q.sql);
-                      editorRef.current?.focus();
-                    }}
-                  >
-                    <div>
-                      <div style={{ color: "var(--text)", fontSize: 12 }}>{q.meta.name}</div>
-                      {q.meta.tags?.length > 0 && (
-                        <div style={{ display: "flex", gap: 4, marginTop: 2, flexWrap: "wrap" }}>
-                          {q.meta.tags.map((t: string) => (
-                            <span key={t} style={{
-                              fontSize: 10, background: "var(--accent-bg)",
-                              color: "var(--accent-hover)", borderRadius: 3, padding: "1px 5px",
-                            }}>{t}</span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      onClick={e => {
-                        e.stopPropagation();
-                        invoke("delete_query", { id: q.id }).then(loadSavedQueries);
-                      }}
-                      style={{
-                        background: "transparent", border: "none",
-                        color: "var(--text-disabled)", cursor: "pointer", fontSize: 14, padding: 2,
-                      }}
-                      title="Delete query"
-                    >✕</button>
-                  </div>
-                ))}
-              {savedQueries.length === 0 && (
-                <div style={{ color: "var(--text-disabled)", fontSize: 11, padding: "4px 8px" }}>
-                  No saved queries. Press Cmd+S to save.
-                </div>
-              )}
-            </div>
-          )}
+            )}
             {/* Connections section label */}
             <div style={{ padding: "8px 14px 4px", borderBottom: "1px solid var(--border)", fontSize: 10, fontWeight: 600, color: "var(--text-disabled)", textTransform: "uppercase", letterSpacing: ".06em" }}>
               Connections &nbsp;&nbsp;
@@ -2960,71 +2435,13 @@ function handleCellCommit(
               {!collapsed && groupConns.map((conn) => (
                 <div key={conn.id}>
                   {/* Connection row — indent if in a named group */}
-                  <div
-                    onClick={() => {
-                      schemaConnectionId.current = conn.id;
-                      updateActiveTab({
-                        connection: conn,
-                        file:       null,
-                        title:      conn.name,
-                        joinTables: [],
-                        results:    [],
-                        activeResult: 0,
-                        error:      null,
-                        activeDatabase: conn.database,
-                      });
-                      dispatchSchema({ type: "SET_SCHEMA", schema: null });
-                      dispatchTree({ type: "COLLAPSE_TABLES" });
-                      dispatchTree({ type: "COLLAPSE_SECTIONS" });
-                      dispatchSchema({ type: "SET_DB_FILTER", filter: "" });
-                      dispatchTree({ type: "SET_DB_TREE_COLLAPSED", collapsed: false });
-                      loadDatabases(conn, conn.database);
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      dispatchConn({ type: "OPEN_CONTEXT_MENU", menu: {
-                        x: e.clientX, y: e.clientY,
-                        connection: conn,
-                      } });
-                    }}
-                    style={{
-                      padding: "9px 14px",
-                      paddingLeft: groupLabel ? 22 : 14,
-                      cursor: "pointer",
-                      borderBottom: "1px solid var(--surface-3)",
-                      borderLeft: `3px solid ${
-                        activeTab.connection?.id === conn.id
-                          ? conn.color
-                          : "transparent"
-                      }`,
-                      background: activeTab.connection?.id === conn.id
-                        ? "var(--surface-3)"
-                        : "transparent",
-                      transition: "background .1s",
-                    }}
-                  >
-                    <div style={{
-                      fontSize: 12, fontWeight: 500,
-                      marginBottom: 3, color: "var(--text)",
-                      overflow: "hidden", textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}>
-                      {conn.name}
-                    </div>
-                    <div style={{
-                      display: "flex", alignItems: "center",
-                      gap: 6, minWidth: 0,
-                    }}>
-                      <EngineBadge engine={conn.engine} />
-                      <span style={{
-                        fontSize: 10, color: "var(--text-disabled)",
-                        overflow: "hidden", textOverflow: "ellipsis",
-                        whiteSpace: "nowrap", minWidth: 0,
-                      }}>
-                        {conn.host}
-                      </span>
-                    </div>
-                  </div>
+                  <ConnectionRow
+                    conn={conn}
+                    isActive={activeTab.connection?.id === conn.id}
+                    indented={!!groupLabel}
+                    onSelect={selectConnection}
+                    onContextMenu={handleConnContextMenu}
+                  />
 
                   {/* Schema tree — only shown for the active connection */}
                   {activeTab.connection?.id === conn.id && (
@@ -3214,469 +2631,64 @@ function handleCellCommit(
                             </button>
                           </div>
                           {/* Tables section */}
-                          <SchemaSection
-                            label="Tables"
-                            icon="▤"
-                            count={safeSchema.tables.length}
-                            sectionKey={`${conn.id}-tables`}
+                          <TablesSection
+                            conn={conn}
+                            tables={safeSchema.tables}
+                            tablesBySchema={tablesBySchema}
+                            schema={schema}
                             expanded={expandedSections.has(`${conn.id}-tables`)}
                             onToggle={() => toggleSection(`${conn.id}-tables`)}
-                          >
-                            {(conn.engine === "postgres" || conn.engine === "cockroachdb") && tablesBySchema.size > 1
-                              ? // Postgres/CockroachDB with multiple schemas — show schema grouping
-                                [...tablesBySchema.entries()].map(([schemaName, tables]) => (
-                                  <div key={schemaName}>
-                                    {/* Schema header */}
-                                    <div
-                                      onClick={() => {
-                                        dispatchTree({ type: "TOGGLE_SCHEMA", key: schemaName });
-                                      }}
-                                      style={{
-                                        display: "flex", alignItems: "center", gap: 6,
-                                        padding: "5px 14px",
-                                        cursor: "pointer",
-                                        borderTop: "1px solid var(--border)",
-                                        background: "var(--bg)",
-                                      }}
-                                      onMouseEnter={e =>
-                                        (e.currentTarget.style.background = "var(--bg)")}
-                                      onMouseLeave={e =>
-                                        (e.currentTarget.style.background = "var(--bg)")}
-                                    >
-                                      <span style={{
-                                        fontSize: 9, color: "var(--accent)",
-                                        flexShrink: 0, width: 10,
-                                      }}>
-                                        {expandedSchemas.has(schemaName) ? "▾" : "▸"}
-                                      </span>
-                                      <span style={{
-                                        fontSize: 10, color: "var(--accent)",
-                                        fontFamily: "var(--mono)", flex: 1,
-                                        fontWeight: 600, letterSpacing: ".03em",
-                                      }}>
-                                        {schemaName}
-                                      </span>
-                                      <span style={microMutedLabel}>
-                                        {tables.length}
-                                      </span>
-                                    </div>
-
-                                    {/* Schema sidebar toolbar — Diagram toggle */}
-                                    {schema && schema.tables.length > 0 && (
-                                      <div style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "space-between",
-                                        padding: "6px 14px",
-                                        borderBottom: "1px solid var(--border)",
-                                        background: "var(--bg)",
-                                      }}>
-                                        <span style={{
-                                          fontSize: 10,
-                                          color: "var(--text-tertiary)",
-                                          fontFamily: "var(--mono)",
-                                          textTransform: "uppercase",
-                                          letterSpacing: "0.05em",
-                                        }}>
-                                          Schema
-                                        </span>
-                                        <button
-                                          onClick={() => {
-                                            setShowDiagram(true);
-                                            updateActiveTab({ activeResult: -2 });
-                                          }}
-                                          title="Show ER diagram of this connection's tables"
-                                          style={{
-                                            fontSize: 10,
-                                            fontFamily: "var(--mono)",
-                                            color: showDiagram ? "var(--accent)" : "var(--text-tertiary)",
-                                            background: "none",
-                                            border: "1px solid var(--border)",
-                                            borderRadius: 4,
-                                            padding: "3px 8px",
-                                            cursor: "pointer",
-                                          }}
-                                        >
-                                          ⊞ Diagram
-                                        </button>
-                                      </div>
-                                    )}
-
-                                    {/* Tables under this schema */}
-                                    {expandedSchemas.has(schemaName) && tables.map(table => (
-                                      <div key={`${schemaName}.${table.name}`}>
-                                        <div
-                                          onClick={() => {
-                                            dispatchTree({ type: "TOGGLE_TABLE", key: `${schemaName}.${table.name}` });
-                                          }}
-                                          onDoubleClick={() => {
-                                            const q = `SELECT * FROM ${schemaName}.${table.name} LIMIT 100`;
-                                            editorRef.current?.setValue(q);
-                                            editorRef.current?.focus();
-                                          }}
-                                          onContextMenu={(e) => {
-                                            e.preventDefault();
-                                            openSchemaMenu({
-                                              x: e.clientX, y: e.clientY,
-                                              name: table.name,
-                                              type: "table",
-                                              schema: schemaName,
-                                              connection: conn,
-                                            });
-                                          }}
-                                          title="Click to expand · Double-click to query"
-                                          style={{
-                                            display: "flex", alignItems: "center", gap: 6,
-                                            padding: "5px 14px 5px 24px",
-                                            cursor: "pointer",
-                                            borderTop: "1px solid var(--border)",
-                                          }}
-                                        >
-                                          <span style={{
-                                            fontSize: 9, color: "var(--text-disabled)",
-                                            flexShrink: 0, width: 10,
-                                          }}>
-                                            {expandedTables.has(`${schemaName}.${table.name}`)
-                                              ? "▾" : "▸"}
-                                          </span>
-                                          <span style={{
-                                            fontSize: 11, color: "var(--text-secondary)", flex: 1,
-                                            overflow: "hidden", textOverflow: "ellipsis",
-                                            whiteSpace: "nowrap", fontFamily: "var(--mono)",
-                                          }}>
-                                            {table.name}
-                                          </span>
-                                          <span style={microMutedLabel}>
-                                            {table.columns?.length ?? 0}
-                                          </span>
-                                        </div>
-
-                                        {/* Columns */}
-                                        {expandedTables.has(`${schemaName}.${table.name}`) &&
-                                          (table.columns ?? []).map(col => (
-                                            <div
-                                              key={col.name}
-                                              style={{
-                                                display: "flex", alignItems: "center", gap: 6,
-                                                padding: "3px 14px 3px 36px",
-                                                borderTop: "1px solid var(--bg)",
-                                              }}
-                                            >
-                                              {col.isPrimaryKey && (
-                                                <span style={{
-                                                  fontSize: 8, color: "var(--warning)", flexShrink: 0,
-                                                }}>🔑</span>
-                                              )}
-                                              <span style={{
-                                                fontSize: 11,
-                                                color: col.isPrimaryKey ? "var(--text)" : "var(--text-tertiary)",
-                                                fontFamily: "var(--mono)", flex: 1,
-                                                overflow: "hidden", textOverflow: "ellipsis",
-                                                whiteSpace: "nowrap",
-                                              }}>
-                                                {col.name}
-                                              </span>
-                                              <span style={microMutedLabel}>
-                                                {col.dataType}
-                                              </span>
-                                            </div>
-                                          ))}
-                                      </div>
-                                    ))}
-                                  </div>
-                                ))
-                              : // All other engines (or single-schema Postgres)
-                                safeSchema.tables.map(table => (
-                                  <div key={`${table.schema ?? "public"}.${table.name}`}>
-                                    <div
-                                      onClick={() => {
-                                        dispatchTree({ type: "TOGGLE_TABLE", key: table.name });
-                                      }}
-                                      onDoubleClick={() => {
-                                        const q = conn.engine === "sqlserver"
-                                          ? `SELECT TOP 100 * FROM ${table.name}`
-                                          : `SELECT * FROM ${table.name} LIMIT 100`;
-                                        editorRef.current?.setValue(q);
-                                        editorRef.current?.focus();
-                                      }}
-                                      onContextMenu={(e) => {
-                                        e.preventDefault();
-                                        openSchemaMenu({
-                                          x: e.clientX, y: e.clientY,
-                                          name: table.name, type: "table",
-                                          schema: table.schema || "dbo",
-                                          connection: conn,
-                                        });
-                                      }}
-                                      title="Click to expand · Double-click to query"
-                                      style={{
-                                        display: "flex", alignItems: "center", gap: 6,
-                                        padding: "5px 14px", cursor: "pointer",
-                                        borderTop: "1px solid var(--border)",
-                                      }}
-                                    >
-                                      <span style={{
-                                        fontSize: 9, color: "var(--text-disabled)",
-                                        flexShrink: 0, width: 10,
-                                      }}>
-                                        {expandedTables.has(table.name) ? "▾" : "▸"}
-                                      </span>
-                                      <span style={{
-                                        fontSize: 11, color: "var(--text-secondary)", flex: 1,
-                                        overflow: "hidden", textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap", fontFamily: "var(--mono)",
-                                      }}>
-                                        {table.name}
-                                      </span>
-                                      <span style={microMutedLabel}>
-                                        {table.columns?.length ?? 0}
-                                      </span>
-                                    </div>
-
-                                    {expandedTables.has(table.name) &&
-                                      (table.columns ?? []).map(col => (
-                                        <div
-                                          key={col.name}
-                                          style={{
-                                            display: "flex", alignItems: "center", gap: 6,
-                                            padding: "3px 14px 3px 26px",
-                                            borderTop: "1px solid var(--bg)",
-                                          }}
-                                        >
-                                          {col.isPrimaryKey && (
-                                            <span style={{
-                                              fontSize: 8, color: "var(--warning)", flexShrink: 0,
-                                            }}>🔑</span>
-                                          )}
-                                          <span style={{
-                                            fontSize: 11,
-                                            color: col.isPrimaryKey ? "var(--text)" : "var(--text-tertiary)",
-                                            fontFamily: "var(--mono)", flex: 1,
-                                            overflow: "hidden", textOverflow: "ellipsis",
-                                            whiteSpace: "nowrap",
-                                          }}>
-                                            {col.name}
-                                          </span>
-                                          <span style={microMutedLabel}>
-                                            {col.dataType}
-                                          </span>
-                                        </div>
-                                      ))}
-                                  </div>
-                                ))
-                            }
-                          </SchemaSection>
+                            expandedSchemas={expandedSchemas}
+                            expandedTables={expandedTables}
+                            onToggleSchema={(key) => dispatchTree({ type: "TOGGLE_SCHEMA", key })}
+                            onToggleTable={(key) => dispatchTree({ type: "TOGGLE_TABLE", key })}
+                            onQuery={setEditorScript}
+                            onOpenMenu={openSchemaMenu}
+                            showDiagram={showDiagram}
+                            onShowDiagram={() => { setShowDiagram(true); updateActiveTab({ activeResult: -2 }); }}
+                          />
 
                           {/* Stored Procedures */}
-                          <SchemaSection
-                            label="Stored Procedures"
-                            icon="⚙"
-                            count={safeSchema.procedures.length}
-                            sectionKey={`${conn.id}-procedures`}
+                          <ProceduresSection
+                            procedures={safeSchema.procedures}
+                            conn={conn}
                             expanded={expandedSections.has(`${conn.id}-procedures`)}
                             onToggle={() => toggleSection(`${conn.id}-procedures`)}
-                            emptyMessage={conn.engine === "sqlite"
-                              ? "SQLite doesn't support stored procedures"
-                              : undefined}
-                          >
-                            {safeSchema.procedures.map(proc => (
-                              <div key={`${proc.schema}.${proc.name}`}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  openSchemaMenu({
-                                    x: e.clientX, y: e.clientY,
-                                    name: proc.name, type: "procedure",
-                                    schema: proc.schema, connection: conn,
-                                  });
-                                }}
-                                style={{
-                                  display: "flex", alignItems: "center", gap: 6,
-                                  padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid var(--border)", cursor: "default",
-                                }}
-                              >
-                                <span style={{ fontSize: 10, color: "var(--accent)", flexShrink: 0 }}>ƒ</span>
-                                <span style={ellipsisLabel}>
-                                  {proc.name}
-                                </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)", flexShrink: 0 }}>
-                                  {proc.parameterCount}p
-                                </span>
-                              </div>
-                            ))}
-                          </SchemaSection>
+                            onOpenMenu={openSchemaMenu}
+                          />
 
-                          {/* Functions */}
-                          <SchemaSection
-                            label="Functions"
-                            icon="λ"
-                            count={safeSchema.functions.length}
-                            sectionKey={`${conn.id}-functions`}
+                          <FunctionsSection
+                            functions={safeSchema.functions}
+                            conn={conn}
                             expanded={expandedSections.has(`${conn.id}-functions`)}
                             onToggle={() => toggleSection(`${conn.id}-functions`)}
-                            emptyMessage={conn.engine === "sqlite"
-                              ? "SQLite doesn't support user-defined functions"
-                              : undefined}
-                          >
-                            {safeSchema.functions.map(fn => (
-                              <div key={`${fn.schema}.${fn.name}`}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  openSchemaMenu({
-                                    x: e.clientX, y: e.clientY,
-                                    name: fn.name, type: "function",
-                                    schema: fn.schema, connection: conn,
-                                  });
-                                }}
-                                style={{
-                                  display: "flex", alignItems: "center", gap: 6,
-                                  padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid var(--border)",
-                                }}
-                              >
-                                <span style={{ fontSize: 10,
-                                  color: fn.functionType === "table" ? "var(--success)" : "var(--warning)",
-                                  flexShrink: 0 }}>
-                                  λ
-                                </span>
-                                <span style={ellipsisLabel}>
-                                  {fn.name}
-                                </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)", flexShrink: 0 }}>
-                                  {fn.functionType}
-                                </span>
-                              </div>
-                            ))}
-                          </SchemaSection>
+                            onOpenMenu={openSchemaMenu}
+                          />
 
-                          {/* Views */}
-                          <SchemaSection
-                            label="Views"
-                            icon="◫"
-                            count={safeSchema.views.length}
-                            sectionKey={`${conn.id}-views`}
+                          <ViewsSection
+                            views={safeSchema.views}
+                            conn={conn}
                             expanded={expandedSections.has(`${conn.id}-views`)}
                             onToggle={() => toggleSection(`${conn.id}-views`)}
-                          >
-                            {safeSchema.views.map(view => (
-                              <div key={`${view.schema}.${view.name}`}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  openSchemaMenu({
-                                    x: e.clientX, y: e.clientY,
-                                    name: view.name, type: "view",
-                                    schema: view.schema, connection: conn,
-                                  });
-                                }}
-                                style={{
-                                  display: "flex", alignItems: "center", gap: 6,
-                                  padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid var(--border)", cursor: "pointer",
-                                }}
-                            onDoubleClick={() => {
-                              const limit = conn.engine === "sqlserver"
-                                ? `SELECT TOP 100 * FROM ${view.name}`
-                                : `SELECT * FROM ${view.name} LIMIT 100`;
-                              editorRef.current?.setValue(limit);
-                              editorRef.current?.focus();
-                            }}
-                                title="Double-click to query"
-                              >
-                                <span style={{ fontSize: 9, color: "var(--info)", flexShrink: 0 }}>◫</span>
-                                <span style={ellipsisLabel}>
-                                  {view.name}
-                                </span>
-                              </div>
-                            ))}
-                          </SchemaSection>
+                            onOpenMenu={openSchemaMenu}
+                            onQuery={setEditorScript}
+                          />
 
-                          {/* Triggers */}
-                          <SchemaSection
-                            label="Triggers"
-                            icon="⚡"
-                            count={safeSchema.triggers.length}
-                            sectionKey={`${conn.id}-triggers`}
+                          <TriggersSection
+                            triggers={safeSchema.triggers}
+                            conn={conn}
                             expanded={expandedSections.has(`${conn.id}-triggers`)}
                             onToggle={() => toggleSection(`${conn.id}-triggers`)}
-                          >
-                            {safeSchema.triggers.map(trigger => (
-                              <div key={trigger.name}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  openSchemaMenu({
-                                    x: e.clientX, y: e.clientY,
-                                    name: trigger.name, type: "trigger",
-                                    schema: trigger.tableName, connection: conn,
-                                  });
-                                }}
-                                style={{
-                                  display: "flex", alignItems: "center", gap: 6,
-                                  padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid var(--border)",
-                                }}
-                              >
-                                <span style={{ fontSize: 9, color: "var(--error)", flexShrink: 0 }}>⚡</span>
-                                <span style={ellipsisLabel}>
-                                  {trigger.name}
-                                </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)",
-                                  flexShrink: 0, textAlign: "right" }}>
-                                  {trigger.timing} {trigger.event}
-                                </span>
-                              </div>
-                            ))}
-                          </SchemaSection>
+                            onOpenMenu={openSchemaMenu}
+                          />
 
-                          {/* Indexes */}
-                          <SchemaSection
-                            label="Indexes"
-                            icon="⊞"
-                            count={safeSchema.indexes.length}
-                            sectionKey={`${conn.id}-indexes`}
+                          <IndexesSection
+                            indexes={safeSchema.indexes}
+                            conn={conn}
                             expanded={expandedSections.has(`${conn.id}-indexes`)}
                             onToggle={() => toggleSection(`${conn.id}-indexes`)}
-                          >
-                            {safeSchema.indexes.map(idx => (
-                              <div key={`${idx.tableName}.${idx.name}`}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  openSchemaMenu({
-                                    x: e.clientX, y: e.clientY,
-                                    name: idx.name, type: "index",
-                                    schema: idx.tableName, connection: conn,
-                                    extra: conn.engine === "sqlite"
-                                      ? undefined  // ← SQLite: fetch from sqlite_master instead
-                                      : {
-                                          tableName: idx.tableName,
-                                          columns:   idx.columns,
-                                          isUnique:  idx.isUnique,
-                                          isPrimary: idx.isPrimary,
-                                        }
-                                  });
-                                }}
-                                style={{
-                                  display: "flex", alignItems: "center", gap: 6,
-                                  padding: "5px 14px 5px 20px",
-                                  borderTop: "1px solid var(--border)",
-                                }}
-                              >
-                                <span style={{ fontSize: 9,
-                                  color: idx.isPrimary ? "var(--warning)" : idx.isUnique ? "var(--accent)" : "var(--text-disabled)",
-                                  flexShrink: 0 }}>
-                                  {idx.isPrimary ? "🔑" : idx.isUnique ? "◈" : "◇"}
-                                </span>
-                                <span style={ellipsisLabel}>
-                                  {idx.name}
-                                </span>
-                                <span style={{ fontSize: 9, color: "var(--text-disabled)", fontFamily: "var(--mono)",
-                                  flexShrink: 0, maxWidth: 80, overflow: "hidden",
-                                  textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                                  title={idx.columns}>
-                                  {idx.tableName}
-                                </span>
-                              </div>
-                            ))}
-                          </SchemaSection>
+                            onOpenMenu={openSchemaMenu}
+                          />
                           </>
                           );
                         })()}

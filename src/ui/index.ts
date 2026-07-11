@@ -6,3 +6,4 @@ export { SettingsRow } from "./SettingsRow";
 export { selectStyle } from "./styles";
 export { LockOverlay } from "./LockOverlay";
 export { SidebarFooter } from "./SidebarFooter";
+export { DbRow } from "./DbRow";
