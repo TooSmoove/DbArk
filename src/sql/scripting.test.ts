@@ -18,8 +18,8 @@ describe("buildDropSql", () => {
   });
 
   it("quotes MySQL objects with backticks and no schema", () => {
-    expect(buildDropSql("mysql", "table", "users", "", "")).toBe("DROP TABLE \`users\`");
-    expect(buildDropSql("mysql", "index", "ix_name", "", "users")).toBe("DROP INDEX \`ix_name\` ON \`users\`");
+    expect(buildDropSql("mysql", "table", "users", "", "")).toBe("DROP TABLE `users`");
+    expect(buildDropSql("mysql", "index", "ix_name", "", "users")).toBe("DROP INDEX `ix_name` ON `users`");
   });
 
   it("qualifies Postgres objects with schema, no quoting", () => {
@@ -35,7 +35,7 @@ describe("buildDropSql", () => {
 
   it("uses the generic default branch for unknown object types", () => {
     expect(buildDropSql("sqlserver", "sequence", "seq", "dbo", "")).toBe("DROP sequence [seq]");
-    expect(buildDropSql("mysql", "event", "e", "", "")).toBe("DROP event \`e\`");
+    expect(buildDropSql("mysql", "event", "e", "", "")).toBe("DROP event `e`");
   });
 });
 
@@ -43,14 +43,14 @@ describe("buildDropSql", () => {
 describe("buildDropIfExists", () => {
   it("emits IF EXISTS for each engine", () => {
     expect(buildDropIfExists("sqlserver", "table", "Users", "dbo", "")).toBe("DROP TABLE IF EXISTS [dbo].[Users]");
-    expect(buildDropIfExists("mysql", "view", "v", "", "")).toBe("DROP VIEW IF EXISTS \`v\`");
+    expect(buildDropIfExists("mysql", "view", "v", "", "")).toBe("DROP VIEW IF EXISTS `v`");
     expect(buildDropIfExists("postgres", "function", "f", "public", "")).toBe("DROP FUNCTION IF EXISTS public.f");
     expect(buildDropIfExists("sqlite", "trigger", "t", "", "")).toBe("DROP TRIGGER IF EXISTS t");
   });
 
   it("includes the parent table for index drops", () => {
     expect(buildDropIfExists("sqlserver", "index", "IX", "dbo", "Users")).toBe("DROP INDEX IF EXISTS [IX] ON [dbo].[Users]");
-    expect(buildDropIfExists("mysql", "index", "ix", "", "users")).toBe("DROP INDEX IF EXISTS \`ix\` ON \`users\`");
+    expect(buildDropIfExists("mysql", "index", "ix", "", "users")).toBe("DROP INDEX IF EXISTS `ix` ON `users`");
   });
 });
 
@@ -77,7 +77,7 @@ describe("generateUpdateSql", () => {
 
   it("bracket-quotes for SQL Server and backtick-quotes for MySQL", () => {
     expect(generateUpdateSql("Users", "dbo", edits, pk, ["7"], "sqlserver")).toContain("UPDATE [dbo].[Users]");
-    expect(generateUpdateSql("users", "", edits, pk, ["7"], "mysql")).toContain("UPDATE \`users\`");
+    expect(generateUpdateSql("users", "", edits, pk, ["7"], "mysql")).toContain("UPDATE `users`");
   });
 
   it("joins multiple primary-key columns with AND", () => {
@@ -102,7 +102,7 @@ describe("scriptTable", () => {
   };
 
   it("builds a SELECT over all columns", () => {
-    expect(scriptTable(table, "select", "sqlserver")).toBe("SELECT [id], [email]\nFROM [dbo].[Users]");
+    expect(scriptTable(table, "select", "sqlserver")).toBe("SELECT [id], [email]nFROM [dbo].[Users]");
   });
 
   it("builds an INSERT over non-PK columns", () => {
@@ -120,7 +120,7 @@ describe("scriptTable", () => {
   });
 
   it("builds a DELETE keyed on the primary key", () => {
-    expect(scriptTable(table, "delete", "mysql")).toBe("DELETE FROM \`Users\`\nWHERE \`id\` = <id, int>");
+    expect(scriptTable(table, "delete", "mysql")).toBe("DELETE FROM `Users`nWHERE `id` = <id, int>");
   });
 
   it("falls back to a placeholder WHERE when there is no primary key", () => {
@@ -145,8 +145,8 @@ describe("scriptExecute", () => {
   });
 
   it("emits CALL syntax for MySQL/MariaDB, Postgres and CockroachDB", () => {
-    expect(scriptExecute(proc(1), "mysql")).toBe("CALL \`GetUser\`(<param1>)");
-    expect(scriptExecute(proc(1), "mariadb")).toBe("CALL \`GetUser\`(<param1>)");
+    expect(scriptExecute(proc(1), "mysql")).toBe("CALL `GetUser`(<param1>)");
+    expect(scriptExecute(proc(1), "mariadb")).toBe("CALL `GetUser`(<param1>)");
     expect(scriptExecute(proc(1), "postgres")).toBe("CALL dbo.GetUser(<param1>)");
     expect(scriptExecute(proc(1), "cockroachdb")).toBe("CALL dbo.GetUser(<param1>)");
   });
