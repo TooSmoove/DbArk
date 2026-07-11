@@ -242,14 +242,9 @@ public static class FileQueryEngineLib
             var connectionString = Marshal.PtrToStringUTF8(connectionStringPtr) ?? "";
             var engine = Marshal.PtrToStringUTF8(enginePtr) ?? "";
 
-            var sql = engine.ToLower() switch
-            {
-                "mysql" or "mariadb" => "SHOW TABLES",
-                "postgres" or "cockroachdb" => "SELECT tablename AS table_name FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
-                "sqlite" => "SELECT name AS table_name FROM sqlite_master WHERE type='table' ORDER BY name",
-                "sqlserver" => "SELECT TABLE_NAME AS table_name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
-                _ => throw new Exception($"Unsupported engine: {engine}")
-            };
+            // Engine dispatch (audit A-2): the catalog query lives on the
+            // engine's bridge implementation, not in an inline switch.
+            var sql = DbBridges.Resolve(engine).ListTablesSql;
 
             var jsonResult = ExecuteDbQuery(connectionString, engine, sql);
             var doc = JsonDocument.Parse(jsonResult);
@@ -354,17 +349,10 @@ public static class FileQueryEngineLib
 
     private static string ExecuteDbQuery(string connectionString, string engine, string sql)
     {
-        return engine.ToLower() switch
-        {
-            "mysql" or "mariadb" => ExecuteMySql(connectionString, sql),
-            "postgres" or "cockroachdb" => ExecutePostgres(connectionString, sql),
-            "sqlite" => ExecuteSqliteDb(connectionString, sql),
-            "sqlserver" => ExecuteSqlServer(connectionString, sql),
-            _ => throw new Exception($"Unsupported engine: {engine}")
-        };
+        return DbBridges.Resolve(engine).Execute(connectionString, sql);
     }
 
-    private static string ExecuteMySql(string connectionString, string sql)
+    internal static string ExecuteMySql(string connectionString, string sql)
     {
         using var conn = new MySqlConnection(connectionString);
         conn.Open();
@@ -374,7 +362,7 @@ public static class FileQueryEngineLib
         return ReaderToJson(reader);
     }
 
-    private static string ExecutePostgres(string connectionString, string sql)
+    internal static string ExecutePostgres(string connectionString, string sql)
     {
         using var conn = new NpgsqlConnection(connectionString);
         conn.Open();
@@ -389,7 +377,7 @@ public static class FileQueryEngineLib
     // which SqlConnection cannot parse — OdbcConnection accepts it directly and
     // matches the rest of the app's SQL Server path. Requires the System.Data.Odbc
     // package reference in this project's .csproj.
-    private static string ExecuteSqlServer(string connectionString, string sql)
+    internal static string ExecuteSqlServer(string connectionString, string sql)
     {
         using var conn = new System.Data.Odbc.OdbcConnection(connectionString);
         conn.Open();
@@ -399,7 +387,7 @@ public static class FileQueryEngineLib
         return ReaderToJson(reader);
     }
 
-    private static string ExecuteSqliteDb(string connectionString, string sql)
+    internal static string ExecuteSqliteDb(string connectionString, string sql)
     {
         string path = SqliteConnectionString.ExtractPath(connectionString);
 

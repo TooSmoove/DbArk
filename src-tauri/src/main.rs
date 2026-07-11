@@ -259,59 +259,27 @@ mod ipc_error_tests {
     }
 }
 
-/// The SQL Server ODBC driver name to use in connection strings, detected once
-/// from what is actually installed. Avoids hardcoding a single version (a clean
-/// machine may have Driver 18 but not 17, which throws ODBC IM002).
-static SQLSERVER_ODBC_DRIVER: OnceLock<String> = OnceLock::new();
-
+mod engine;
 mod fatal;
 
-fn sqlserver_odbc_driver() -> &'static str {
-    SQLSERVER_ODBC_DRIVER
-        .get_or_init(|| {
-            #[cfg(windows)]
-            {
-                const CANDIDATES: &[&str] = &[
-                    "ODBC Driver 18 for SQL Server",
-                    "ODBC Driver 17 for SQL Server",
-                    "SQL Server", // legacy, always present on Windows
-                ];
-                for name in CANDIDATES {
-                    if odbc_driver_installed(name) {
-                        return name.to_string();
-                    }
-                }
-                "SQL Server".to_string()
+use engine::{ConnOptions, ConnectionParams, Engine, EngineError};
+
+/// Map engine-layer errors onto the IPC envelope (audit A-2): the engine
+/// module knows nothing about IPC, and the wire shape the frontend sees is
+/// unchanged — an unsupported engine is `validation`, missing credentials are
+/// `not_found`, keychain plumbing failures are `internal`.
+impl From<EngineError> for IpcError {
+    fn from(e: EngineError) -> Self {
+        match &e {
+            EngineError::Unsupported(_) => IpcError::validation(e.to_string()),
+            EngineError::CredentialNotFound(_) | EngineError::NoPassword(_) => {
+                IpcError::not_found(e.to_string())
             }
-            #[cfg(not(windows))]
-            {
-                // macOS/Linux use unixODBC, not the registry. Microsoft's driver
-                // registers under this name in odbcinst.ini. Static default for now.
-                "ODBC Driver 18 for SQL Server".to_string()
-            }
-        })
-        .as_str()
+            EngineError::Keychain(_) => IpcError::internal(e.to_string()),
+        }
+    }
 }
 
-/// Shared connection parameters for the database command IPC boundary.
-/// Replaces the long flat argument lists that tripped clippy::too_many_arguments
-/// (audit A-2). Deserialised from the frontend's camelCase `invoke` payload under
-/// a `params` key; omitted optionals (notably `tunnel_port`, sent only by
-/// build_connection_string) deserialise to `None`.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ConnectionParams {
-    credential_ref: String,
-    engine: String,
-    host: String,
-    port: u16,
-    database: String,
-    username: String,
-    ssl_mode: Option<String>,
-    sql_instance: Option<String>,
-    windows_auth: Option<bool>,
-    tunnel_port: Option<u16>,
-}
 
 /// SSH tunnel parameters for `open_tunnel` (a different shape from a DB
 /// connection, so it gets its own parameter object — audit A-2).
@@ -328,176 +296,6 @@ struct TunnelParams {
     db_port: i32,
 }
 
-/// Resolved inputs for `build_sqlserver_odbc`, grouped to keep the builder under
-/// the argument-count limit and to keep the IPC `ConnectionParams` type out of
-/// the internal ODBC layer. All fields are `Copy`, so the builder destructures
-/// by value and its body is unchanged.
-struct SqlServerOdbcArgs<'a> {
-    host: &'a str,
-    port: u16,
-    instance: &'a str,
-    database: &'a str,
-    username: &'a str,
-    password: &'a str,
-    win_auth: bool,
-    ssl_mode: &'a str,
-}
-
-/// Builds the ODBC connection string for a SQL Server connection.
-/// SINGLE SOURCE OF TRUTH — every SQL Server call site must use this so the
-/// driver name, instance/port form, auth mode, and Encrypt/SSL handling can
-/// never drift between code paths again.
-fn build_sqlserver_odbc(args: &SqlServerOdbcArgs) -> String {
-    let &SqlServerOdbcArgs {
-        host,
-        port,
-        instance,
-        database,
-        username,
-        password,
-        win_auth,
-        ssl_mode,
-    } = args;
-    // Named instance => host\instance; otherwise host,port (ODBC comma form).
-    let server = if !instance.is_empty() {
-        format!("{}\\{}", host, instance)
-    } else {
-        format!("{},{}", host, port)
-    };
-    let encrypt = match ssl_mode {
-        "require" => "yes",
-        "verify-full" => "strict",
-        _ => "no",
-    };
-    let driver = sqlserver_odbc_driver();
-    // Server is composed from allow-list-validated host/port/instance, so it is
-    // brace-safe as-is. Database/UID/PWD can carry special characters (the
-    // password is free-form in the keychain) and MUST be ODBC-escaped, or a
-    // value containing `;`, `}`, `=`, etc. corrupts the connection string
-    // (audit H-2).
-    if win_auth {
-        format!(
-            "Driver={{{}}};Server={};Database={};Trusted_Connection=yes;Encrypt={};TrustServerCertificate=yes;",
-            driver, server, escape_odbc_value(database), encrypt
-        )
-    } else {
-        format!(
-            "Driver={{{}}};Server={};Database={};UID={};PWD={};Encrypt={};TrustServerCertificate=yes;",
-            driver, server, escape_odbc_value(database), escape_odbc_value(username), escape_odbc_value(password), encrypt
-        )
-    }
-}
-
-/// Escapes a value for an ODBC connection string (SQL Server via SQLDriverConnect).
-/// ODBC rule: if the value contains a delimiter from `[]{}(),;?*=!@`, whitespace,
-/// or is empty-significant, enclose it in braces; any `}` inside the braced value
-/// is escaped by doubling it (`}}`). A `{` needs no escaping inside the braces.
-/// Empty values are returned unchanged (`PWD=;` is harmless and unambiguous).
-fn escape_odbc_value(v: &str) -> String {
-    if v.is_empty() {
-        return String::new();
-    }
-    let needs_brace = v.starts_with(char::is_whitespace)
-        || v.ends_with(char::is_whitespace)
-        || v.contains([
-            '[', ']', '{', '}', '(', ')', ',', ';', '?', '*', '=', '!', '@', ' ',
-        ]);
-    if !needs_brace {
-        return v.to_string();
-    }
-    format!("{{{}}}", v.replace('}', "}}"))
-}
-
-/// Escapes a value for an ADO.NET keyword/value connection string
-/// (Npgsql, MySqlConnector — both follow DbConnectionStringBuilder semantics).
-/// A value containing `;`, `'`, `"`, `=`, or with significant leading/trailing
-/// whitespace must be quoted. Prefer double-quote enclosure; fall back to single
-/// quotes when the value contains a double quote; if it contains both quote
-/// kinds, enclose in double quotes and double each embedded double quote.
-/// Empty values are returned unchanged so the existing `Password=;` form (used
-/// by insecure CockroachDB) is preserved exactly.
-fn escape_kv_value(v: &str) -> String {
-    if v.is_empty() {
-        return String::new();
-    }
-    let needs_quote = v.starts_with(char::is_whitespace)
-        || v.ends_with(char::is_whitespace)
-        || v.contains([';', '\'', '"', '=']);
-    if !needs_quote {
-        return v.to_string();
-    }
-    if !v.contains('"') {
-        format!("\"{v}\"")
-    } else if !v.contains('\'') {
-        format!("'{v}'")
-    } else {
-        format!("\"{}\"", v.replace('"', "\"\""))
-    }
-}
-
-/// Builds a MySQL/MariaDB (MySqlConnector) keyword/value connection string with
-/// every free-text field ODBC/ADO.NET-escaped. `suffix` carries the call site's
-/// own SSL/timeout/AllowUserVariables tail verbatim, so per-site behaviour is
-/// unchanged — only the escaping is centralised here (audit H-2 / A-3).
-fn build_mysql_conn(
-    host: &str,
-    port: u16,
-    database: &str,
-    username: &str,
-    password: &str,
-    suffix: &str,
-) -> String {
-    format!(
-        "Server={};Port={};Database={};Uid={};Pwd={};{}",
-        host,
-        port,
-        escape_kv_value(database),
-        escape_kv_value(username),
-        escape_kv_value(password),
-        suffix
-    )
-}
-
-/// Builds a PostgreSQL/CockroachDB (Npgsql) keyword/value connection string with
-/// every free-text field escaped. `suffix` carries the call site's SSL/timeout
-/// tail verbatim (audit H-2 / A-3).
-fn build_pg_conn(
-    host: &str,
-    port: u16,
-    database: &str,
-    username: &str,
-    password: &str,
-    suffix: &str,
-) -> String {
-    format!(
-        "Host={};Port={};Database={};Username={};Password={};{}",
-        host,
-        port,
-        escape_kv_value(database),
-        escape_kv_value(username),
-        escape_kv_value(password),
-        suffix
-    )
-}
-
-/// The single builder for DbArk's SQLite connection string (audit A-3). The C#
-/// side parses this back out with `SqliteConnectionString.ExtractPath` in
-/// `src-csharp/Shared/SqliteConnectionString.cs` — keep the two in sync.
-/// SQLite has no host/credentials: `database` is the file path, used verbatim.
-fn build_sqlite_conn(database: &str) -> String {
-    format!("Data Source={}", database)
-}
-
-#[cfg(windows)]
-fn odbc_driver_installed(name: &str) -> bool {
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-    use winreg::RegKey;
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    hklm.open_subkey(r"SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers")
-        .and_then(|k| k.get_value::<String, _>(name))
-        .map(|v| v == "Installed")
-        .unwrap_or(false)
-}
 
 #[inline]
 fn timing_enabled() -> bool {
@@ -830,142 +628,8 @@ fn delete_credential(target: String) -> Result<(), IpcError> {
 
 #[tauri::command]
 fn build_connection_string(params: ConnectionParams) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        tunnel_port,
-    } = params;
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
-
-    // If tunnel is active, connect via localhost tunnel port
-    let effective_host = if tunnel_port.is_some() {
-        "127.0.0.1".to_string()
-    } else {
-        host
-    };
-    let effective_port = tunnel_port.unwrap_or(port);
-
-    // SQLite is a file path with no password — skip the keychain fetch (it would
-    // fail with "credential not found" since SQLite connections store none).
-    let is_sqlite = engine.to_lowercase() == "sqlite";
-
-    let password = if !win_auth && !is_sqlite {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        // For CockroachDB insecure clusters (ssl_mode = "none") the dbark user
-        // has no password — allow an empty or missing credential instead of
-        // erroring, which would cause the error string to be used as the
-        // connection string and produce a 30-second timeout.
-        let pw = match entry.get_password() {
-            Ok(p)  => p,
-            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
-        };
-        if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
-            return Err(IpcError::not_found(format!(
-                "No password stored for '{}'. Open Edit Connection, enter the password and save.",
-                credential_ref
-            )));
-        }
-        pw
-    } else {
-        String::new()
-    };
-    let password = Zeroizing::new(password);
-
-    let conn_str = match engine.to_lowercase().as_str() {
-        // MariaDB is wire-protocol compatible with MySQL — uses the same MySqlConnector driver
-        "mysql" | "mariadb" => {
-            let ssl_param = match ssl.as_str() {
-                "none" => "SslMode=None;",
-                "require" => "SslMode=Required;",
-                "verify-full" => "SslMode=VerifyFull;",
-                _ => {
-                    if tunnel_port.is_some() {
-                        "SslMode=None;"
-                    } else {
-                        "SslMode=Preferred;"
-                    }
-                }
-            };
-            build_mysql_conn(
-                &effective_host,
-                effective_port,
-                &database,
-                &username,
-                password.as_str(),
-                &format!("{};AllowUserVariables=true;", ssl_param),
-            )
-        }
-        "postgres" => {
-            let ssl_param = match ssl.as_str() {
-                "none" => "SSL Mode=Disable;",
-                "require" => "SSL Mode=Require;",
-                "verify-full" => "SSL Mode=VerifyFull;",
-                _ => "SSL Mode=Prefer;",
-            };
-            build_pg_conn(
-                &effective_host,
-                effective_port,
-                &database,
-                &username,
-                password.as_str(),
-                ssl_param,
-            )
-        }
-        // CockroachDB speaks the Postgres wire protocol — uses Npgsql.
-        // ssl_mode="none" means insecure single-node dev cluster: omit the SSL
-        // parameter entirely. Passing SSL Mode=Disable causes Npgsql to send a
-        // different handshake that CockroachDB's insecure listener rejects.
-        // For secure clusters use ssl_mode="require" or "verify-full".
-        "cockroachdb" => {
-            // ssl_mode="none" (insecure): use SSL Mode=Allow so Npgsql connects
-            // plain without sending an SSLRequest. Omitting SSL Mode entirely
-            // defaults Npgsql to Prefer which DOES send an SSLRequest —
-            // CockroachDB insecure may not respond, causing a 30-second timeout.
-            let ssl_param = match ssl.as_str() {
-                "none" => "SSL Mode=Allow;",
-                "require" => "SSL Mode=Require;Trust Server Certificate=true;",
-                "verify-full" => "SSL Mode=VerifyFull;",
-                _ => "SSL Mode=Prefer;Trust Server Certificate=true;",
-            };
-            build_pg_conn(
-                &effective_host,
-                effective_port,
-                &database,
-                &username,
-                password.as_str(),
-                ssl_param,
-            )
-        }
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &effective_host,
-            port: effective_port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        "sqlite" => build_sqlite_conn(&database),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-
-    Ok(conn_str)
+    let (_, conn_str) = engine::resolve(&params, ConnOptions::default())?;
+    Ok(conn_str.to_string())
 }
 
 #[tauri::command]
@@ -1014,65 +678,7 @@ async fn get_file_schema(file_path: String) -> Result<String, IpcError> {
 
 #[tauri::command]
 async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        ..
-    } = params;
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
-    // No keychain password for SQLite, nor for Windows-auth (uses the OS identity).
-    let password = if engine.to_lowercase() == "sqlite" || win_auth {
-        String::new()
-    } else {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
-    };
-    let password = Zeroizing::new(password);
-    let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => build_mysql_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SslMode=Preferred;",
-        ),
-        "postgres" | "cockroachdb" => build_pg_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SSL Mode=Prefer;",
-        ),
-        "sqlite" => build_sqlite_conn(&database),
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &host,
-            port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-    let connection_string = Zeroizing::new(connection_string);
+    let (engine, connection_string) = engine::resolve(&params, ConnOptions::default())?;
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char,
@@ -1082,7 +688,7 @@ async fn list_db_tables(params: ConnectionParams) -> Result<String, IpcError> {
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
         })?;
-        let eng = CString::new(engine).map_err(|_| {
+        let eng = CString::new(engine.name()).map_err(|_| {
             IpcError::validation(
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
@@ -1103,67 +709,7 @@ async fn query_file_with_db(
     sql: String,
     table_names: String,
 ) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        ..
-    } = params;
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
-    // No keychain password for SQLite, nor for Windows-auth (uses the OS identity).
-    // This path powers the flat-file-join: joining a CSV against a live SQLite DB
-    // (or a Windows-auth SQL Server) must not require a (nonexistent) password.
-    let password = if engine.to_lowercase() == "sqlite" || win_auth {
-        String::new()
-    } else {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
-    };
-    let password = Zeroizing::new(password);
-    let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => build_mysql_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SslMode=Preferred;",
-        ),
-        "postgres" | "cockroachdb" => build_pg_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SSL Mode=Prefer;",
-        ),
-        "sqlite" => build_sqlite_conn(&database),
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &host,
-            port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-    let connection_string = Zeroizing::new(connection_string);
+    let (engine, connection_string) = engine::resolve(&params, ConnOptions::default())?;
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
             *const c_char, *const c_char, *const c_char,
@@ -1185,7 +731,7 @@ async fn query_file_with_db(
                     "input contains a NUL byte and cannot be passed to the native layer",
                 )
             })?,
-            CString::new(engine).map_err(|_| {
+            CString::new(engine.name()).map_err(|_| {
                 IpcError::validation(
                     "input contains a NUL byte and cannot be passed to the native layer",
                 )
@@ -1213,83 +759,7 @@ async fn query_file_with_db(
 
 #[tauri::command]
 async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        ..
-    } = params;
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
-
-    // SQLite is a file path with no password — skip the keychain fetch (it would
-    // fail with "credential not found" since SQLite connections store none).
-    let is_sqlite = engine.to_lowercase() == "sqlite";
-
-    let password = if !win_auth && !is_sqlite {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        // For CockroachDB insecure clusters (ssl_mode = "none") the dbark user
-        // has no password — allow an empty or missing credential instead of
-        // erroring, which would cause the error string to be used as the
-        // connection string and produce a 30-second timeout.
-        let pw = match entry.get_password() {
-            Ok(p)  => p,
-            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
-        };
-        if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
-            return Err(IpcError::not_found(format!(
-                "No password stored for '{}'. Open Edit Connection, enter the password and save.",
-                credential_ref
-            )));
-        }
-        pw
-    } else {
-        String::new()
-    };
-    let password = Zeroizing::new(password);
-
-    let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => {
-            build_mysql_conn(&host, port, &database, &username, password.as_str(), "")
-        }
-        "postgres" => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
-        // CockroachDB insecure: add SSL Mode=Allow so Npgsql connects plain
-        // without sending an SSLRequest (avoids 30-second connection timeout).
-        "cockroachdb" => build_pg_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SSL Mode=Allow;",
-        ),
-        "sqlite" => build_sqlite_conn(&database),
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &host,
-            port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-    let connection_string = Zeroizing::new(connection_string);
+    let (engine, connection_string) = engine::resolve(&params, ConnOptions::default())?;
 
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -1302,7 +772,7 @@ async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
         })?;
-        let eng = CString::new(engine).map_err(|_| {
+        let eng = CString::new(engine.name()).map_err(|_| {
             IpcError::validation(
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
@@ -1325,23 +795,8 @@ async fn get_schema(params: ConnectionParams) -> Result<String, IpcError> {
 // database list, then calls get_schema(database = <chosen db>) on expand.
 #[tauri::command]
 async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        ..
-    } = params;
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
-
-    let is_sqlite = engine.to_lowercase() == "sqlite";
+    let engine = Engine::parse(&params.engine)?;
+    let is_sqlite = engine == Engine::Sqlite;
 
     // SQLite has no databases-on-a-server concept — short-circuit with an empty
     // list so the frontend renders tables directly with no database layer.
@@ -1349,56 +804,7 @@ async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
         return Ok("{\"databases\":[]}".to_string());
     }
 
-    let password = if !win_auth {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        let pw = match entry.get_password() {
-            Ok(p)  => p,
-            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
-        };
-        if pw.is_empty() && engine.to_lowercase() != "cockroachdb" {
-            return Err(IpcError::not_found(format!(
-                "No password stored for '{}'. Open Edit Connection, enter the password and save.",
-                credential_ref
-            )));
-        }
-        pw
-    } else {
-        String::new()
-    };
-    let password = Zeroizing::new(password);
-
-    let connection_string = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => {
-            build_mysql_conn(&host, port, &database, &username, password.as_str(), "")
-        }
-        "postgres" => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
-        "cockroachdb" => build_pg_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SSL Mode=Allow;",
-        ),
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &host,
-            port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-    let connection_string = Zeroizing::new(connection_string);
+    let (_, connection_string) = engine::resolve(&params, ConnOptions::default())?;
 
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -1411,7 +817,7 @@ async fn list_databases(params: ConnectionParams) -> Result<String, IpcError> {
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
         })?;
-        let eng = CString::new(engine).map_err(|_| {
+        let eng = CString::new(engine.name()).map_err(|_| {
             IpcError::validation(
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
@@ -1506,95 +912,17 @@ async fn clear_history(connection_id: String) -> Result<(), IpcError> {
 
 #[tauri::command]
 async fn test_connection(params: ConnectionParams) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        ..
-    } = params;
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
-
-    let password = if !win_auth && engine.to_lowercase() != "sqlite" {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        match entry.get_password() {
-            Ok(p)  => p,
-            Err(_) if engine.to_lowercase() == "cockroachdb" && ssl == "none" => String::new(),
-            Err(e) => return Err(IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e))),
-        }
-    } else {
-        String::new()
-    };
-    let password = Zeroizing::new(password);
-
-    let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => build_mysql_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SslMode=Preferred;ConnectionTimeout=5;",
-        ),
-        "postgres" => build_pg_conn(
-            &host,
-            port,
-            &database,
-            &username,
-            password.as_str(),
-            "SSL Mode=Prefer;Timeout=5;",
-        ),
-        "cockroachdb" => {
-            let ssl_param = if ssl == "none" {
-                "SSL Mode=Allow;"
-            } else {
-                "SSL Mode=Prefer;Trust Server Certificate=true;"
-            };
-            build_pg_conn(
-                &host,
-                port,
-                &database,
-                &username,
-                password.as_str(),
-                &format!("{}Timeout=5;", ssl_param),
-            )
-        }
-        "sqlite" => build_sqlite_conn(&database),
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &host,
-            port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-    let conn_str = Zeroizing::new(conn_str);
+    let (engine, conn_str) = engine::resolve(
+        &params,
+        ConnOptions {
+            connect_timeout_secs: Some(5),
+        },
+    )?;
 
     // Run a minimal test query
-    let test_sql = match engine.to_lowercase().as_str() {
-        "sqlserver" => "SELECT 1",
-        "postgres" => "SELECT 1",
-        "sqlite" => "SELECT 1",
-        _ => "SELECT 1",
-    };
+    let test_sql = "SELECT 1";
 
-    let result = call_execute_query(conn_str.as_str(), test_sql, &engine, false, 1)?;
+    let result = call_execute_query(conn_str.as_str(), test_sql, engine.name(), false, 1)?;
 
     let parsed: serde_json::Value =
         serde_json::from_str(&result).unwrap_or(serde_json::Value::Null);
@@ -1957,26 +1285,12 @@ async fn get_object_definition(
     object_type: String,
     schema_name: Option<String>,
 ) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        ..
-    } = params;
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
+    let engine = Engine::parse(&params.engine)?;
     let schema = schema_name.unwrap_or_else(|| "dbo".to_string());
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
 
     // SQLite — handle entirely in Rust via execute_query
     // avoids P/Invoke conflicts with the SchemaExplorer DLL
-    if engine.to_lowercase() == "sqlite" {
+    if engine == Engine::Sqlite {
         let sqlite_type = match object_type.to_lowercase().as_str() {
             "table" => "table",
             "view" => "view",
@@ -1996,7 +1310,7 @@ async fn get_object_definition(
             sqlite_type
         );
 
-        let conn_str = build_sqlite_conn(&database);
+        let conn_str = engine::build_sqlite_conn(&params.database);
 
         let raw = call_execute_query(conn_str.as_str(), sql.as_str(), "sqlite", true, 100)?;
 
@@ -2042,40 +1356,8 @@ async fn get_object_definition(
         ));
     }
 
-    // All other engines — call SchemaExplorer DLL as before
-    let password = if !win_auth {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
-    } else {
-        String::new()
-    };
-    let password = Zeroizing::new(password);
-
-    let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" | "mariadb" => {
-            build_mysql_conn(&host, port, &database, &username, password.as_str(), "")
-        }
-        "postgres" | "cockroachdb" => {
-            build_pg_conn(&host, port, &database, &username, password.as_str(), "")
-        }
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &host,
-            port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-    let conn_str = Zeroizing::new(conn_str);
+    // All other engines — call the SchemaExplorer DLL.
+    let (_, conn_str) = engine::resolve(&params, ConnOptions::default())?;
 
     let result = unsafe {
         let func: libloading::Symbol<unsafe extern "C" fn(
@@ -2091,7 +1373,7 @@ async fn get_object_definition(
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
         })?;
-        let c_engine = CString::new(engine).map_err(|_| {
+        let c_engine = CString::new(engine.name()).map_err(|_| {
             IpcError::validation(
                 "input contains a NUL byte and cannot be passed to the native layer",
             )
@@ -2171,7 +1453,7 @@ fn scrub_sql_for_log(sql: &str) -> String {
 
 #[tauri::command]
 async fn get_sqlite_objects(database: String) -> Result<String, IpcError> {
-    let conn_str = build_sqlite_conn(&database);
+    let conn_str = engine::build_sqlite_conn(&database);
 
     // Single query fetches all programmable objects at once
     let sql = "SELECT type, name, tbl_name \
@@ -2195,211 +1477,22 @@ async fn drop_object(
     schema_name: Option<String>,
     table_name: Option<String>,
 ) -> Result<String, IpcError> {
-    let ConnectionParams {
-        credential_ref,
-        engine,
-        host,
-        port,
-        database,
-        username,
-        ssl_mode,
-        sql_instance,
-        windows_auth,
-        ..
-    } = params;
-    let instance = sql_instance.unwrap_or_default();
-    let win_auth = windows_auth.unwrap_or(false);
+    let engine = Engine::parse(&params.engine)?;
     let schema = schema_name.unwrap_or_else(|| "dbo".to_string());
     let table = table_name.unwrap_or_default();
-    let ssl = ssl_mode.unwrap_or_else(|| "prefer".to_string());
 
-    // SQLite has no stored credential — skip the keychain fetch for it.
-    let password = if !win_auth && engine.to_lowercase() != "sqlite" {
-        let entry = keyring::Entry::new(&credential_ref, &username).map_err(|e| e.to_string())?;
-        entry.get_password().map_err(|e| IpcError::not_found(format!("Credential not found in keychain — store the password with the OS keychain first. ({})", e)))?
-    } else {
-        String::new()
-    };
-    let password = Zeroizing::new(password);
-
-    let conn_str = match engine.to_lowercase().as_str() {
-        "mysql" => build_mysql_conn(&host, port, &database, &username, password.as_str(), ""),
-        "postgres" => build_pg_conn(&host, port, &database, &username, password.as_str(), ""),
-        "sqlite" => build_sqlite_conn(&database),
-        "sqlserver" => build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: &host,
-            port,
-            instance: &instance,
-            database: &database,
-            username: &username,
-            password: password.as_str(),
-            win_auth,
-            ssl_mode: ssl.as_str(),
-        }),
-        _ => {
-            return Err(IpcError::validation(format!(
-                "Unsupported engine: {}",
-                engine
-            )))
-        }
-    };
-    let conn_str = Zeroizing::new(conn_str);
+    let (_, conn_str) = engine::resolve(&params, ConnOptions::default())?;
 
     // Build DROP statement per engine and type. Identifiers are quoted per engine
     // and the object type is validated against an allow-list (audit H-1), so a
     // crafted object name or type can't break out into injected SQL.
-    let drop_sql = build_drop_statement(&engine, &object_type, &object_name, &schema, &table)?;
+    let drop_sql = engine.build_drop_statement(&object_type, &object_name, &schema, &table)?;
 
-    let result = call_execute_query(conn_str.as_str(), drop_sql.as_str(), &engine, false, 1);
+    let result = call_execute_query(conn_str.as_str(), drop_sql.as_str(), engine.name(), false, 1);
 
     result
 }
 
-/// Quote a SQL identifier for `engine`, doubling that engine's closing delimiter so a
-/// crafted or compromised object name can't break out of the quotes (audit H-1).
-/// SQL Server uses `[..]` (`]`→`]]`), MySQL/MariaDB use `` `..` `` (`` ` ``→`` `` ``),
-/// and everything else (Postgres, CockroachDB, SQLite) uses the SQL-standard `".."`
-/// (`"`→`""`). Quoting Postgres/SQLite identifiers is also a correctness win: it
-/// preserves the exact catalog casing instead of letting an unquoted name case-fold.
-fn quote_ident(engine: &str, ident: &str) -> String {
-    match engine.to_lowercase().as_str() {
-        "sqlserver" => format!("[{}]", ident.replace(']', "]]")),
-        "mysql" | "mariadb" => format!("`{}`", ident.replace('`', "``")),
-        _ => format!("\"{}\"", ident.replace('"', "\"\"")),
-    }
-}
-
-/// Build a DROP statement for a schema object. Every identifier is quoted per engine
-/// via [`quote_ident`], and `object_type` is validated against a fixed per-engine
-/// allow-list — an unrecognised type returns `Err` rather than being interpolated as a
-/// raw SQL keyword. Together these close the H-1 identifier-injection surface: the
-/// object name/schema/table all arrive from the frontend over IPC and must be treated
-/// as untrusted.
-fn build_drop_statement(
-    engine: &str,
-    object_type: &str,
-    name: &str,
-    schema: &str,
-    table: &str,
-) -> Result<String, String> {
-    let eng = engine.to_lowercase();
-    let q = |ident: &str| quote_ident(&eng, ident);
-    let sql = match eng.as_str() {
-        "sqlserver" => match object_type {
-            "procedure" => format!("DROP PROCEDURE {}.{}", q(schema), q(name)),
-            "function" => format!("DROP FUNCTION {}.{}", q(schema), q(name)),
-            "view" => format!("DROP VIEW {}.{}", q(schema), q(name)),
-            "trigger" => format!("DROP TRIGGER {}", q(name)),
-            "index" => format!("DROP INDEX {} ON {}.{}", q(name), q(schema), q(table)),
-            "table" => format!("DROP TABLE {}.{}", q(schema), q(name)),
-            other => return Err(format!("Unsupported object type for sqlserver: {other}")),
-        },
-        "mysql" | "mariadb" => match object_type {
-            "procedure" => format!("DROP PROCEDURE {}", q(name)),
-            "function" => format!("DROP FUNCTION {}", q(name)),
-            "view" => format!("DROP VIEW {}", q(name)),
-            "trigger" => format!("DROP TRIGGER {}", q(name)),
-            "index" => format!("DROP INDEX {} ON {}", q(name), q(table)),
-            "table" => format!("DROP TABLE {}", q(name)),
-            other => return Err(format!("Unsupported object type for {eng}: {other}")),
-        },
-        "postgres" | "cockroachdb" => match object_type {
-            "procedure" => format!("DROP PROCEDURE {}.{}", q(schema), q(name)),
-            "function" => format!("DROP FUNCTION {}.{}", q(schema), q(name)),
-            "view" => format!("DROP VIEW {}.{}", q(schema), q(name)),
-            "trigger" => format!("DROP TRIGGER {} ON {}.{}", q(name), q(schema), q(table)),
-            "index" => format!("DROP INDEX {}.{}", q(schema), q(name)),
-            "table" => format!("DROP TABLE {}.{}", q(schema), q(name)),
-            other => return Err(format!("Unsupported object type for {eng}: {other}")),
-        },
-        _ => match object_type {
-            // SQLite (no schema namespace, no procedures/functions)
-            "view" => format!("DROP VIEW {}", q(name)),
-            "trigger" => format!("DROP TRIGGER {}", q(name)),
-            "index" => format!("DROP INDEX {}", q(name)),
-            "table" => format!("DROP TABLE {}", q(name)),
-            other => return Err(format!("Unsupported object type for {eng}: {other}")),
-        },
-    };
-    Ok(sql)
-}
-
-#[cfg(test)]
-mod drop_sql_tests {
-    use super::{build_drop_statement, quote_ident};
-
-    #[test]
-    fn quote_ident_doubles_sqlserver_bracket() {
-        // a `]` in the name must be doubled so it can't close the [..] quote early
-        assert_eq!(quote_ident("sqlserver", "ev]il"), "[ev]]il]");
-        assert_eq!(quote_ident("sqlserver", "users"), "[users]");
-    }
-
-    #[test]
-    fn quote_ident_doubles_mysql_backtick() {
-        assert_eq!(quote_ident("mysql", "ev`il"), "`ev``il`");
-        assert_eq!(quote_ident("mariadb", "t"), "`t`");
-    }
-
-    #[test]
-    fn quote_ident_doubles_standard_doublequote() {
-        // postgres / cockroachdb / sqlite / unknown all use SQL-standard ".."
-        assert_eq!(quote_ident("postgres", "ev\"il"), "\"ev\"\"il\"");
-        assert_eq!(quote_ident("sqlite", "weird name"), "\"weird name\"");
-        assert_eq!(quote_ident("cockroachdb", "t"), "\"t\"");
-    }
-
-    #[test]
-    fn drop_quotes_all_identifiers_sqlserver() {
-        assert_eq!(
-            build_drop_statement("sqlserver", "table", "Orders", "dbo", "").unwrap(),
-            "DROP TABLE [dbo].[Orders]"
-        );
-    }
-
-    #[test]
-    fn drop_neutralises_injection_in_object_name() {
-        // A name crafted to close the quote and append a second statement is rendered
-        // inert: the `]` is doubled, so the whole payload stays trapped inside one
-        // bracket-quoted identifier and the statement closes only at the very end.
-        let sql =
-            build_drop_statement("sqlserver", "table", "x]; DROP TABLE secrets;--", "dbo", "")
-                .unwrap();
-        assert_eq!(sql, "DROP TABLE [dbo].[x]]; DROP TABLE secrets;--]");
-        assert!(sql.ends_with(']'));
-    }
-
-    #[test]
-    fn drop_quotes_postgres_schema_and_name() {
-        assert_eq!(
-            build_drop_statement("postgres", "view", "v", "public", "").unwrap(),
-            "DROP VIEW \"public\".\"v\""
-        );
-    }
-
-    #[test]
-    fn drop_quotes_sqlite_name() {
-        assert_eq!(
-            build_drop_statement("sqlite", "table", "my tbl", "", "").unwrap(),
-            "DROP TABLE \"my tbl\""
-        );
-    }
-
-    #[test]
-    fn drop_index_includes_table_sqlserver() {
-        assert_eq!(
-            build_drop_statement("sqlserver", "index", "ix_a", "dbo", "Orders").unwrap(),
-            "DROP INDEX [ix_a] ON [dbo].[Orders]"
-        );
-    }
-
-    #[test]
-    fn drop_rejects_unknown_object_type() {
-        // an object type the engine doesn't support errors out, never interpolates raw
-        assert!(build_drop_statement("sqlserver", "database", "x", "dbo", "").is_err());
-        assert!(build_drop_statement("sqlite", "procedure", "x", "", "").is_err());
-    }
-}
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct AppSettings {
@@ -2757,14 +1850,9 @@ fn import_dbeaver_connections() -> Result<String, IpcError> {
             .unwrap_or("")
             .to_string();
 
-        let default_port: u16 = match engine {
-            "postgres" => 5432,
-            "cockroachdb" => 26257,
-            "mysql" => 3306,
-            "mariadb" => 3306,
-            "sqlserver" => 1433,
-            _ => 0,
-        };
+        let default_port: u16 = Engine::parse(engine)
+            .map(Engine::default_port)
+            .unwrap_or(0);
         let port: u16 = config
             .get("port")
             .and_then(|v| v.as_str())
@@ -3070,137 +2158,4 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| fatal::report_fatal("Tauri runtime", e));
-}
-#[cfg(test)]
-mod conn_string_tests {
-    use super::{
-        build_mysql_conn, build_pg_conn, build_sqlite_conn, build_sqlserver_odbc, escape_kv_value,
-        escape_odbc_value, SqlServerOdbcArgs,
-    };
-
-    // ---- build_sqlite_conn (audit A-3) ----
-
-    #[test]
-    fn sqlite_conn_is_the_shared_data_source_contract() {
-        // The C# side (SqliteConnectionString.ExtractPath) parses this exact
-        // shape back out — this test pins the producing half of the contract.
-        assert_eq!(
-            build_sqlite_conn(r"C:\data\app.db"),
-            r"Data Source=C:\data\app.db"
-        );
-    }
-
-    #[test]
-    fn sqlite_conn_passes_paths_with_spaces_and_quotes_verbatim() {
-        // Paths like /Users/O'Brien/my data.db must survive untouched; the
-        // consumer trims but never unquotes (regression guard for audit H-1).
-        assert_eq!(
-            build_sqlite_conn("/Users/O'Brien/my data.db"),
-            "Data Source=/Users/O'Brien/my data.db"
-        );
-    }
-
-    // ---- escape_kv_value (Npgsql / MySqlConnector) ----
-
-    #[test]
-    fn kv_passes_plain_values_through_unquoted() {
-        assert_eq!(escape_kv_value("plainpw"), "plainpw");
-        assert_eq!(escape_kv_value("p@ssw0rd"), "p@ssw0rd"); // @ is not special in ADO.NET
-    }
-
-    #[test]
-    fn kv_quotes_semicolon_so_password_cannot_break_out() {
-        // Without quoting, `;` ends the Password field early and the rest of the
-        // password is parsed as bogus keywords — the core audit H-2 bug.
-        assert_eq!(escape_kv_value("pa;ss"), "\"pa;ss\"");
-        assert_eq!(escape_kv_value("a;b=c"), "\"a;b=c\"");
-    }
-
-    #[test]
-    fn kv_quotes_equals_and_trailing_whitespace() {
-        assert_eq!(escape_kv_value("base64=="), "\"base64==\"");
-        assert_eq!(escape_kv_value("trailing "), "\"trailing \"");
-        assert_eq!(escape_kv_value(" leading"), "\" leading\"");
-    }
-
-    #[test]
-    fn kv_picks_safe_enclosure_for_quote_chars() {
-        // double quote present, no single quote -> enclose in single quotes
-        assert_eq!(escape_kv_value("pw\"x"), "'pw\"x'");
-        // single quote present, no double quote -> enclose in double quotes
-        assert_eq!(escape_kv_value("pw'x"), "\"pw'x\"");
-        // both present -> double-quote enclosure with embedded " doubled
-        assert_eq!(escape_kv_value("a'b\"c"), "\"a'b\"\"c\"");
-    }
-
-    #[test]
-    fn kv_empty_value_is_unchanged() {
-        // preserves the `Password=;` form that insecure CockroachDB relies on
-        assert_eq!(escape_kv_value(""), "");
-    }
-
-    // ---- escape_odbc_value (SQL Server via SQLDriverConnect) ----
-
-    #[test]
-    fn odbc_braces_special_chars_and_doubles_close_brace() {
-        assert_eq!(escape_odbc_value("pa;ss"), "{pa;ss}");
-        assert_eq!(escape_odbc_value("p@ss"), "{p@ss}"); // @ IS an ODBC delimiter
-        assert_eq!(escape_odbc_value("brace}here"), "{brace}}here}");
-        // a `{` inside needs no escaping; only `}` is doubled
-        assert_eq!(escape_odbc_value("a{b}c"), "{a{b}}c}");
-    }
-
-    #[test]
-    fn odbc_passes_plain_values_through() {
-        assert_eq!(escape_odbc_value("plainpw"), "plainpw");
-        assert_eq!(escape_odbc_value(""), "");
-    }
-
-    // ---- builders embed escaping at the only place a string is assembled ----
-
-    #[test]
-    fn mysql_builder_escapes_password_in_full_string() {
-        let s = build_mysql_conn("h", 3306, "db", "user", "p;w", "SslMode=Preferred;");
-        assert_eq!(
-            s,
-            "Server=h;Port=3306;Database=db;Uid=user;Pwd=\"p;w\";SslMode=Preferred;"
-        );
-        // the injected `;` is now inside quotes, so it can't terminate the field
-        assert!(s.contains("Pwd=\"p;w\";"));
-    }
-
-    #[test]
-    fn pg_builder_escapes_password_in_full_string() {
-        let s = build_pg_conn("h", 5432, "db", "user", "p;w", "");
-        assert_eq!(
-            s,
-            "Host=h;Port=5432;Database=db;Username=user;Password=\"p;w\";"
-        );
-    }
-
-    #[test]
-    fn pg_builder_preserves_empty_password_form() {
-        let s = build_pg_conn("h", 26257, "db", "root", "", "SSL Mode=Allow;");
-        assert_eq!(
-            s,
-            "Host=h;Port=26257;Database=db;Username=root;Password=;SSL Mode=Allow;"
-        );
-    }
-
-    #[test]
-    fn sqlserver_odbc_escapes_password() {
-        let s = build_sqlserver_odbc(&SqlServerOdbcArgs {
-            host: "h",
-            port: 1433,
-            instance: "",
-            database: "db",
-            username: "sa",
-            password: "p;w}x",
-            win_auth: false,
-            ssl_mode: "require",
-        });
-        // password ends up brace-quoted with the `}` doubled
-        assert!(s.contains("PWD={p;w}}x};"), "got: {}", s);
-        assert!(s.contains("Database=db;"));
-    }
 }

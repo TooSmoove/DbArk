@@ -130,20 +130,10 @@ public static class ActivityExecutor
             if (string.IsNullOrEmpty(connectionString))
                 return ReturnError("empty connection string");
 
-            // Route to engine-specific reader. SQLite is rejected here as a
-            // defensive guard — Rust should already be hiding the panel.
-            List<ActivityRow> rows = engine switch
-            {
-                "sqlserver" => ReadSqlServer(connectionString),
-                "postgres" => ReadPostgres(connectionString),
-                "cockroachdb" => ReadPostgres(connectionString),
-                "mysql" => ReadMySql(connectionString),
-                "mariadb" => ReadMySql(connectionString),
-                "sqlite" => throw new InvalidOperationException(
-                                    "Activity panel is not supported for SQLite"),
-                _ => throw new InvalidOperationException(
-                                    $"Unknown engine: {engine}"),
-            };
+            // Route to the engine-specific reader (audit A-2): one registry
+            // lookup; SQLite's implementation rejects the call as a defensive
+            // guard — Rust should already be hiding the panel.
+            List<ActivityRow> rows = ActivityEngines.Resolve(engine).ReadActivity(connectionString);
 
             return Marshal.StringToCoTaskMemUTF8(
                 JsonSerializer.Serialize(
@@ -189,24 +179,10 @@ public static class ActivityExecutor
             if (!long.TryParse(pid, out _))
                 return ReturnError($"invalid pid: {pid}");
 
-            switch (engine)
-            {
-                case "sqlserver":
-                    KillSqlServer(connectionString, pid);
-                    break;
-                case "postgres":
-                case "cockroachdb":
-                    KillPostgres(connectionString, pid);
-                    break;
-                case "mysql":
-                case "mariadb":
-                    KillMySql(connectionString, pid);
-                    break;
-                case "sqlite":
-                    return ReturnError("Kill is not supported for SQLite");
-                default:
-                    return ReturnError($"Unknown engine: {engine}");
-            }
+            // Engine dispatch (audit A-2): registry lookup; SQLite / unknown
+            // engines surface the same error text the old switch produced,
+            // via the catch below.
+            ActivityEngines.Resolve(engine).KillSession(connectionString, pid);
 
             return Marshal.StringToCoTaskMemUTF8(
                 JsonSerializer.Serialize(
@@ -221,7 +197,7 @@ public static class ActivityExecutor
 
     // ── Per-engine row readers ──────────────────────────────────────────────
 
-    private static List<ActivityRow> ReadSqlServer(string connectionString)
+    internal static List<ActivityRow> ReadSqlServer(string connectionString)
     {
         IntPtr hEnv = IntPtr.Zero, hDbc = IntPtr.Zero, hStmt = IntPtr.Zero;
         var rows = new List<ActivityRow>();
@@ -340,7 +316,7 @@ public static class ActivityExecutor
         public ViewStatePermissionException(string message) : base(message) { }
     }
 
-    private static List<ActivityRow> ReadPostgres(string connectionString)
+    internal static List<ActivityRow> ReadPostgres(string connectionString)
     {
         using var conn = new NpgsqlConnection(connectionString);
         conn.Open();
@@ -351,7 +327,7 @@ public static class ActivityExecutor
         return ReadRows(reader);
     }
 
-    private static List<ActivityRow> ReadMySql(string connectionString)
+    internal static List<ActivityRow> ReadMySql(string connectionString)
     {
         using var conn = new MySqlConnection(connectionString);
         conn.Open();
@@ -387,7 +363,7 @@ public static class ActivityExecutor
 
     // ── Per-engine kill statements ──────────────────────────────────────────
 
-    private static void KillSqlServer(string connectionString, string pid)
+    internal static void KillSqlServer(string connectionString, string pid)
     {
         IntPtr hEnv = IntPtr.Zero, hDbc = IntPtr.Zero, hStmt = IntPtr.Zero;
         try
@@ -426,7 +402,7 @@ public static class ActivityExecutor
     // pg_terminate_backend which forcibly drops the connection. Cancel sends
     // an interrupt the query can clean up after. We surface cancel-failures
     // (returned as false) to the caller as an error.
-    private static void KillPostgres(string connectionString, string pid)
+    internal static void KillPostgres(string connectionString, string pid)
     {
         using var conn = new NpgsqlConnection(connectionString);
         conn.Open();
@@ -444,7 +420,7 @@ public static class ActivityExecutor
             throw new Exception($"Could not cancel backend {pid} (permission denied or no such pid)");
     }
 
-    private static void KillMySql(string connectionString, string pid)
+    internal static void KillMySql(string connectionString, string pid)
     {
         using var conn = new MySqlConnection(connectionString);
         conn.Open();

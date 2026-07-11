@@ -142,15 +142,13 @@ public static class QueryExecutor
             ActiveRowLimit = int.TryParse(Marshal.PtrToStringUTF8(rowLimitPtr), out var rl) && rl > 0
                 ? rl : 10_000;
 
-            var engineLower = engine.ToLowerInvariant();
-            bool useBatchPath =
-                engineLower is "sqlserver" or "postgres" or "cockroachdb" or "mysql" or "mariadb";
+            // Engine dispatch (audit A-2): resolve once, ask the engine for
+            // its capabilities instead of matching names inline.
+            var queryEngine = QueryEngines.Resolve(engine);
 
-            if (useBatchPath)
+            if (queryEngine.UsesBatchPath)
             {
-                List<string> batches = engineLower == "sqlserver"
-                    ? SplitSqlServerBatches(sql)
-                    : new List<string> { sql };
+                List<string> batches = queryEngine.SplitBatches(sql);
 
                 if (batches.Count == 0)
                     return Marshal.StringToCoTaskMemUTF8(
@@ -263,21 +261,11 @@ public static class QueryExecutor
                 }
             }
 
-            // Engine dispatch. Stage 2a: only sqlserver is routed here (others
-            // still use the legacy path in ExecuteMultiStatement). ExecuteInternal
-            // already sends the whole batch as one SQLExecDirectW and harvests
-            // every result set via its SQLMoreResults loop — including the
-            // "(N rows affected)" message for non-row statements.
-            List<QueryResult> dispatchResults = engine.ToLowerInvariant() switch
-            {
-                "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, sqlToRun),
-                "postgres" => ExecutePostgresMulti(connectionString, sqlToRun),
-                "cockroachdb" => ExecuteCockroachDbMulti(connectionString, sqlToRun),
-                "mysql" => ExecuteMySqlMulti(connectionString, sqlToRun),
-                "mariadb" => ExecuteMySqlMulti(connectionString, sqlToRun),
-                _ => throw new InvalidOperationException(
-                        $"ExecuteBatch reached for engine '{engine}' before its stage-2 migration."),
-            };
+            // Engine dispatch (audit A-2): one registry lookup replaces the
+            // per-engine switch. SQLite (legacy statement path) throws here by
+            // design; unknown engines are rejected by the registry.
+            List<QueryResult> dispatchResults =
+                QueryEngines.Resolve(engine).ExecuteBatch(connectionString, sqlToRun);
 
             foreach (var r in dispatchResults)
             {
@@ -297,7 +285,7 @@ public static class QueryExecutor
             };
         }
     }
-    private static List<QueryResult> ExecutePostgresMulti(string connectionString, string sql)
+    internal static List<QueryResult> ExecutePostgresMulti(string connectionString, string sql)
     {
         using var conn = new Npgsql.NpgsqlConnection(connectionString);
         conn.Open();
@@ -308,7 +296,7 @@ public static class QueryExecutor
         return HarvestReader(reader);
     }
 
-    private static List<QueryResult> ExecuteMySqlMulti(string connectionString, string sql)
+    internal static List<QueryResult> ExecuteMySqlMulti(string connectionString, string sql)
     {
         using var conn = new MySqlConnector.MySqlConnection(connectionString);
         conn.Open();
@@ -319,7 +307,7 @@ public static class QueryExecutor
         return HarvestReader(reader);
     }
 
-    private static List<QueryResult> ExecuteCockroachDbMulti(string connectionString, string sql)
+    internal static List<QueryResult> ExecuteCockroachDbMulti(string connectionString, string sql)
     {
         using var conn = OpenCockroachDbConnection(connectionString); // already open
         using var cmd = conn.CreateCommand();
@@ -368,17 +356,10 @@ public static class QueryExecutor
 
     private static int ExecuteNonQuery(string connectionString, string sql, string engine)
     {
-        return engine.ToLowerInvariant() switch
-        {
-            "postgres" => ExecuteNonQueryPostgres(connectionString, sql),
-            "cockroachdb" => ExecuteNonQueryCockroachDb(connectionString, sql),
-            "sqlite" => ExecuteNonQuerySqlite(connectionString, sql),
-            "sqlserver" => SqlServerExecutor.ExecuteNonQuery(connectionString, sql),
-            _ => ExecuteNonQueryMySql(connectionString, sql), // mysql + mariadb
-        };
+        return QueryEngines.Resolve(engine).ExecuteNonQuery(connectionString, sql);
     }
 
-    private static int ExecuteNonQueryMySql(string connectionString, string sql)
+    internal static int ExecuteNonQueryMySql(string connectionString, string sql)
     {
         using var conn = new MySqlConnector.MySqlConnection(connectionString);
         conn.Open();
@@ -388,7 +369,7 @@ public static class QueryExecutor
         return cmd.ExecuteNonQuery();
     }
 
-    private static int ExecuteNonQueryPostgres(string connectionString, string sql)
+    internal static int ExecuteNonQueryPostgres(string connectionString, string sql)
     {
         using var conn = new Npgsql.NpgsqlConnection(connectionString);
         conn.Open();
@@ -398,7 +379,7 @@ public static class QueryExecutor
         return cmd.ExecuteNonQuery();
     }
 
-    private static int ExecuteNonQuerySqlite(string connectionString, string sql)
+    internal static int ExecuteNonQuerySqlite(string connectionString, string sql)
     {
         // SQLite via P/Invoke — execute and discard the result set
         ExecuteSqliteCore(connectionString, sql);
@@ -510,7 +491,7 @@ public static class QueryExecutor
     // serialised to JSON, marshalled to unmanaged memory, and immediately
     // deserialised again has been removed — it leaked the unmanaged pointer
     // and wasted allocations on every query.
-    private static QueryResult ExecuteSqliteCore(string connectionString, string sql)
+    internal static QueryResult ExecuteSqliteCore(string connectionString, string sql)
     {
         string path = SqliteConnectionString.ExtractPath(connectionString);
 
@@ -901,17 +882,12 @@ public static class QueryExecutor
             };
             }
 
-            // Engine dispatch. Only SQL Server can naturally return multiple
-            // result sets per statement (STATISTICS XML); every other engine
-            // wraps its single QueryResult in a one-element list.
-            List<QueryResult> dispatchResults = engine.ToLowerInvariant() switch
-            {
-                "postgres" => new List<QueryResult> { ExecutePostgresInternal(connectionString, rewrittenSql) },
-                "cockroachdb" => new List<QueryResult> { ExecuteCockroachDbInternal(connectionString, rewrittenSql) },
-                "sqlite" => new List<QueryResult> { ExecuteSqliteCore(connectionString, rewrittenSql) },
-                "sqlserver" => SqlServerExecutor.ExecuteInternal(connectionString, rewrittenSql),
-                _ => new List<QueryResult> { ExecuteMySqlInternal(connectionString, rewrittenSql) },
-            };
+            // Engine dispatch (audit A-2): one registry lookup replaces the
+            // per-engine switch. Only SQL Server naturally returns multiple
+            // result sets per statement (STATISTICS XML); other engines wrap
+            // their single QueryResult in a one-element list.
+            List<QueryResult> dispatchResults =
+                QueryEngines.Resolve(engine).ExecuteStatement(connectionString, rewrittenSql);
 
             foreach (var r in dispatchResults)
             {
@@ -933,7 +909,7 @@ public static class QueryExecutor
         }
     }
 
-    private static QueryResult ExecuteMySqlInternal(string connectionString, string sql)
+    internal static QueryResult ExecuteMySqlInternal(string connectionString, string sql)
     {
         using var conn = new MySqlConnector.MySqlConnection(connectionString);
         conn.Open();
@@ -944,7 +920,7 @@ public static class QueryExecutor
         return ReaderToQueryResult(reader);
     }
 
-    private static QueryResult ExecutePostgresInternal(string connectionString, string sql)
+    internal static QueryResult ExecutePostgresInternal(string connectionString, string sql)
     {
         using var conn = new Npgsql.NpgsqlConnection(connectionString);
         conn.Open();
@@ -955,7 +931,7 @@ public static class QueryExecutor
         return ReaderToQueryResult(reader);
     }
 
-    private static QueryResult ExecuteCockroachDbInternal(string connectionString, string sql)
+    internal static QueryResult ExecuteCockroachDbInternal(string connectionString, string sql)
     {
         using var conn = OpenCockroachDbConnection(connectionString);
         using var cmd = conn.CreateCommand();
@@ -965,7 +941,7 @@ public static class QueryExecutor
         return ReaderToQueryResult(reader);
     }
 
-    private static int ExecuteNonQueryCockroachDb(string connectionString, string sql)
+    internal static int ExecuteNonQueryCockroachDb(string connectionString, string sql)
     {
         using var conn = OpenCockroachDbConnection(connectionString);
         using var cmd = conn.CreateCommand();
