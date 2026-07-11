@@ -31,12 +31,12 @@ internal static class DbBridges
         var postgres = new PostgresDbBridge();
         return new Dictionary<string, IDbBridge>(StringComparer.OrdinalIgnoreCase)
         {
-            ["mysql"] = mySql,
-            ["mariadb"] = mySql,
-            ["postgres"] = postgres,
-            ["cockroachdb"] = postgres,
-            ["sqlite"] = new SqliteDbBridge(),
-            ["sqlserver"] = new SqlServerDbBridge(),
+            [EngineNames.MySql] = mySql,
+            [EngineNames.MariaDb] = mySql,
+            [EngineNames.Postgres] = postgres,
+            [EngineNames.CockroachDb] = postgres,
+            [EngineNames.Sqlite] = new SqliteDbBridge(),
+            [EngineNames.SqlServer] = new SqlServerDbBridge(),
         };
     }
 

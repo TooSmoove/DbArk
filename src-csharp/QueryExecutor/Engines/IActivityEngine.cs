@@ -26,12 +26,12 @@ internal static class ActivityEngines
         var mySql = new MySqlActivityEngine();
         return new Dictionary<string, IActivityEngine>(StringComparer.OrdinalIgnoreCase)
         {
-            ["sqlserver"] = sqlServer,
-            ["postgres"] = postgres,
-            ["cockroachdb"] = postgres,
-            ["mysql"] = mySql,
-            ["mariadb"] = mySql,
-            ["sqlite"] = new SqliteActivityEngine(),
+            [EngineNames.SqlServer] = sqlServer,
+            [EngineNames.Postgres] = postgres,
+            [EngineNames.CockroachDb] = postgres,
+            [EngineNames.MySql] = mySql,
+            [EngineNames.MariaDb] = mySql,
+            [EngineNames.Sqlite] = new SqliteActivityEngine(),
         };
     }
 

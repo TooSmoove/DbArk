@@ -9,6 +9,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Shared/EngineNames.cs" Link="EngineNames.cs" />
     <Compile Include="../Shared/NativeString.cs" Link="NativeString.cs" />
   </ItemGroup>
 </Project>

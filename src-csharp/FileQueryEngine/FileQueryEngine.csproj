@@ -9,11 +9,13 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="FileQueryEngine.Tests" />
     <PackageReference Include="MySqlConnector" Version="2.5.0" />
     <PackageReference Include="Npgsql" Version="10.0.2" />
     <PackageReference Include="System.Data.Odbc" Version="10.0.8" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="../Shared/EngineNames.cs" Link="EngineNames.cs" />
     <Compile Include="../Shared/NativeString.cs" Link="NativeString.cs" />
     <Compile Include="../Shared/SqliteConnectionString.cs" Link="SqliteConnectionString.cs" />
     <Compile Include="../Shared/DuckDbTableBuilder.cs" Link="DuckDbTableBuilder.cs" />

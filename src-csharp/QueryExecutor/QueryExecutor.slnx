@@ -1,0 +1,11 @@
+<Solution>
+  <Project Path="../ConnectionManager/ConnectionManager.csproj" />
+  <Project Path="../FileQueryEngine.Tests/FileQueryEngine.Tests.csproj" />
+  <Project Path="../FileQueryEngine/FileQueryEngine.csproj" />
+  <Project Path="../QueryExecutor.Tests/QueryExecutorTests.Tests.csproj" />
+  <Project Path="../QueryHistory/QueryHistory.csproj" />
+  <Project Path="../SchemaExplorer.Tests/SchemaExplorer.Tests.csproj" />
+  <Project Path="../SchemaExplorer/SchemaExplorer.csproj" />
+  <Project Path="../SshTunnel/SshTunnel.csproj" />
+  <Project Path="QueryExecutor.csproj" />
+</Solution>

@@ -45,12 +45,12 @@ internal static class QueryEngines
         var mySql = new MySqlQueryEngine();
         return new Dictionary<string, IQueryEngine>(StringComparer.OrdinalIgnoreCase)
         {
-            ["sqlserver"] = new SqlServerQueryEngine(),
-            ["postgres"] = new PostgresQueryEngine(),
-            ["cockroachdb"] = new CockroachDbQueryEngine(),
-            ["mysql"] = mySql,
-            ["mariadb"] = mySql,
-            ["sqlite"] = new SqliteQueryEngine(),
+            [EngineNames.SqlServer] = new SqlServerQueryEngine(),
+            [EngineNames.Postgres] = new PostgresQueryEngine(),
+            [EngineNames.CockroachDb] = new CockroachDbQueryEngine(),
+            [EngineNames.MySql] = mySql,
+            [EngineNames.MariaDb] = mySql,
+            [EngineNames.Sqlite] = new SqliteQueryEngine(),
         };
     }
 

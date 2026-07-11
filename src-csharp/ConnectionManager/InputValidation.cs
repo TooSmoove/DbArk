@@ -1,4 +1,4 @@
-#nullable enable
+﻿#nullable enable
 using System.Text.RegularExpressions;
 
 /// <summary>
@@ -27,8 +27,9 @@ internal static class InputValidation
         return Regex.IsMatch(value, @"^[a-zA-Z0-9_\-\.]{1,128}$");
     }
 
-    internal static bool IsValidEngine(string engine) =>
-        engine is "mysql" or "mariadb" or "postgres" or "cockroachdb" or "sqlite" or "sqlserver";
+    // The allow-list lives in Shared/EngineNames.cs (audit A-2) — exact match,
+    // canonical lowercase, same contract as before.
+    internal static bool IsValidEngine(string engine) => EngineNames.IsKnown(engine);
 
     internal static bool IsValidSslMode(string sslMode) =>
         sslMode is "none" or "prefer" or "require" or "verify-full";

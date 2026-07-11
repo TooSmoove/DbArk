@@ -42,12 +42,12 @@ internal static class SchemaEngines
         var sqlite = new SqliteSchemaEngine();
         return new Dictionary<string, ISchemaEngine>(StringComparer.OrdinalIgnoreCase)
         {
-            ["sqlserver"] = sqlServer,
-            ["mysql"] = mySql,
-            ["mariadb"] = mySql,
-            ["postgres"] = postgres,
-            ["cockroachdb"] = postgres,
-            ["sqlite"] = sqlite,
+            [EngineNames.SqlServer] = sqlServer,
+            [EngineNames.MySql] = mySql,
+            [EngineNames.MariaDb] = mySql,
+            [EngineNames.Postgres] = postgres,
+            [EngineNames.CockroachDb] = postgres,
+            [EngineNames.Sqlite] = sqlite,
         };
     }
 
