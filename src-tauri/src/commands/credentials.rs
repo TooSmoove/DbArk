@@ -2,7 +2,7 @@
 //! never cross the IPC boundary to JavaScript — connections reference a
 //! `credential_ref`, and the string is fetched only at point of use.
 //!
-//! `migrate_credential` (and its legacy-devsql shim semantics) lives here so
+//! `migrate_credential` lives here so
 //! deleting the migration path post-v1.0 is a one-file change.
 
 use crate::ipc::IpcError;
