@@ -4,11 +4,13 @@
 // no runtime code. Imported across feature modules.
 // ─────────────────────────────────────────────────────────────────────────
 
+import type { EngineName } from "./engines";
+
 // ---- Types ------------------------------------------------
 export interface ConnectionConfig {
   id: string;
   name: string;
-  engine: string;
+  engine: EngineName;
   host: string;
   port: number;
   database: string;
@@ -49,7 +51,7 @@ export interface QueryResult {
   isPlan?:   boolean;
   // The engine that produced the plan — needed because each engine's parser
   // expects a different format (Postgres JSON, SQL Server XML, MySQL JSON).
-  planEngine?: string;
+  planEngine?: EngineName;
 }
 
 // ── Execution plan tree ─────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 // Extracted from App.tsx (code-audit item A-1).
 import { useState } from "react";
+import { toEngineName } from "../engines";
 import type React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ipc, toIpcError } from "../ipc";
@@ -177,7 +178,7 @@ export function AddConnectionForm({
       <label style={labelStyle}>
         Engine
         <select style={fieldStyle} value={form.engine}
-          onChange={e => setForm(f => ({ ...f, engine: e.target.value }))}>
+          onChange={e => setForm(f => ({ ...f, engine: toEngineName(e.target.value) }))}>
           <option value="mysql">MySQL</option>
           <option value="mariadb">MariaDB</option>
           <option value="sqlserver">SQL Server</option>

@@ -127,6 +127,12 @@ jobs:
       - name: Run C# unit tests
         run: dotnet test src-csharp/QueryExecutor.Tests/QueryExecutorTests.Tests.csproj -c Release --nologo
 
+      - name: dotnet test (SchemaExplorer engine registry)
+        run: dotnet test src-csharp/SchemaExplorer.Tests/SchemaExplorer.Tests.csproj -c Release --nologo
+
+      - name: dotnet test (FileQueryEngine bridge registry)
+        run: dotnet test src-csharp/FileQueryEngine.Tests/FileQueryEngine.Tests.csproj -c Release --nologo
+
   rust-fmt:
     # rustfmt parses source only — build.rs never runs, so no staged
     # natives are required and this stays a fast ubuntu job.
