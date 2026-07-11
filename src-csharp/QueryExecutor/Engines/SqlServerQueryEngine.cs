@@ -8,7 +8,7 @@ internal sealed class SqlServerQueryEngine : IQueryEngine
     public bool UsesBatchPath => true;
 
     public List<string> SplitBatches(string sql) =>
-        QueryExecutor.SplitSqlServerBatches(sql);
+        SqlServerBatchSplitter.Split(sql);
 
     public List<QueryResult> ExecuteBatch(string connectionString, string sql) =>
         SqlServerExecutor.ExecuteInternal(connectionString, sql);

@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAIN_RS="$ROOT/src-tauri/src/main.rs"
+SRC_DIR="$ROOT/src-tauri/src"
 ALLOWLIST="$ROOT/scripts/ipc-contract-allowlist.txt"
 
 # Allowed command names (strip comments / blanks).
@@ -27,8 +27,13 @@ allowed="$(grep -vE '^\s*(#|$)' "$ALLOWLIST" | tr -d ' ' || true)"
 # the body's opening `{` so MULTILINE signatures are seen too — a fixed grep
 # window (-A2) let `migrate_credential (-> bool)` hide for months until
 # rustfmt collapsed its signature onto one line.
+#
+# Recursive: commands were split out of main.rs into src-tauri/src/commands/
+# (audit A-2 residual). A signature never spans files, so feeding every .rs
+# file through one awk pass is safe — `collecting` always closes at the
+# body's opening `{` before the next file begins.
 offenders="$(
-  awk '
+  find "$SRC_DIR" -name '*.rs' -print0 | xargs -0 awk '
     /#\[tauri::command\]/ { collecting = 1; sig = ""; next }
     collecting {
       sig = sig " " $0
@@ -41,7 +46,7 @@ offenders="$(
         collecting = 0
       }
     }
-  ' "$MAIN_RS" || true
+  ' || true
 )"
 
 fail=0

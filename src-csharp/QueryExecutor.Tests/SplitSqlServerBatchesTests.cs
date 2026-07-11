@@ -13,7 +13,7 @@ public class SplitSqlServerBatchesTests
         var sql = "SELECT 1\nGO\nSELECT 2";
 
         // Act
-        List<string> batches = QueryExecutor.SplitSqlServerBatches(sql);
+        List<string> batches = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, batches.Count);
@@ -27,7 +27,7 @@ public class SplitSqlServerBatchesTests
         var sql = "SELECT 1\r\nGO\r\nSELECT 2";
 
         // Act
-        List<string> batches = QueryExecutor.SplitSqlServerBatches(sql);
+        List<string> batches = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, batches.Count);
@@ -41,7 +41,7 @@ public class SplitSqlServerBatchesTests
         string sql = "DECLARE @x INT = 5;\r\nSELECT @x;";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -55,7 +55,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1\nGO 3\n SELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -70,7 +70,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1\r\n  GO\r\nSELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -85,7 +85,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1\r\ngo\r\nSELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -100,7 +100,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1\nGO -- This is a comment on the GO line\nSELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -115,7 +115,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT * FROM GOods";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -129,7 +129,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1 GO SELECT 2\r\n";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -143,7 +143,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 'GO'\r\nGO\r\nSELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -158,7 +158,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1\r\n-- GO\r\nSELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -172,7 +172,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1 /* GO */ SELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -186,7 +186,7 @@ public class SplitSqlServerBatchesTests
         string sql = "GOTO label";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -200,7 +200,7 @@ public class SplitSqlServerBatchesTests
         string sql = "\r\nSELECT 1\r\nGO";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -214,7 +214,7 @@ public class SplitSqlServerBatchesTests
         string sql = "GO\r\nSELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -228,7 +228,7 @@ public class SplitSqlServerBatchesTests
         string sql = "";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Empty(result);
@@ -241,7 +241,7 @@ public class SplitSqlServerBatchesTests
         string sql = "   \n\t\n  ";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Empty(result);
@@ -254,7 +254,7 @@ public class SplitSqlServerBatchesTests
         string sql = "\r\nDECLARE @x INT = 1;\r\nSELECT @x;\r\nSELECT @x + 1;";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -268,7 +268,7 @@ public class SplitSqlServerBatchesTests
         string sql = "x GO y";
 
         // Act
-        var result = global::QueryExecutor.SplitSqlServerBatches(sql);
+        var result = global::SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -294,7 +294,7 @@ public class SplitSqlServerBatchesTests
                     SELECT * FROM Users";
 
         // Act
-        var result = global::QueryExecutor.SplitSqlServerBatches(sql);
+        var result = global::SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(3, result.Count);
@@ -310,7 +310,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT \"GO\" AS text";
 
         // Act
-        var result = global::QueryExecutor.SplitSqlServerBatches(sql);
+        var result = global::SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -324,7 +324,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT `GO` AS text";
 
         // Act
-        var result = global::QueryExecutor.SplitSqlServerBatches(sql);
+        var result = global::SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -338,7 +338,7 @@ public class SplitSqlServerBatchesTests
         string sql = "SELECT 1\nGO   \t  \nSELECT 2";
 
         // Act
-        var result = global::QueryExecutor.SplitSqlServerBatches(sql);
+        var result = global::SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -358,7 +358,7 @@ GO
 SELECT * FROM Table2";
 
         // Act
-        var result = global::QueryExecutor.SplitSqlServerBatches(sql);
+        var result = global::SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);

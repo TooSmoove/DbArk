@@ -27,7 +27,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
             "AS\nBEGIN\n  SELECT 1;\nEND";
 
         // Act
-        List<string> result = QueryExecutor.SplitSqlServerBatches(sql);
+        List<string> result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -45,7 +45,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
             "CREATE PROCEDURE p2 AS BEGIN SELECT 2 END";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -64,7 +64,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
             "CREATE PROCEDURE p2 AS BEGIN SELECT 2 END";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -80,7 +80,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "CREATE TABLE t (id int);\nCREATE OR ALTER PROCEDURE p AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -95,7 +95,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT 1;\nCREATE PROC p AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -113,7 +113,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
             "CREATE TRIGGER trg ON t AFTER INSERT AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(3, result.Count);
@@ -129,7 +129,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT 1\nGO\nCREATE PROCEDURE p AS SELECT 1\nCREATE VIEW v AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(3, result.Count);
@@ -145,7 +145,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT 1;\n    CREATE PROCEDURE p AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -160,7 +160,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "CREATE TABLE t (id int); CREATE PROCEDURE p AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -175,7 +175,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT 1;\nALTER PROCEDURE p AS SELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -192,7 +192,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "CREATE PROCEDURE p AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -206,7 +206,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT procedure, x FROM mytable WHERE function > 3";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -221,7 +221,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "CREATE TABLE t (id INT, procedure NVARCHAR(50), [view] INT)";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -235,7 +235,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "INSERT INTO log VALUES ('CREATE PROCEDURE p AS ...');\nSELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -249,7 +249,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT 1;\n-- CREATE PROCEDURE p AS nope\nSELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -263,7 +263,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT 1\n/* CREATE VIEW v AS ... */\nSELECT 2";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);
@@ -280,7 +280,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
             "CREATE PROCEDURE q AS SELECT 1";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Equal(2, result.Count);
@@ -297,7 +297,7 @@ public class SplitSqlServerBatchesImplicitDdlTests
         string sql = "SELECT 1;\nCREATE VIEWPOINT_THING (id int)";
 
         // Act
-        var result = QueryExecutor.SplitSqlServerBatches(sql);
+        var result = SqlServerBatchSplitter.Split(sql);
 
         // Assert
         Assert.Single(result);

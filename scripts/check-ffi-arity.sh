@@ -8,22 +8,24 @@
 # main query path was updated, and four hand-copied call sites kept the stale
 # four-arg declaration (the "Test Connection" CTD).
 #
-# The fix was one shared `call_execute_query` helper in main.rs owning the
-# declaration. This guard keeps it that way: the raw symbol lookup must appear
-# EXACTLY once. A second lookup means someone re-declared the signature at a
-# call site — route it through the helper instead.
+# The fix was one shared `call_execute_query` helper owning the declaration.
+# This guard keeps it that way: the raw symbol lookup must appear EXACTLY once.
+# A second lookup means someone re-declared the signature at a call site —
+# route it through the helper instead.
 #
 # Mirrors the H-3 check-ipc-contract.sh grep-gate pattern.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAIN_RS="$ROOT/src-tauri/src/main.rs"
+SRC_DIR="$ROOT/src-tauri/src"
 
-count="$(grep -c 'b"execute_query"' "$MAIN_RS" || true)"
+# Recursive: commands were split out of main.rs into src-tauri/src/commands/
+# (audit A-2 residual); the single allowed lookup lives in commands/query.rs.
+count="$(grep -r 'b"execute_query"' "$SRC_DIR" --include='*.rs' | wc -l | tr -d ' ')"
 
 if [ "$count" -ne 1 ]; then
-  echo "::error::Found $count lookups of b\"execute_query\" in main.rs (expected exactly 1, inside call_execute_query). Do not re-declare the FFI signature at call sites — call call_execute_query() instead."
+  echo "::error::Found $count lookups of b\"execute_query\" under src-tauri/src (expected exactly 1, inside call_execute_query). Do not re-declare the FFI signature at call sites — call call_execute_query() instead."
   exit 1
 fi
 

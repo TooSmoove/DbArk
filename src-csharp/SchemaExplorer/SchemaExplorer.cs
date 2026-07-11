@@ -158,18 +158,6 @@ public static class SchemaExplorerLib
         }
     }
 
-    // ---- MySQL ------------------------------------------------
-
-    // ---- PostgreSQL -------------------------------------------
-
-    // ---- SQLite -----------------------------------------------
-
-    // ---- SQL SERVER -----------------------------------------------
-
-    // ---- MYSQL ----------------------------------------------------
-
-    // ---- POSTGRES -------------------------------------------------
-
     [UnmanagedCallersOnly(EntryPoint = "get_object_definition")]
     public static IntPtr GetObjectDefinition(
     IntPtr connectionStringPtr,
@@ -200,8 +188,6 @@ public static class SchemaExplorerLib
                 JsonSerializer.Serialize(result, AppJsonContext.Default.DefinitionResult));
         }
     }
-
-    // ---- winsqlite3 P/Invoke ----------------------------------
 
 }
 public class ForeignKeyInfo
