@@ -280,7 +280,6 @@ impl From<EngineError> for IpcError {
     }
 }
 
-
 /// SSH tunnel parameters for `open_tunnel` (a different shape from a DB
 /// connection, so it gets its own parameter object — audit A-2).
 #[derive(serde::Deserialize)]
@@ -295,7 +294,6 @@ struct TunnelParams {
     db_host: String,
     db_port: i32,
 }
-
 
 #[inline]
 fn timing_enabled() -> bool {
@@ -1488,11 +1486,16 @@ async fn drop_object(
     // crafted object name or type can't break out into injected SQL.
     let drop_sql = engine.build_drop_statement(&object_type, &object_name, &schema, &table)?;
 
-    let result = call_execute_query(conn_str.as_str(), drop_sql.as_str(), engine.name(), false, 1);
+    let result = call_execute_query(
+        conn_str.as_str(),
+        drop_sql.as_str(),
+        engine.name(),
+        false,
+        1,
+    );
 
     result
 }
-
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct AppSettings {
@@ -1850,9 +1853,7 @@ fn import_dbeaver_connections() -> Result<String, IpcError> {
             .unwrap_or("")
             .to_string();
 
-        let default_port: u16 = Engine::parse(engine)
-            .map(Engine::default_port)
-            .unwrap_or(0);
+        let default_port: u16 = Engine::parse(engine).map(Engine::default_port).unwrap_or(0);
         let port: u16 = config
             .get("port")
             .and_then(|v| v.as_str())

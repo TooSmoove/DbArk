@@ -259,11 +259,21 @@ pub fn resolve(
     let ssl = params.ssl_mode.as_deref().unwrap_or("prefer");
     let win_auth = params.windows_auth.unwrap_or(false);
 
-    let password = resolve_password(engine, &params.credential_ref, &params.username, win_auth, ssl)?;
+    let password = resolve_password(
+        engine,
+        &params.credential_ref,
+        &params.username,
+        win_auth,
+        ssl,
+    )?;
 
     // If an SSH tunnel is active, connect via the local tunnel endpoint.
     let via_tunnel = params.tunnel_port.is_some();
-    let host: &str = if via_tunnel { "127.0.0.1" } else { &params.host };
+    let host: &str = if via_tunnel {
+        "127.0.0.1"
+    } else {
+        &params.host
+    };
     let port = params.tunnel_port.unwrap_or(params.port);
 
     let conn_str = engine.connection_string(&ConnArgs {
@@ -714,9 +724,8 @@ mod engine_tests {
     #[test]
     fn policy_missing_credential_is_ok_for_cockroach_insecure() {
         // insecure cluster (ssl none): missing credential → empty password
-        let pw =
-            apply_password_policy(Engine::CockroachDb, "none", "r", Err("no entry".into()))
-                .unwrap();
+        let pw = apply_password_policy(Engine::CockroachDb, "none", "r", Err("no entry".into()))
+            .unwrap();
         assert_eq!(pw, "");
     }
 
@@ -739,15 +748,15 @@ mod engine_tests {
 
     #[test]
     fn policy_empty_password_allowed_for_cockroach() {
-        let pw = apply_password_policy(Engine::CockroachDb, "prefer", "r", Ok(String::new()))
-            .unwrap();
+        let pw =
+            apply_password_policy(Engine::CockroachDb, "prefer", "r", Ok(String::new())).unwrap();
         assert_eq!(pw, "");
     }
 
     #[test]
     fn policy_passes_real_password_through() {
-        let pw = apply_password_policy(Engine::Postgres, "prefer", "r", Ok("s3cret".into()))
-            .unwrap();
+        let pw =
+            apply_password_policy(Engine::Postgres, "prefer", "r", Ok("s3cret".into())).unwrap();
         assert_eq!(pw, "s3cret");
     }
 
@@ -813,7 +822,9 @@ mod engine_tests {
         assert!(Engine::MySql
             .connection_string(&a)
             .contains("ConnectionTimeout=5;"));
-        assert!(Engine::Postgres.connection_string(&a).contains("Timeout=5;"));
+        assert!(Engine::Postgres
+            .connection_string(&a)
+            .contains("Timeout=5;"));
         assert!(Engine::CockroachDb
             .connection_string(&a)
             .contains("Timeout=5;"));
