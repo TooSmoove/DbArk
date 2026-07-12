@@ -162,22 +162,28 @@ internal sealed class SqliteQueryEngine : IQueryEngine
 
             try
             {
-                bool firstRow = true;
-                while (sqlite3_step(stmt) == SQLITE_ROW && (rowLimit == 0 || rowCount < rowLimit))
+                // Column count and names are fixed at prepare time, so read them
+                // BEFORE the first step. This means a zero-row result still
+                // reports its headers (matching the reader-based engines), and
+                // the truncation check no longer depends on a first row existing.
+                int colCount = sqlite3_column_count(stmt);
+                for (int i = 0; i < colCount; i++)
                 {
-                    int colCount = sqlite3_column_count(stmt);
+                    IntPtr namePtr = sqlite3_column_name(stmt, i);
+                    columns.Add(namePtr != IntPtr.Zero
+                        ? Marshal.PtrToStringUTF8(namePtr) ?? $"col{i}"
+                        : $"col{i}");
+                }
 
-                    if (firstRow)
-                    {
-                        for (int i = 0; i < colCount; i++)
-                        {
-                            IntPtr namePtr = sqlite3_column_name(stmt, i);
-                            columns.Add(namePtr != IntPtr.Zero
-                                ? Marshal.PtrToStringUTF8(namePtr) ?? $"col{i}"
-                                : $"col{i}");
-                        }
-                        firstRow = false;
-                    }
+                // Enforce the cap AFTER a ROW step but BEFORE keeping the row —
+                // the same shape as ExecuteSqliteMulti. The old "peek one more
+                // row" trick was wrong: sqlite3_prepare_v2 auto-resets a
+                // statement that has returned SQLITE_DONE, so a result of exactly
+                // ActiveRowLimit rows re-ran on the peek and was falsely flagged
+                // truncated.
+                while (sqlite3_step(stmt) == SQLITE_ROW)
+                {
+                    if (rowLimit > 0 && rowCount >= rowLimit) { truncated = true; break; }
 
                     var row = new List<string?>();
                     for (int i = 0; i < colCount; i++)
@@ -194,13 +200,6 @@ internal sealed class SqliteQueryEngine : IQueryEngine
                     }
                     rows.Add(row);
                     rowCount++;
-                }
-                // If we stopped exactly at a positive cap, peek one more row to
-                // distinguish "exactly N rows" from "truncated at N".
-                if (rowLimit > 0 && rowCount >= rowLimit
-                    && sqlite3_step(stmt) == SQLITE_ROW)
-                {
-                    truncated = true;
                 }
             }
             finally

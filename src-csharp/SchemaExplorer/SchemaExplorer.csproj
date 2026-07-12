@@ -10,6 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="SchemaExplorer.Tests" />
+    <InternalsVisibleTo Include="SchemaExplorer.IntegrationTests" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.0" />
     <PackageReference Include="MySqlConnector" Version="2.3.7" />
     <PackageReference Include="Npgsql" Version="8.0.5" />

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    End-to-end integration tests for the SQLite query path: they run REAL SQL
+    through the engine registry (QueryEngines.Resolve → SqliteQueryEngine →
+    winsqlite3/libsqlite3 P/Invoke) against a real on-disk database file, and
+    assert on the actual QueryResult the FFI boundary would serialize. The
+    existing QueryExecutor.Tests project stays pure-logic (splitters, validators);
+    this one exercises the driver seam those unit tests deliberately stub out.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <Nullable>enable</Nullable>
+    <RootNamespace>DbArk.Integration</RootNamespace>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../QueryExecutor/QueryExecutor.csproj" />
+  </ItemGroup>
+</Project>

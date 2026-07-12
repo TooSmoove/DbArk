@@ -10,6 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="QueryExecutorTests.Tests" />
+    <InternalsVisibleTo Include="QueryExecutor.IntegrationTests" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.0" />
     <PackageReference Include="MySqlConnector" Version="2.5.0" />
     <PackageReference Include="Npgsql" Version="10.0.2" />

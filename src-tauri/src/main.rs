@@ -13,6 +13,9 @@ mod fatal;
 mod ipc;
 mod natives;
 
+#[cfg(test)]
+mod integration_tests;
+
 use std::ffi::CString;
 use std::time::Instant;
 

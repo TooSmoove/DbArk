@@ -20,6 +20,14 @@ harness (script + pass criterion) instead of skipping coverage entirely.
 - Rust logic: `#[cfg(test)]` modules / `cargo test`.
 - Heavy/manual verification: a script under `scripts/` with an explicit pass
   criterion (see `scripts/soak_ffi.ps1`).
+- Integration coverage: behaviour that only emerges when modules meet — a real
+  query run through the SQLite/DuckDB engines, or the frontend's
+  `ipc → parse → reshape → reducer` pipeline — is pinned by the C#
+  `*.IntegrationTests` projects and `src/**/*.integration.test.ts`. Prefer a
+  focused unit test; reach for an integration test when the *seam between
+  components* is what can break. Keep the harness lightweight: embedded engines
+  only (SQLite is a system lib; DuckDB is staged by `scripts/stage-natives`),
+  never a networked server in a fast gate.
 
 ## CI gates (audit §6 — closed)
 
@@ -29,6 +37,15 @@ Every push/PR to `main` must pass, in `.github/workflows/build.yml`:
   (tsc + vitest), `npm run build` (production type-check + bundle).
 - `dotnet-tests` — `dotnet test` on `src-csharp/QueryExecutor.Tests`
   (runs on windows-latest to match the pinned win-x64 RID).
+- `frontend-checks` also runs `npm run test:integration` — the vitest
+  module-integration suite (real query pipeline across a faked Tauri IPC
+  boundary), gated separately from the pure `npm test` unit run.
+- `dotnet-integration-tests` — `dotnet test` on the three
+  `src-csharp/*.IntegrationTests` projects (windows-latest; stages DuckDB via
+  `scripts/stage-natives.ps1` first). Runs the SQLite/DuckDB engines against
+  real databases end-to-end.
+- Rust cross-module integration lives in `src-tauri/src/integration_tests.rs`
+  and runs inside the existing `cargo test` gate.
 - `rust-fmt` — `cargo fmt --check` (parses only; needs no staged natives).
 - `cargo clippy -- -D warnings` and `cargo test` — inside the platform build
   jobs, *after* natives are staged, because `build.rs` intentionally fails
@@ -51,6 +68,11 @@ tests actually run.
 - No duplicated logic — share a single source of truth (a helper, or a
   `<Compile Include>`-linked file like `src-csharp/Shared/NativeString.cs`).
 - Don't commit build artifacts, binaries, or IDE caches.
+- Tests are part of "professional": a change that adds or fixes behaviour
+  without a regression or integration test pinning it is incomplete. Hold test
+  code to the product bar — one concern per test, and share a harness/seeder
+  (e.g. the `SqliteTestDb` helper in the integration projects) instead of
+  copy-pasting one per file.
 
 ### Decomposing large components (frontend)
 

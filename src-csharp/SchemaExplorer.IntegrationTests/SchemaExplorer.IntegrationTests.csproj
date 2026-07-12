@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    End-to-end integration tests for SQLite schema introspection: they seed a
+    real .sqlite file (tables, primary keys, a foreign key) and then run the
+    production SchemaEngines.Resolve("sqlite").GetFullSchema path against it,
+    asserting on the SchemaResult the sidebar consumes. The existing
+    SchemaExplorer.Tests project pins the engine *registry*; this one proves the
+    SQLite reader (sqlite_master + PRAGMA table_info + PRAGMA foreign_key_list)
+    actually returns the right tables/columns/keys from a live database.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../SchemaExplorer/SchemaExplorer.csproj" />
+  </ItemGroup>
+</Project>

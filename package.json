@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "tsc -p tsconfig.vitest.json && vitest run",
+    "test:integration": "tsc -p tsconfig.vitest.json && vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

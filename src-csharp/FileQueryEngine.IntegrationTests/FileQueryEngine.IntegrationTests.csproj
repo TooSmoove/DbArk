@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Integration tests for the flat-file engine — DbArk's headline "query a CSV,
+    then JOIN it against a live DB table" feature.
+
+    Two seams are exercised against REAL native engines:
+      1. DuckDB (via a staged libduckdb) executes the scan SQL that the
+         production DuckDbFileScan / DuckDbTableBuilder helpers generate, over
+         real CSV/JSON files. This proves the generated SQL is valid AND that the
+         H-1 path-escaping and C-5 typed-staging fixes hold end-to-end, not just
+         as strings.
+      2. The live-table SQLite reader (FileQueryEngineLib.ExecuteSqliteDb) runs
+         against a real SQLite database and returns the intermediate typed JSON a
+         join stages from.
+
+    The Shared helpers under test (DuckDbFileScan, DuckDbTableBuilder) are
+    public types in the referenced FileQueryEngine assembly, so the tests bind
+    to the same code the product runs, not a copy.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../FileQueryEngine/FileQueryEngine.csproj" />
+  </ItemGroup>
+</Project>

@@ -108,6 +108,9 @@ jobs:
       - name: Type-check + unit tests (tsc + vitest)
         run: npm test
 
+      - name: Integration tests (vitest — faked Tauri IPC boundary)
+        run: npm run test:integration
+
       - name: Production type-check + bundle (tsc -b + vite)
         run: npm run build
 
@@ -133,6 +136,32 @@ jobs:
       - name: dotnet test (FileQueryEngine bridge registry)
         run: dotnet test src-csharp/FileQueryEngine.Tests/FileQueryEngine.Tests.csproj -c Release --nologo
 
+  dotnet-integration-tests:
+    # End-to-end engine tests: real SQLite (winsqlite3.dll ships with Windows) and
+    # real DuckDB (staged below). windows-latest matches dotnet-tests and the
+    # win-x64 RID pinned in the engine csproj files; `dotnet test` builds IL only.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Stage DuckDB native (flat-file integration tests load it)
+        shell: pwsh
+        run: ./scripts/stage-natives.ps1
+
+      - name: Integration — SQLite query engine (real DB, end-to-end)
+        run: dotnet test src-csharp/QueryExecutor.IntegrationTests/QueryExecutor.IntegrationTests.csproj -c Release --nologo
+
+      - name: Integration — SQLite schema explorer (real DB, end-to-end)
+        run: dotnet test src-csharp/SchemaExplorer.IntegrationTests/SchemaExplorer.IntegrationTests.csproj -c Release --nologo
+
+      - name: Integration — flat-file engine (DuckDB scans + SQLite staging)
+        run: dotnet test src-csharp/FileQueryEngine.IntegrationTests/FileQueryEngine.IntegrationTests.csproj -c Release --nologo
+
   rust-fmt:
     # rustfmt parses source only — build.rs never runs, so no staged
     # natives are required and this stays a fast ubuntu job.
@@ -149,7 +178,7 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
   build-windows:
-    needs: [naming-guard, frontend-checks, dotnet-tests, rust-fmt]
+    needs: [naming-guard, frontend-checks, dotnet-tests, dotnet-integration-tests, rust-fmt]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -230,7 +259,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: placeholder
 
   build-macos:
-    needs: [naming-guard, frontend-checks, dotnet-tests, rust-fmt]
+    needs: [naming-guard, frontend-checks, dotnet-tests, dotnet-integration-tests, rust-fmt]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
