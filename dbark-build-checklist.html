@@ -371,26 +371,6 @@
     </div>
   </div>
 
-  <div class="section-divider"><span class="divider-label">Phase C.5 — The rename · GATES ALL LAUNCH ASSETS</span><div class="divider-line"></div></div>
-
-  <div class="phase" id="phase-rename">
-    <div class="phase-header" onclick="togglePhase('phase-rename')">
-      <span class="phase-week" style="background:rgba(245,158,11,0.12);color:#f59e0b">Rename</span>
-      <span class="phase-title-text">DevSql → DbArk — must complete before any screenshot, GIF, or repo goes public</span>
-      <span class="phase-progress" id="pp-phase-rename">0/1</span>
-      <span class="phase-chev">▼</span>
-    </div>
-    <div class="phase-body">
-      <div class="milestone cut-milestone"><strong>Why this gates everything:</strong> The app, package, and paths still say "DevSql" — the pre-DbArk name. Every visual launch asset (hero GIF, ER screenshot, demo video) films the live app, so a stale "DevSql" in the title bar or sidebar is a credibility crack in the hero image. Held deliberately until v1 code is complete (one clean pass, not piecemeal), but it MUST land before the Phase D asset capture and before the repo is public.</div>
-
-      <div class="task" onclick="toggle(this)">
-        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="task-content"><div class="task-title">Complete DevSql → DbArk rename (deliberate, end-of-v1 pass)</div><div class="task-detail">Safe to find-replace: <code>package.json</code> name, <code>tauri.conf.json</code> productName / identifier / window title, README + badge URLs, <code>PRIVACY.md</code>, any "DevSql" UI strings (title bar, sidebar header). <span class="warn-code">Needs thought, NOT blind replace: the <code>~/.devsql/connections</code> runtime folder path — renaming it to <code>~/.dbark</code> means existing connections "vanish" until moved, so handle migration or pick the moment deliberately. Also the repo/folder name <code>C:\…\repos\DevSql</code> breaks absolute paths and IDE/git remotes when renamed — do it when you can re-clone/re-open cleanly.</span> <span class="good-code">One coordinated pass clears the stale name everywhere at once. After it, immediately capture the Phase D assets (hero GIF + ER screenshot retake + demo video) against the renamed app + DbArkShopDemo data — one asset-capture session.</span> Verify after: grep the whole tree for <code>devsql</code>/<code>DevSql</code> (excluding node_modules, target, obj, dist) returns nothing in source.</div></div>
-        <span class="task-tag tt-must">Must</span>
-      </div>
-    </div>
-  </div>
-
   <div class="section-divider"><span class="divider-label">Phase D — Launch surface · CURRENTLY 0%</span><div class="divider-line"></div></div>
 
   <div class="phase" id="phase-d">
@@ -486,12 +466,6 @@
       <div class="task" onclick="toggle(this)">
         <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
         <div class="task-content"><div class="task-title">Opt-in crash reporter</div><div class="task-detail">Dialog on crash: "Send a crash report? [Yes] [No]". Collects stack trace and OS version only. <span class="good-code">No query content, no connection details, no file paths.</span> Make the privacy guarantee explicit in the dialog text itself, not just in SECURITY.md.</div></div>
-        <span class="task-tag tt-must">Must</span>
-      </div>
-
-      <div class="task" onclick="toggle(this)">
-        <div class="cb"><svg class="cb-tick" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="task-content"><div class="task-title">Build script + README repo rename cleanup</div><div class="task-detail">Write <code>build.ps1</code> (Windows) and <code>build.sh</code> (macOS/Linux) that wraps the six <code>dotnet publish</code> commands into one invocation. Update README to show one command. Global find-and-replace any remaining "DevSql" references in the README and badge URLs. <span class="warn-code">Do not publish the launch post until both are done. "DevSql" in the clone URL on a repo called DbArk is an immediate credibility gap.</span></div></div>
         <span class="task-tag tt-must">Must</span>
       </div>
       <div class="task" onclick="toggle(this)">

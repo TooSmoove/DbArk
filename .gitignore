@@ -56,3 +56,5 @@ src-tauri/target/
 # OS
 .DS_Store
 Thumbs.db
+
+DbArk-QA-UI-Test-Plan.md
