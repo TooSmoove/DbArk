@@ -26,14 +26,7 @@ use crate::engine::{Engine, EngineError};
 use crate::ipc::{IpcError, IpcErrorCode};
 
 /// Every engine the host speaks, paired with its canonical wire name.
-const WIRE_NAMES: &[&str] = &[
-    "sqlserver",
-    "postgres",
-    "cockroachdb",
-    "mysql",
-    "mariadb",
-    "sqlite",
-];
+const WIRE_NAMES: &[&str] = &["sqlserver", "postgres", "cockroachdb", "mysql", "mariadb", "sqlite"];
 
 fn conn_args<'a>(database: &'a str, username: &'a str, password: &'a str) -> ConnArgs<'a> {
     ConnArgs {
@@ -65,12 +58,8 @@ fn every_wire_name_parses_and_builds_a_connection_string() {
 
         // Each dialect has a recognisable shape — pin the driver-specific prefix.
         match engine {
-            Engine::SqlServer => {
-                assert!(conn.contains("Driver={") && conn.contains("Database=appdb"))
-            }
-            Engine::Postgres | Engine::CockroachDb => {
-                assert!(conn.starts_with("Host=db.internal;"))
-            }
+            Engine::SqlServer => assert!(conn.contains("Driver={") && conn.contains("Database=appdb")),
+            Engine::Postgres | Engine::CockroachDb => assert!(conn.starts_with("Host=db.internal;")),
             Engine::MySql | Engine::MariaDb => assert!(conn.starts_with("Server=db.internal;")),
             Engine::Sqlite => assert_eq!(conn, "Data Source=appdb"),
         }
@@ -88,25 +77,17 @@ fn injected_password_is_escaped_for_every_credentialed_engine() {
 
     // Postgres/MySQL (ADO.NET key-value): the value is quote-enclosed.
     for name in ["postgres", "cockroachdb", "mysql", "mariadb"] {
-        let conn = Engine::parse(name)
-            .unwrap()
-            .connection_string(&conn_args("db", "u", nasty));
+        let conn = Engine::parse(name).unwrap().connection_string(&conn_args("db", "u", nasty));
         assert!(
             !conn.contains(&format!("={nasty};")),
             "{name}: raw injected password leaked unescaped into {conn}"
         );
-        assert!(
-            conn.contains('"'),
-            "{name}: expected a quote-enclosed value in {conn}"
-        );
+        assert!(conn.contains('"'), "{name}: expected a quote-enclosed value in {conn}");
     }
 
     // SQL Server (ODBC): the value is brace-enclosed.
     let conn = Engine::SqlServer.connection_string(&conn_args("db", "u", nasty));
-    assert!(
-        conn.contains("PWD={"),
-        "sqlserver: expected brace-enclosed PWD in {conn}"
-    );
+    assert!(conn.contains("PWD={"), "sqlserver: expected brace-enclosed PWD in {conn}");
 }
 
 // ── engine errors ──▶ the IPC envelope the frontend parses ───────────────────
@@ -114,22 +95,10 @@ fn injected_password_is_escaped_for_every_credentialed_engine() {
 #[test]
 fn engine_errors_map_onto_the_expected_ipc_codes() {
     let cases = [
-        (
-            EngineError::Unsupported("oracle".into()),
-            IpcErrorCode::Validation,
-        ),
-        (
-            EngineError::CredentialNotFound("missing".into()),
-            IpcErrorCode::NotFound,
-        ),
-        (
-            EngineError::NoPassword("cred:1".into()),
-            IpcErrorCode::NotFound,
-        ),
-        (
-            EngineError::Keychain("locked".into()),
-            IpcErrorCode::Internal,
-        ),
+        (EngineError::Unsupported("oracle".into()), IpcErrorCode::Validation),
+        (EngineError::CredentialNotFound("missing".into()), IpcErrorCode::NotFound),
+        (EngineError::NoPassword("cred:1".into()), IpcErrorCode::NotFound),
+        (EngineError::Keychain("locked".into()), IpcErrorCode::Internal),
     ];
     for (err, expected_code) in cases {
         let ipc: IpcError = err.into();
@@ -167,20 +136,13 @@ fn drop_statement_quotes_a_hostile_object_name_on_every_engine() {
     let hostile_ansi = r#"evil"; DROP TABLE users;--"#;
     for name in ["postgres", "cockroachdb", "sqlite"] {
         let engine = Engine::parse(name).unwrap();
-        let stmt = engine
-            .build_drop_statement("table", hostile_ansi, "public", "")
-            .unwrap();
+        let stmt = engine.build_drop_statement("table", hostile_ansi, "public", "").unwrap();
         // the embedded double-quote is doubled inside the quoted identifier
-        assert!(
-            stmt.contains(r#""evil""; DROP TABLE users;--""#),
-            "{name}: got {stmt}"
-        );
+        assert!(stmt.contains(r#""evil""; DROP TABLE users;--""#), "{name}: got {stmt}");
     }
 
     let hostile_mysql = "evil`; DROP TABLE users;--";
-    let stmt = Engine::MySql
-        .build_drop_statement("table", hostile_mysql, "", "")
-        .unwrap();
+    let stmt = Engine::MySql.build_drop_statement("table", hostile_mysql, "", "").unwrap();
     assert!(stmt.contains("`evil``; DROP TABLE users;--`"), "got {stmt}");
 }
 

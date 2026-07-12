@@ -46,6 +46,11 @@ Every push/PR to `main` must pass, in `.github/workflows/build.yml`:
   real databases end-to-end.
 - Rust cross-module integration lives in `src-tauri/src/integration_tests.rs`
   and runs inside the existing `cargo test` gate.
+- `dotnet-container-tests` — real Postgres/MySQL/MariaDB/CockroachDB/SQL Server
+  servers via Testcontainers (Docker), driving the production engine registry.
+  Runs on a Docker-capable Linux runner; SQL Server's ODBC path is bridged to
+  unixODBC + msodbcsql18. Tests skip (not fail) when a container/driver is
+  unavailable. Required by the platform builds via `needs:`.
 - `rust-fmt` — `cargo fmt --check` (parses only; needs no staged natives).
 - `cargo clippy -- -D warnings` and `cargo test` — inside the platform build
   jobs, *after* natives are staged, because `build.rs` intentionally fails

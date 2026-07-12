@@ -3,6 +3,7 @@
   <Project Path="../FileQueryEngine.IntegrationTests/FileQueryEngine.IntegrationTests.csproj" />
   <Project Path="../FileQueryEngine.Tests/FileQueryEngine.Tests.csproj" />
   <Project Path="../FileQueryEngine/FileQueryEngine.csproj" />
+  <Project Path="../QueryExecutor.ContainerTests/QueryExecutor.ContainerTests.csproj" />
   <Project Path="../QueryExecutor.IntegrationTests/QueryExecutor.IntegrationTests.csproj" />
   <Project Path="../QueryExecutor.Tests/QueryExecutorTests.Tests.csproj" />
   <Project Path="../QueryHistory/QueryHistory.csproj" />

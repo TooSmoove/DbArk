@@ -1,0 +1,2493 @@
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index de22afc..226c52a 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -108,6 +108,9 @@ jobs:
+       - name: Type-check + unit tests (tsc + vitest)
+         run: npm test
+ 
++      - name: Integration tests (vitest — faked Tauri IPC boundary)
++        run: npm run test:integration
++
+       - name: Production type-check + bundle (tsc -b + vite)
+         run: npm run build
+ 
+@@ -133,6 +136,61 @@ jobs:
+       - name: dotnet test (FileQueryEngine bridge registry)
+         run: dotnet test src-csharp/FileQueryEngine.Tests/FileQueryEngine.Tests.csproj -c Release --nologo
+ 
++  dotnet-integration-tests:
++    # End-to-end engine tests: real SQLite (winsqlite3.dll ships with Windows) and
++    # real DuckDB (staged below). windows-latest matches dotnet-tests and the
++    # win-x64 RID pinned in the engine csproj files; `dotnet test` builds IL only.
++    runs-on: windows-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Install .NET 10
++        uses: actions/setup-dotnet@v4
++        with:
++          dotnet-version: "10.0.x"
++
++      - name: Stage DuckDB native (flat-file integration tests load it)
++        shell: pwsh
++        run: ./scripts/stage-natives.ps1
++
++      - name: Integration — SQLite query engine (real DB, end-to-end)
++        run: dotnet test src-csharp/QueryExecutor.IntegrationTests/QueryExecutor.IntegrationTests.csproj -c Release --nologo
++
++      - name: Integration — SQLite schema explorer (real DB, end-to-end)
++        run: dotnet test src-csharp/SchemaExplorer.IntegrationTests/SchemaExplorer.IntegrationTests.csproj -c Release --nologo
++
++      - name: Integration — flat-file engine (DuckDB scans + SQLite staging)
++        run: dotnet test src-csharp/FileQueryEngine.IntegrationTests/FileQueryEngine.IntegrationTests.csproj -c Release --nologo
++
++  dotnet-container-tests:
++    # Real database servers via Testcontainers (Docker). Postgres/MySQL/MariaDB
++    # use managed drivers; SQL Server uses the engine's ODBC path bridged to
++    # unixODBC + msodbcsql18 (installed below). Tests SKIP when a container or
++    # driver can't come up, so this stays green on infra hiccups. NOT in the
++    # platform builds' `needs:` yet — promote it to a required gate once it has
++    # a green history (the SQL Server-on-Linux ODBC bridge is new).
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Install .NET 10
++        uses: actions/setup-dotnet@v4
++        with:
++          dotnet-version: "10.0.x"
++
++      - name: Install unixODBC + Microsoft ODBC Driver 18 (SQL Server engine path)
++        run: |
++          set -euo pipefail
++          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
++            | sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
++          curl -fsSL https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list \
++            | sudo tee /etc/apt/sources.list.d/mssql-release.list
++          sudo apt-get update
++          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc
++
++      - name: Container integration tests (Postgres, MySQL, MariaDB, SQL Server)
++        run: dotnet test src-csharp/QueryExecutor.ContainerTests/QueryExecutor.ContainerTests.csproj -c Release --nologo -p:RuntimeIdentifier=linux-x64
++
+   rust-fmt:
+     # rustfmt parses source only — build.rs never runs, so no staged
+     # natives are required and this stays a fast ubuntu job.
+@@ -149,7 +207,7 @@ jobs:
+         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+ 
+   build-windows:
+-    needs: [naming-guard, frontend-checks, dotnet-tests, rust-fmt]
++    needs: [naming-guard, frontend-checks, dotnet-tests, dotnet-integration-tests, rust-fmt]
+     runs-on: windows-latest
+     steps:
+       - uses: actions/checkout@v4
+@@ -230,7 +288,7 @@ jobs:
+           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: placeholder
+ 
+   build-macos:
+-    needs: [naming-guard, frontend-checks, dotnet-tests, rust-fmt]
++    needs: [naming-guard, frontend-checks, dotnet-tests, dotnet-integration-tests, rust-fmt]
+     runs-on: macos-latest
+     steps:
+       - uses: actions/checkout@v4
+diff --git a/AGENTS.md b/AGENTS.md
+index 6c408c1..fc25c74 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -20,6 +20,14 @@ harness (script + pass criterion) instead of skipping coverage entirely.
+ - Rust logic: `#[cfg(test)]` modules / `cargo test`.
+ - Heavy/manual verification: a script under `scripts/` with an explicit pass
+   criterion (see `scripts/soak_ffi.ps1`).
++- Integration coverage: behaviour that only emerges when modules meet — a real
++  query run through the SQLite/DuckDB engines, or the frontend's
++  `ipc → parse → reshape → reducer` pipeline — is pinned by the C#
++  `*.IntegrationTests` projects and `src/**/*.integration.test.ts`. Prefer a
++  focused unit test; reach for an integration test when the *seam between
++  components* is what can break. Keep the harness lightweight: embedded engines
++  only (SQLite is a system lib; DuckDB is staged by `scripts/stage-natives`),
++  never a networked server in a fast gate.
+ 
+ ## CI gates (audit §6 — closed)
+ 
+@@ -29,6 +37,21 @@ Every push/PR to `main` must pass, in `.github/workflows/build.yml`:
+   (tsc + vitest), `npm run build` (production type-check + bundle).
+ - `dotnet-tests` — `dotnet test` on `src-csharp/QueryExecutor.Tests`
+   (runs on windows-latest to match the pinned win-x64 RID).
++- `frontend-checks` also runs `npm run test:integration` — the vitest
++  module-integration suite (real query pipeline across a faked Tauri IPC
++  boundary), gated separately from the pure `npm test` unit run.
++- `dotnet-integration-tests` — `dotnet test` on the three
++  `src-csharp/*.IntegrationTests` projects (windows-latest; stages DuckDB via
++  `scripts/stage-natives.ps1` first). Runs the SQLite/DuckDB engines against
++  real databases end-to-end.
++- Rust cross-module integration lives in `src-tauri/src/integration_tests.rs`
++  and runs inside the existing `cargo test` gate.
++- `dotnet-container-tests` — real Postgres/MySQL/MariaDB/SQL Server servers via
++  Testcontainers (Docker), driving the production engine registry. Runs on a
++  Docker-capable Linux runner; SQL Server's ODBC path is bridged to unixODBC +
++  msodbcsql18. Tests skip (not fail) when a container/driver is unavailable, so
++  it is a standalone job, not yet in the platform builds' `needs:` — promote it
++  once it has a green history.
+ - `rust-fmt` — `cargo fmt --check` (parses only; needs no staged natives).
+ - `cargo clippy -- -D warnings` and `cargo test` — inside the platform build
+   jobs, *after* natives are staged, because `build.rs` intentionally fails
+@@ -51,6 +74,11 @@ tests actually run.
+ - No duplicated logic — share a single source of truth (a helper, or a
+   `<Compile Include>`-linked file like `src-csharp/Shared/NativeString.cs`).
+ - Don't commit build artifacts, binaries, or IDE caches.
++- Tests are part of "professional": a change that adds or fixes behaviour
++  without a regression or integration test pinning it is incomplete. Hold test
++  code to the product bar — one concern per test, and share a harness/seeder
++  (e.g. the `SqliteTestDb` helper in the integration projects) instead of
++  copy-pasting one per file.
+ 
+ ### Decomposing large components (frontend)
+ 
+diff --git a/package.json b/package.json
+index 7226750..135dbd3 100644
+--- a/package.json
++++ b/package.json
+@@ -9,6 +9,7 @@
+     "lint": "eslint .",
+     "preview": "vite preview",
+     "test": "tsc -p tsconfig.vitest.json && vitest run",
++    "test:integration": "tsc -p tsconfig.vitest.json && vitest run --config vitest.integration.config.ts",
+     "test:watch": "vitest"
+   },
+   "dependencies": {
+diff --git a/src-csharp/FileQueryEngine.IntegrationTests/DuckDbFileQueryIntegrationTests.cs b/src-csharp/FileQueryEngine.IntegrationTests/DuckDbFileQueryIntegrationTests.cs
+new file mode 100644
+index 0000000..69873c3
+--- /dev/null
++++ b/src-csharp/FileQueryEngine.IntegrationTests/DuckDbFileQueryIntegrationTests.cs
+@@ -0,0 +1,161 @@
++#nullable enable
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using Xunit;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// DuckDB flat-file integration tests. Each test builds its SQL with the
++/// PRODUCTION helpers (<see cref="DuckDbFileScan"/>, <see cref="DuckDbTableBuilder"/>)
++/// and runs it against a real libduckdb via <see cref="DuckDb"/>. That closes the
++/// loop the pure string-builder unit tests can't: the generated SQL is proven to
++/// actually parse and execute on the engine DbArk ships.
++///
++/// Skipped (not failed) when libduckdb has not been staged — the CI integration
++/// job stages it via scripts/stage-natives before running.
++/// </summary>
++public sealed class DuckDbFileQueryIntegrationTests : IDisposable
++{
++    private readonly string _dir;
++
++    public DuckDbFileQueryIntegrationTests()
++    {
++        _dir = Path.Combine(Path.GetTempPath(), $"dbark_duck_it_{Guid.NewGuid():N}");
++        Directory.CreateDirectory(_dir);
++    }
++
++    public void Dispose()
++    {
++        try { Directory.Delete(_dir, recursive: true); } catch { /* best-effort */ }
++    }
++
++    private string Write(string name, string content)
++    {
++        var path = Path.Combine(_dir, name);
++        File.WriteAllText(path, content);
++        return path.Replace("\\", "/"); // the app normalises separators before scanning
++    }
++
++    // ── CSV / JSON scans via the production scan-expression builder ───────────
++
++    [Fact]
++    public void Csv_scan_reads_typed_rows()
++    {
++        Assert.SkipUnless(DuckDb.Available, "libduckdb not staged (set DBARK_DUCKDB_LIB or run scripts/stage-natives)");
++
++        var csv = Write("people.csv", "id,name\n1,ada\n2,alan\n");
++        using var s = new DuckDb.Session();
++
++        // id is inferred BIGINT by read_csv_auto → the numeric predicate proves it.
++        var r = s.Query($"SELECT name FROM {DuckDbFileScan.ScanExpr(".csv", csv)} WHERE id = 2");
++
++        Assert.Equal(new[] { "name" }, r.Columns.ToArray());
++        Assert.Single(r.Rows);
++        Assert.Equal("alan", r.Rows[0][0]);
++    }
++
++    [Fact]
++    public void Json_scan_reads_rows()
++    {
++        Assert.SkipUnless(DuckDb.Available, "libduckdb not staged");
++
++        var json = Write("cities.json", "[{\"id\":1,\"city\":\"oslo\"},{\"id\":2,\"city\":\"riga\"}]");
++        using var s = new DuckDb.Session();
++
++        var r = s.Query($"SELECT city FROM {DuckDbFileScan.ScanExpr(".json", json)} ORDER BY id");
++
++        Assert.Equal(new[] { "oslo", "riga" }, r.Rows.Select(row => row[0]).ToArray());
++    }
++
++    [Fact]
++    public void Path_with_apostrophe_is_escaped_and_still_scans()
++    {
++        // H-1 regression, proven END TO END against DuckDB: a raw-interpolated
++        // path like /…/O'Brien.csv would break the SQL literal; ScanExpr doubles
++        // the quote so the scan parses and returns rows.
++        Assert.SkipUnless(DuckDb.Available, "libduckdb not staged");
++
++        var csv = Write("O'Brien.csv", "id,name\n1,ada\n");
++        using var s = new DuckDb.Session();
++
++        var r = s.Query($"SELECT count(*) AS c FROM {DuckDbFileScan.ScanExpr(".csv", csv)}");
++
++        Assert.Equal("1", r.Rows[0][0]);
++    }
++
++    // ── File ↔ live-DB join with a TYPED staged table (audit C-5) ─────────────
++
++    [Fact]
++    public void File_joins_a_typed_staged_table_on_a_numeric_key()
++    {
++        // The flagship feature. The staged "customers" table is built with the
++        // production DuckDbTableBuilder, typing id as BIGINT. The join key from
++        // the CSV (cust_id, inferred BIGINT) then compares numerically. Before
++        // C-5 the staged column was TEXT and this join errored / mismatched.
++        Assert.SkipUnless(DuckDb.Available, "libduckdb not staged");
++
++        var orders = Write("orders.csv", "cust_id,amount\n1,100\n2,200\n");
++        using var s = new DuckDb.Session();
++
++        var columns = new List<string> { "id", "name" };
++        var types = new List<DuckDbTableBuilder.DuckType>
++        {
++            DuckDbTableBuilder.DuckType.Bigint,
++            DuckDbTableBuilder.DuckType.Varchar,
++        };
++        var rows = new List<IReadOnlyList<string?>>
++        {
++            new List<string?> { "1", "ada" },
++            new List<string?> { "2", "alan" },
++        };
++
++        Assert.Null(s.Exec(DuckDbTableBuilder.BuildCreateTable("db_customers", columns, types)));
++        Assert.Null(s.Exec(DuckDbTableBuilder.BuildInsert("db_customers", columns, types, rows)));
++
++        var join = s.Query(
++            $"SELECT c.name, o.amount FROM {DuckDbFileScan.ScanExpr(".csv", orders)} o " +
++            "JOIN db_customers c ON o.cust_id = c.id ORDER BY o.amount");
++
++        Assert.Equal(2, join.Rows.Count);
++        Assert.Equal(new[] { "ada", "alan" }, join.Rows.Select(r => r[0]).ToArray());
++        Assert.Equal("100", join.Rows[0][1]);
++    }
++
++    [Fact]
++    public void Staged_string_values_with_quotes_are_escaped_in_the_insert()
++    {
++        // DuckDbTableBuilder.RenderLiteral must escape embedded single quotes so a
++        // value like O'Brien inserts cleanly (H-1 sibling on the value side).
++        Assert.SkipUnless(DuckDb.Available, "libduckdb not staged");
++
++        using var s = new DuckDb.Session();
++        var columns = new List<string> { "id", "name" };
++        var types = new List<DuckDbTableBuilder.DuckType>
++        {
++            DuckDbTableBuilder.DuckType.Bigint,
++            DuckDbTableBuilder.DuckType.Varchar,
++        };
++        var rows = new List<IReadOnlyList<string?>> { new List<string?> { "1", "O'Brien" } };
++
++        Assert.Null(s.Exec(DuckDbTableBuilder.BuildCreateTable("t", columns, types)));
++        Assert.Null(s.Exec(DuckDbTableBuilder.BuildInsert("t", columns, types, rows)));
++
++        var r = s.Query("SELECT name FROM t WHERE id = 1");
++        Assert.Equal("O'Brien", r.Rows[0][0]);
++    }
++
++    [Fact]
++    public void A_bad_query_surfaces_a_duckdb_error_not_a_crash()
++    {
++        Assert.SkipUnless(DuckDb.Available, "libduckdb not staged");
++
++        using var s = new DuckDb.Session();
++        var err = s.Exec("SELECT * FROM table_that_does_not_exist");
++
++        Assert.NotNull(err);
++        Assert.NotEqual("", err);
++    }
++}
+diff --git a/src-csharp/FileQueryEngine.IntegrationTests/DuckDbHarness.cs b/src-csharp/FileQueryEngine.IntegrationTests/DuckDbHarness.cs
+new file mode 100644
+index 0000000..bf4e8db
+--- /dev/null
++++ b/src-csharp/FileQueryEngine.IntegrationTests/DuckDbHarness.cs
+@@ -0,0 +1,229 @@
++#nullable enable
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Reflection;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// A minimal test harness over DuckDB's C API. It exists so the integration
++/// tests can execute the scan / staging SQL that DbArk's production
++/// <c>DuckDbFileScan</c> and <c>DuckDbTableBuilder</c> helpers GENERATE, against a
++/// real libduckdb — proving the generated SQL is valid and that the H-1
++/// path-escaping and C-5 typed-staging behaviours hold against the actual engine.
++///
++/// The P/Invoke signatures mirror those in FileQueryEngine.cs exactly (DuckDB
++/// v1.5.0, IntPtr-based result API). A resolver on THIS test assembly locates the
++/// staged native — the product's own resolver lives on the FileQueryEngine
++/// assembly and only handles the <c>duckdb.dll</c> import name, so there is no
++/// overlap.
++/// </summary>
++internal static class DuckDb
++{
++    private const string Lib = "duckdb";
++    private const int ResultSize = 64;   // sizeof(duckdb_result) in the v1.5 C API
++    private const int Success = 0;
++
++    [ModuleInitializer]
++    internal static void Init() =>
++        NativeLibrary.SetDllImportResolver(typeof(DuckDb).Assembly, Resolve);
++
++    // ── native discovery ─────────────────────────────────────────────────────
++
++    private static IntPtr Resolve(string name, Assembly assembly, DllImportSearchPath? path)
++    {
++        if (!name.Equals(Lib, StringComparison.OrdinalIgnoreCase))
++            return IntPtr.Zero;
++
++        foreach (var candidate in CandidateFiles())
++            if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out var h))
++                return h;
++
++        // Last resort: let the OS loader try the usual names (dev machine with
++        // libduckdb on the default search path).
++        foreach (var n in new[] { "duckdb", "libduckdb", "libduckdb.so", "libduckdb.dylib", "duckdb.dll" })
++            if (NativeLibrary.TryLoad(n, out var h))
++                return h;
++
++        return IntPtr.Zero;
++    }
++
++    private static IEnumerable<string> CandidateFiles()
++    {
++        // 1) explicit full path
++        var explicitLib = Environment.GetEnvironmentVariable("DBARK_DUCKDB_LIB");
++        if (!string.IsNullOrEmpty(explicitLib))
++            yield return explicitLib;
++
++        // 2) a natives directory (CI export) or the repo's src-tauri/natives
++        var dir = Environment.GetEnvironmentVariable("DBARK_NATIVES_DIR") ?? FindNativesDir();
++        if (dir != null)
++            foreach (var file in new[] { "libduckdb.so", "libduckdb.dylib", "duckdb.dll" })
++                yield return Path.Combine(dir, file);
++    }
++
++    /// <summary>Walk up from the test binary looking for <c>src-tauri/natives</c>.</summary>
++    private static string? FindNativesDir()
++    {
++        var dir = new DirectoryInfo(AppContext.BaseDirectory);
++        while (dir != null)
++        {
++            var candidate = Path.Combine(dir.FullName, "src-tauri", "natives");
++            if (Directory.Exists(candidate))
++                return candidate;
++            dir = dir.Parent;
++        }
++        return null;
++    }
++
++    private static bool? _available;
++
++    /// <summary>True when a libduckdb could be loaded and opened. Cached.</summary>
++    public static bool Available
++    {
++        get
++        {
++            if (_available is bool cached) return cached;
++            try
++            {
++                int rc = duckdb_open(null, out IntPtr db);
++                if (rc == Success) { duckdb_close(ref db); _available = true; }
++                else _available = false;
++            }
++            catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
++            {
++                _available = false;
++            }
++            return _available!.Value;
++        }
++    }
++
++    // ── managed session ──────────────────────────────────────────────────────
++
++    public sealed class Session : IDisposable
++    {
++        private IntPtr _db;
++        private IntPtr _conn;
++
++        public Session()
++        {
++            if (duckdb_open(null, out _db) != Success)
++                throw new InvalidOperationException("duckdb_open (in-memory) failed");
++            if (duckdb_connect(_db, out _conn) != Success)
++                throw new InvalidOperationException("duckdb_connect failed");
++        }
++
++        /// <summary>Run a statement for its side effect. Returns the DuckDB error, or null on success.</summary>
++        public string? Exec(string sql)
++        {
++            IntPtr buf = AllocResult();
++            try
++            {
++                int rc = duckdb_query(_conn, sql, buf);
++                string? err = rc == Success ? null : ReadError(buf);
++                duckdb_destroy_result(buf);
++                return err;
++            }
++            finally { Marshal.FreeHGlobal(buf); }
++        }
++
++        /// <summary>Run a query and materialise columns + rows. Throws on a DuckDB error.</summary>
++        public DuckResult Query(string sql)
++        {
++            IntPtr buf = AllocResult();
++            try
++            {
++                int rc = duckdb_query(_conn, sql, buf);
++                if (rc != Success)
++                {
++                    string err = ReadError(buf);
++                    duckdb_destroy_result(buf);
++                    throw new InvalidOperationException($"DuckDB query failed: {err}");
++                }
++
++                long cols = duckdb_column_count(buf);
++                long rows = duckdb_row_count(buf);
++
++                var columns = new List<string>();
++                for (long c = 0; c < cols; c++)
++                {
++                    IntPtr namePtr = duckdb_column_name(buf, c);
++                    columns.Add(namePtr != IntPtr.Zero ? Marshal.PtrToStringUTF8(namePtr) ?? $"col{c}" : $"col{c}");
++                }
++
++                var data = new List<List<string?>>();
++                for (long r = 0; r < rows; r++)
++                {
++                    var row = new List<string?>();
++                    for (long c = 0; c < cols; c++)
++                    {
++                        if (duckdb_value_is_null(buf, c, r) != 0) { row.Add(null); continue; }
++                        IntPtr valPtr = duckdb_value_varchar(buf, c, r);
++                        if (valPtr == IntPtr.Zero) { row.Add(null); continue; }
++                        row.Add(Marshal.PtrToStringUTF8(valPtr));
++                        duckdb_free(valPtr);
++                    }
++                    data.Add(row);
++                }
++
++                duckdb_destroy_result(buf);
++                return new DuckResult(columns, data);
++            }
++            finally { Marshal.FreeHGlobal(buf); }
++        }
++
++        public void Dispose()
++        {
++            if (_conn != IntPtr.Zero) duckdb_disconnect(ref _conn);
++            if (_db != IntPtr.Zero) duckdb_close(ref _db);
++        }
++    }
++
++    private static IntPtr AllocResult()
++    {
++        IntPtr buf = Marshal.AllocHGlobal(ResultSize);
++        for (int i = 0; i < ResultSize; i++) Marshal.WriteByte(buf, i, 0);
++        return buf;
++    }
++
++    private static string ReadError(IntPtr buf)
++    {
++        IntPtr p = duckdb_result_error(buf);
++        return p != IntPtr.Zero ? Marshal.PtrToStringUTF8(p) ?? "DuckDB error" : "DuckDB error";
++    }
++
++    // ── P/Invoke (mirrors FileQueryEngine.cs — DuckDB v1.5.0 IntPtr API) ──────
++
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int duckdb_open([MarshalAs(UnmanagedType.LPUTF8Str)] string? path, out IntPtr db);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern void duckdb_close(ref IntPtr db);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int duckdb_connect(IntPtr db, out IntPtr conn);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern void duckdb_disconnect(ref IntPtr conn);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int duckdb_query(IntPtr conn, [MarshalAs(UnmanagedType.LPUTF8Str)] string sql, IntPtr result);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern void duckdb_destroy_result(IntPtr result);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern long duckdb_column_count(IntPtr result);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern long duckdb_row_count(IntPtr result);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern IntPtr duckdb_column_name(IntPtr result, long col);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern IntPtr duckdb_value_varchar(IntPtr result, long col, long row);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern byte duckdb_value_is_null(IntPtr result, long col, long row);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern IntPtr duckdb_result_error(IntPtr result);
++    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
++    private static extern void duckdb_free(IntPtr ptr);
++}
++
++/// <summary>Materialised DuckDB result — columns and stringified cell values.</summary>
++internal sealed record DuckResult(List<string> Columns, List<List<string?>> Rows);
+diff --git a/src-csharp/FileQueryEngine.IntegrationTests/FileQueryEngine.IntegrationTests.csproj b/src-csharp/FileQueryEngine.IntegrationTests/FileQueryEngine.IntegrationTests.csproj
+new file mode 100644
+index 0000000..8d8a65e
+--- /dev/null
++++ b/src-csharp/FileQueryEngine.IntegrationTests/FileQueryEngine.IntegrationTests.csproj
+@@ -0,0 +1,45 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <!--
++    Integration tests for the flat-file engine — DbArk's headline "query a CSV,
++    then JOIN it against a live DB table" feature.
++
++    Two seams are exercised against REAL native engines:
++      1. DuckDB (via a staged libduckdb) executes the scan SQL that the
++         production DuckDbFileScan / DuckDbTableBuilder helpers generate, over
++         real CSV/JSON files. This proves the generated SQL is valid AND that the
++         H-1 path-escaping and C-5 typed-staging fixes hold end-to-end, not just
++         as strings.
++      2. The live-table SQLite reader (FileQueryEngineLib.ExecuteSqliteDb) runs
++         against a real SQLite database and returns the intermediate typed JSON a
++         join stages from.
++
++    The Shared helpers under test (DuckDbFileScan, DuckDbTableBuilder) are
++    public types in the referenced FileQueryEngine assembly, so the tests bind
++    to the same code the product runs, not a copy.
++  -->
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <IsTestProject>true</IsTestProject>
++    <Nullable>enable</Nullable>
++    <!-- Decouple the namespace from the project name so the assembly's own
++         name segment (e.g. "QueryExecutor") can't shadow the same-named
++         engine class the tests reference. AssemblyName stays the project
++         name for the InternalsVisibleTo grant. -->
++    <RootNamespace>DbArk.Integration</RootNamespace>
++    <LangVersion>latest</LangVersion>
++    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
++    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
++      <PrivateAssets>all</PrivateAssets>
++      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
++    </PackageReference>
++    <PackageReference Include="xunit.v3" Version="3.2.2" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="../FileQueryEngine/FileQueryEngine.csproj" />
++  </ItemGroup>
++</Project>
+diff --git a/src-csharp/FileQueryEngine.IntegrationTests/SqliteStagingIntegrationTests.cs b/src-csharp/FileQueryEngine.IntegrationTests/SqliteStagingIntegrationTests.cs
+new file mode 100644
+index 0000000..5a756c2
+--- /dev/null
++++ b/src-csharp/FileQueryEngine.IntegrationTests/SqliteStagingIntegrationTests.cs
+@@ -0,0 +1,82 @@
++#nullable enable
++using System;
++using System.IO;
++using System.Linq;
++using System.Text.Json;
++using Xunit;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Integration test for the live-table SQLite reader the flat-file join stages
++/// from (<c>FileQueryEngineLib.ExecuteSqliteDb</c>). It reads a real SQLite table
++/// and emits the intermediate JSON — crucially carrying a DuckDB TYPE per column
++/// (audit C-5) so the staged table is built typed rather than all-TEXT.
++///
++/// Windows-only: this path P/Invokes <c>winsqlite3.dll</c> and the FileQueryEngine
++/// assembly already owns its single DllImport resolver (for duckdb), so no
++/// cross-platform SQLite shim can be installed here. The CI integration job runs
++/// on Windows, where winsqlite3 is present.
++/// </summary>
++public sealed class SqliteStagingIntegrationTests : IDisposable
++{
++    private readonly string _dbPath;
++    private readonly string _conn;
++
++    public SqliteStagingIntegrationTests()
++    {
++        _dbPath = Path.Combine(Path.GetTempPath(), $"dbark_stage_it_{Guid.NewGuid():N}.sqlite");
++        _conn = $"Data Source={_dbPath}";
++    }
++
++    public void Dispose()
++    {
++        try { File.Delete(_dbPath); } catch { /* best-effort */ }
++    }
++
++    [Fact]
++    public void Reader_infers_a_duckdb_type_per_column_and_returns_rows()
++    {
++        Assert.SkipUnless(OperatingSystem.IsWindows(),
++            "ExecuteSqliteDb P/Invokes winsqlite3.dll; the FileQueryEngine assembly owns the only DllImport resolver so no SQLite shim can be added off-Windows.");
++
++        SqliteTestDb.Seed(
++            _dbPath,
++            "CREATE TABLE t (id INTEGER, amount REAL, name TEXT)",
++            "INSERT INTO t (id, amount, name) VALUES (1, 9.5, 'ada')");
++
++        var json = FileQueryEngineLib.ExecuteSqliteDb(_conn, "SELECT id, amount, name FROM t");
++
++        using var doc = JsonDocument.Parse(json);
++        var root = doc.RootElement;
++
++        var columns = root.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).ToArray();
++        var types = root.GetProperty("types").EnumerateArray().Select(e => e.GetString()).ToArray();
++        var firstRow = root.GetProperty("rows").EnumerateArray().First()
++            .EnumerateArray().Select(e => e.ValueKind == JsonValueKind.Null ? null : e.GetString()).ToArray();
++
++        Assert.Equal(new[] { "id", "amount", "name" }, columns);
++        // The heart of C-5: numeric columns are typed, not staged as text.
++        Assert.Equal(new[] { "BIGINT", "DOUBLE", "VARCHAR" }, types);
++        Assert.Equal(new[] { "1", "9.5", "ada" }, firstRow);
++    }
++
++    [Fact]
++    public void Null_cells_round_trip_as_json_null()
++    {
++        Assert.SkipUnless(OperatingSystem.IsWindows(), "winsqlite3.dll path — Windows only (see class remarks).");
++
++        SqliteTestDb.Seed(
++            _dbPath,
++            "CREATE TABLE t (id INTEGER, note TEXT)",
++            "INSERT INTO t (id, note) VALUES (1, NULL)");
++
++        var json = FileQueryEngineLib.ExecuteSqliteDb(_conn, "SELECT id, note FROM t");
++
++        using var doc = JsonDocument.Parse(json);
++        var firstRow = doc.RootElement.GetProperty("rows").EnumerateArray().First().EnumerateArray().ToArray();
++
++        Assert.Equal("1", firstRow[0].GetString());
++        Assert.Equal(JsonValueKind.Null, firstRow[1].ValueKind);
++    }
++}
+diff --git a/src-csharp/FileQueryEngine.IntegrationTests/SqliteTestDb.cs b/src-csharp/FileQueryEngine.IntegrationTests/SqliteTestDb.cs
+new file mode 100644
+index 0000000..34acaeb
+--- /dev/null
++++ b/src-csharp/FileQueryEngine.IntegrationTests/SqliteTestDb.cs
+@@ -0,0 +1,62 @@
++#nullable enable
++using System;
++using System.Runtime.InteropServices;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Minimal SQLite seeder for the live-table-staging test. Uses the same
++/// <c>winsqlite3.dll</c> import the app uses; that test only runs on Windows
++/// (see the skip guard), where winsqlite3 resolves natively — so no DllImport
++/// resolver is needed or registered here (the FileQueryEngine assembly already
++/// owns the only resolver, for duckdb).
++/// </summary>
++internal static class SqliteTestDb
++{
++    private const string Dll = "winsqlite3.dll";
++    private const int SqliteOk = 0;
++    private const int SqliteRow = 100;
++    private const int SqliteDone = 101;
++
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_open([MarshalAs(UnmanagedType.LPUTF8Str)] string filename, out IntPtr db);
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_close(IntPtr db);
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_prepare_v2(
++        IntPtr db, [MarshalAs(UnmanagedType.LPUTF8Str)] string sql, int nByte, out IntPtr stmt, out IntPtr tail);
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_step(IntPtr stmt);
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_finalize(IntPtr stmt);
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern IntPtr sqlite3_errmsg(IntPtr db);
++
++    public static void Seed(string path, params string[] statements)
++    {
++        if (sqlite3_open(path, out IntPtr db) != SqliteOk)
++            throw new InvalidOperationException($"sqlite3_open failed for {path}");
++        try
++        {
++            foreach (var sql in statements)
++            {
++                if (sqlite3_prepare_v2(db, sql, -1, out IntPtr stmt, out _) != SqliteOk || stmt == IntPtr.Zero)
++                    throw new InvalidOperationException($"prepare failed: {Err(db)} — {sql}");
++                try
++                {
++                    int step = sqlite3_step(stmt);
++                    if (step != SqliteDone && step != SqliteRow)
++                        throw new InvalidOperationException($"step failed ({step}): {Err(db)} — {sql}");
++                }
++                finally { sqlite3_finalize(stmt); }
++            }
++        }
++        finally { sqlite3_close(db); }
++    }
++
++    private static string Err(IntPtr db)
++    {
++        IntPtr p = sqlite3_errmsg(db);
++        return p != IntPtr.Zero ? Marshal.PtrToStringUTF8(p) ?? "unknown" : "unknown";
++    }
++}
+diff --git a/src-csharp/FileQueryEngine/FileQueryEngine.csproj b/src-csharp/FileQueryEngine/FileQueryEngine.csproj
+index c041d68..6dee9e2 100644
+--- a/src-csharp/FileQueryEngine/FileQueryEngine.csproj
++++ b/src-csharp/FileQueryEngine/FileQueryEngine.csproj
+@@ -10,6 +10,7 @@
+   </PropertyGroup>
+   <ItemGroup>
+     <InternalsVisibleTo Include="FileQueryEngine.Tests" />
++    <InternalsVisibleTo Include="FileQueryEngine.IntegrationTests" />
+     <PackageReference Include="MySqlConnector" Version="2.5.0" />
+     <PackageReference Include="Npgsql" Version="10.0.2" />
+     <PackageReference Include="System.Data.Odbc" Version="10.0.8" />
+diff --git a/src-csharp/QueryExecutor.ContainerTests/AssemblyInfo.cs b/src-csharp/QueryExecutor.ContainerTests/AssemblyInfo.cs
+new file mode 100644
+index 0000000..3f9c3aa
+--- /dev/null
++++ b/src-csharp/QueryExecutor.ContainerTests/AssemblyInfo.cs
+@@ -0,0 +1,7 @@
++using Xunit;
++
++// ActiveRowLimit is a process-global static on QueryExecutor, and the truncation
++// tests mutate it. Run this assembly's tests sequentially so parallel classes
++// can't race that shared state — and so only one database container is up at a
++// time, keeping the runner's memory footprint sane.
++[assembly: CollectionBehavior(DisableTestParallelization = true)]
+diff --git a/src-csharp/QueryExecutor.ContainerTests/ContainerContract.cs b/src-csharp/QueryExecutor.ContainerTests/ContainerContract.cs
+new file mode 100644
+index 0000000..c22a574
+--- /dev/null
++++ b/src-csharp/QueryExecutor.ContainerTests/ContainerContract.cs
+@@ -0,0 +1,126 @@
++#nullable enable
++using System;
++using System.Globalization;
++using System.Linq;
++using Xunit;
++// `using static` is a type-only context, so it binds `QueryExecutor` to the
++// engine class rather than this project's same-named default namespace segment.
++using static global::QueryExecutor;
++
++namespace DbArk.Integration;
++
++/// <summary>What a per-engine container fixture exposes to the shared contract.</summary>
++public interface IDbContainerFixture
++{
++    /// <summary>True when the container started and (for SQL Server) the ODBC
++    /// path is usable. When false, every contract test skips.</summary>
++    bool Available { get; }
++
++    /// <summary>Why the fixture is unavailable (Docker missing, driver missing…).</summary>
++    string? SkipReason { get; }
++
++    /// <summary>The connection string in the exact dialect the engine expects,
++    /// built the way DbArk's Rust host builds it (see conn_string.rs).</summary>
++    string ConnString { get; }
++}
++
++/// <summary>
++/// One engine-agnostic scenario, run against every containerized engine. Every
++/// statement uses portable SQL (INT / VARCHAR / COUNT / SUM) so the same test
++/// body exercises Postgres, MySQL, MariaDB and SQL Server through the production
++/// engine registry — the same dispatch <c>QueryExecutor.ExecuteQuery</c> performs.
++/// Derived classes supply the engine name and a started container fixture.
++/// </summary>
++public abstract class QueryEngineContainerContract
++{
++    protected abstract string Engine { get; }
++    protected abstract IDbContainerFixture Fixture { get; }
++
++    private IQueryEngine Resolve() => QueryEngines.Resolve(Engine);
++
++    private void RequireContainer() =>
++        Assert.SkipUnless(Fixture.Available, Fixture.SkipReason ?? "container unavailable");
++
++    private void Exec(string sql) => Resolve().ExecuteNonQuery(Fixture.ConnString, sql);
++
++    private QueryResult QuerySingle(string sql)
++    {
++        var results = Resolve().ExecuteBatch(Fixture.ConnString, sql);
++        var data = results.FirstOrDefault(r => r.Error == null && !r.IsMessage) ?? results[0];
++        Assert.Null(data.Error);
++        return data;
++    }
++
++    private static string Unique(string prefix) => $"{prefix}_{Guid.NewGuid():N}";
++
++    private static double Num(string? cell) =>
++        double.Parse(cell ?? "", CultureInfo.InvariantCulture);
++
++    [Fact]
++    public void Create_insert_select_round_trips()
++    {
++        RequireContainer();
++        ActiveRowLimit = 10_000;
++        var t = Unique("crud");
++
++        Exec($"CREATE TABLE {t} (id INT, name VARCHAR(50))");
++        Exec($"INSERT INTO {t} (id, name) VALUES (1, 'ada'), (2, 'alan')");
++
++        var r = QuerySingle($"SELECT id, name FROM {t} ORDER BY id");
++
++        Assert.Equal(2, r.RowCount);
++        Assert.Equal(new[] { "id", "name" }, r.Columns.Select(c => c.ToLowerInvariant()).ToArray());
++        Assert.Equal(1, (int)Num(r.Rows[0][0]));
++        Assert.Equal("ada", r.Rows[0][1]);
++        Assert.Equal("alan", r.Rows[1][1]);
++    }
++
++    [Fact]
++    public void Null_values_survive_as_null_not_empty_string()
++    {
++        RequireContainer();
++        ActiveRowLimit = 10_000;
++        var t = Unique("nulls");
++
++        Exec($"CREATE TABLE {t} (a VARCHAR(10), b VARCHAR(10))");
++        Exec($"INSERT INTO {t} (a, b) VALUES ('x', NULL)");
++
++        var r = QuerySingle($"SELECT a, b FROM {t}");
++
++        Assert.Equal("x", r.Rows[0][0]);
++        Assert.Null(r.Rows[0][1]);
++    }
++
++    [Fact]
++    public void Aggregate_returns_a_single_computed_row()
++    {
++        RequireContainer();
++        ActiveRowLimit = 10_000;
++        var t = Unique("agg");
++
++        Exec($"CREATE TABLE {t} (v INT)");
++        Exec($"INSERT INTO {t} (v) VALUES (10), (20), (12)");
++
++        var r = QuerySingle($"SELECT COUNT(*) AS c, SUM(v) AS s FROM {t}");
++
++        Assert.Equal(1, r.RowCount);
++        Assert.Equal(3, (int)Num(r.Rows[0][0]));   // COUNT(*)
++        Assert.Equal(42, (int)Num(r.Rows[0][1]));  // SUM(v) — parse-tolerant of 42 vs 42.0000
++    }
++
++    [Fact]
++    public void Row_cap_truncates_and_flags_when_more_rows_remain()
++    {
++        RequireContainer();
++        ActiveRowLimit = 2;
++        var t = Unique("cap");
++
++        Exec($"CREATE TABLE {t} (v INT)");
++        Exec($"INSERT INTO {t} (v) VALUES (1), (2), (3), (4), (5)");
++
++        var r = QuerySingle($"SELECT v FROM {t} ORDER BY v");
++
++        Assert.Equal(2, r.RowCount);
++        Assert.True(r.Truncated, "more rows remained past ActiveRowLimit → Truncated must be set");
++    }
++}
+diff --git a/src-csharp/QueryExecutor.ContainerTests/EngineContainerTests.cs b/src-csharp/QueryExecutor.ContainerTests/EngineContainerTests.cs
+new file mode 100644
+index 0000000..d7b3209
+--- /dev/null
++++ b/src-csharp/QueryExecutor.ContainerTests/EngineContainerTests.cs
+@@ -0,0 +1,44 @@
++#nullable enable
++using Xunit;
++
++namespace DbArk.Integration;
++
++// Each class binds the shared QueryEngineContainerContract to one engine +
++// container. xunit discovers the inherited [Fact] methods, so all four engines
++// run the same real-database scenario through the production engine registry.
++// IClassFixture starts one container per class (parallelism is disabled
++// assembly-wide, so containers come up one at a time).
++
++public sealed class PostgresContainerTests : QueryEngineContainerContract, IClassFixture<PostgresFixture>
++{
++    private readonly PostgresFixture _fx;
++    public PostgresContainerTests(PostgresFixture fx) => _fx = fx;
++    protected override string Engine => "postgres";
++    protected override IDbContainerFixture Fixture => _fx;
++}
++
++public sealed class MySqlContainerTests : QueryEngineContainerContract, IClassFixture<MySqlFixture>
++{
++    private readonly MySqlFixture _fx;
++    public MySqlContainerTests(MySqlFixture fx) => _fx = fx;
++    protected override string Engine => "mysql";
++    protected override IDbContainerFixture Fixture => _fx;
++}
++
++// Proves the wire-compatible MariaDB path really does drive the shared MySQL
++// engine implementation against a genuine MariaDB server.
++public sealed class MariaDbContainerTests : QueryEngineContainerContract, IClassFixture<MariaDbFixture>
++{
++    private readonly MariaDbFixture _fx;
++    public MariaDbContainerTests(MariaDbFixture fx) => _fx = fx;
++    protected override string Engine => "mariadb";
++    protected override IDbContainerFixture Fixture => _fx;
++}
++
++public sealed class SqlServerContainerTests : QueryEngineContainerContract, IClassFixture<SqlServerFixture>
++{
++    private readonly SqlServerFixture _fx;
++    public SqlServerContainerTests(SqlServerFixture fx) => _fx = fx;
++    protected override string Engine => "sqlserver";
++    protected override IDbContainerFixture Fixture => _fx;
++}
+diff --git a/src-csharp/QueryExecutor.ContainerTests/Fixtures.cs b/src-csharp/QueryExecutor.ContainerTests/Fixtures.cs
+new file mode 100644
+index 0000000..19b01f0
+--- /dev/null
++++ b/src-csharp/QueryExecutor.ContainerTests/Fixtures.cs
+@@ -0,0 +1,150 @@
++#nullable enable
++using System;
++using System.Linq;
++using System.Threading.Tasks;
++using Testcontainers.MariaDb;
++using Testcontainers.MsSql;
++using Testcontainers.MySql;
++using Testcontainers.PostgreSql;
++using Xunit;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Base container fixture. Starts the server in <see cref="InitializeAsync"/>,
++/// captures the connection string, and (optionally) probes usability. Any
++/// failure — Docker absent, image pull blocked, driver missing — is turned into
++/// <see cref="Available"/> = false with a reason, so the contract tests SKIP
++/// instead of erroring on a machine without the infrastructure.
++/// </summary>
++public abstract class DbContainerFixture : IDbContainerFixture, IAsyncLifetime
++{
++    public bool Available { get; private set; }
++    public string? SkipReason { get; private set; }
++    public string ConnString { get; private set; } = "";
++
++    /// <summary>Start the container and return the DbArk-dialect connection string.</summary>
++    protected abstract Task<string> StartAsync();
++
++    /// <summary>Stop/dispose the container.</summary>
++    protected abstract ValueTask StopAsync();
++
++    /// <summary>Optional usability probe; return a skip reason, or null if usable.</summary>
++    protected virtual string? Probe(string connString) => null;
++
++    public async ValueTask InitializeAsync()
++    {
++        try
++        {
++            ConnString = await StartAsync();
++            var reason = Probe(ConnString);
++            if (reason != null) { SkipReason = reason; Available = false; }
++            else Available = true;
++        }
++        catch (Exception e)
++        {
++            SkipReason = $"container unavailable: {e.Message}";
++            Available = false;
++        }
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        try { await StopAsync(); } catch { /* best-effort teardown */ }
++    }
++}
++
++public sealed class PostgresFixture : DbContainerFixture
++{
++    private readonly PostgreSqlContainer _c = new PostgreSqlBuilder()
++        .WithImage("postgres:16-alpine")
++        .WithDatabase("dbark").WithUsername("dbark").WithPassword("dbark_pw")
++        .Build();
++
++    protected override async Task<string> StartAsync()
++    {
++        await _c.StartAsync();
++        // Mirrors build_pg_conn + ssl_mode "none" (SSL Mode=Disable) from conn_string.rs.
++        return $"Host={_c.Hostname};Port={_c.GetMappedPublicPort(5432)};" +
++               "Database=dbark;Username=dbark;Password=dbark_pw;SSL Mode=Disable;";
++    }
++
++    protected override ValueTask StopAsync() => _c.DisposeAsync();
++}
++
++public sealed class MySqlFixture : DbContainerFixture
++{
++    private readonly MySqlContainer _c = new MySqlBuilder()
++        .WithImage("mysql:8.0")
++        .WithDatabase("dbark").WithUsername("dbark").WithPassword("dbark_pw")
++        .Build();
++
++    protected override async Task<string> StartAsync()
++    {
++        await _c.StartAsync();
++        // Mirrors build_mysql_conn + ssl_mode "none" from conn_string.rs.
++        return $"Server={_c.Hostname};Port={_c.GetMappedPublicPort(3306)};" +
++               "Database=dbark;Uid=dbark;Pwd=dbark_pw;SslMode=None;AllowUserVariables=true;";
++    }
++
++    protected override ValueTask StopAsync() => _c.DisposeAsync();
++}
++
++public sealed class MariaDbFixture : DbContainerFixture
++{
++    private readonly MariaDbContainer _c = new MariaDbBuilder()
++        .WithImage("mariadb:11")
++        .WithDatabase("dbark").WithUsername("dbark").WithPassword("dbark_pw")
++        .Build();
++
++    protected override async Task<string> StartAsync()
++    {
++        await _c.StartAsync();
++        // MariaDB is wire-compatible with MySQL — same MySqlConnector dialect.
++        return $"Server={_c.Hostname};Port={_c.GetMappedPublicPort(3306)};" +
++               "Database=dbark;Uid=dbark;Pwd=dbark_pw;SslMode=None;AllowUserVariables=true;";
++    }
++
++    protected override ValueTask StopAsync() => _c.DisposeAsync();
++}
++
++public sealed class SqlServerFixture : DbContainerFixture
++{
++    private const string SaPassword = "yourStrong(!)Passw0rd";
++
++    private readonly MsSqlContainer _c = new MsSqlBuilder()
++        .WithImage("mcr.microsoft.com/mssql/server:2022-latest")
++        .WithPassword(SaPassword)
++        .Build();
++
++    protected override async Task<string> StartAsync()
++    {
++        await _c.StartAsync();
++        // Mirrors build_sqlserver_odbc (ODBC Driver 18, comma host,port form,
++        // Encrypt=no for the local container) from conn_string.rs.
++        return $"Driver={{ODBC Driver 18 for SQL Server}};" +
++               $"Server={_c.Hostname},{_c.GetMappedPublicPort(1433)};" +
++               $"Database=master;UID=sa;PWD={SaPassword};Encrypt=no;TrustServerCertificate=yes;";
++    }
++
++    // The SQL Server engine uses odbc32.dll (bridged to libodbc on Linux by
++    // OdbcNativeShim). If unixODBC / msodbcsql18 isn't present the ODBC path
++    // can't connect — probe once and skip the tier cleanly rather than fail.
++    protected override string? Probe(string connString)
++    {
++        try
++        {
++            var rs = QueryEngines.Resolve("sqlserver").ExecuteBatch(connString, "SELECT 1 AS x");
++            var data = rs.FirstOrDefault(r => r.Error == null && !r.IsMessage);
++            if (data is { Rows.Count: > 0 }) return null; // usable
++            var err = rs.FirstOrDefault(r => r.Error != null)?.Error ?? "probe returned no rows";
++            return $"SQL Server ODBC path unusable (need unixODBC + msodbcsql18): {err}";
++        }
++        catch (Exception e)
++        {
++            return $"SQL Server ODBC path unusable (need unixODBC + msodbcsql18): {e.Message}";
++        }
++    }
++
++    protected override ValueTask StopAsync() => _c.DisposeAsync();
++}
+diff --git a/src-csharp/QueryExecutor.ContainerTests/OdbcNativeShim.cs b/src-csharp/QueryExecutor.ContainerTests/OdbcNativeShim.cs
+new file mode 100644
+index 0000000..d87dc5d
+--- /dev/null
++++ b/src-csharp/QueryExecutor.ContainerTests/OdbcNativeShim.cs
+@@ -0,0 +1,47 @@
++#nullable enable
++using System;
++using System.Reflection;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Test-only shim that lets the SQL Server engine's ODBC path run on Linux.
++///
++/// <c>SqlServerExecutor</c> P/Invokes <c>odbc32.dll</c> — the Windows ODBC Driver
++/// Manager. On Linux the equivalent is unixODBC's <c>libodbc.so.2</c>, which
++/// exports the same ODBC symbols (<c>SQLDriverConnectW</c>, <c>SQLExecDirectW</c>,
++/// …). This module initializer maps the import name onto it so the SQL Server
++/// container tests can exercise the real ODBC executor on a Docker-capable Linux
++/// runner (with msodbcsql18 + unixODBC installed). No-op on Windows, where
++/// odbc32.dll resolves natively. Registered only in this test process, on the
++/// QueryExecutor assembly that owns the imports — production registers no
++/// resolver there, so there is no double-registration conflict.
++/// </summary>
++internal static class OdbcNativeShim
++{
++    [ModuleInitializer]
++    internal static void Init()
++    {
++        if (OperatingSystem.IsWindows())
++            return;
++
++        // typeof(QueryResult) anchors the QueryExecutor assembly without naming
++        // the QueryExecutor class (whose name collides with this test project's
++        // default namespace segment).
++        NativeLibrary.SetDllImportResolver(typeof(QueryResult).Assembly, Resolve);
++    }
++
++    private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
++    {
++        if (!libraryName.Equals("odbc32.dll", StringComparison.OrdinalIgnoreCase))
++            return IntPtr.Zero;
++
++        foreach (var candidate in new[] { "libodbc.so.2", "libodbc.so.1", "libodbc.so" })
++            if (NativeLibrary.TryLoad(candidate, out var handle))
++                return handle;
++
++        return IntPtr.Zero; // unixODBC not installed → SQL Server tests skip
++    }
++}
+diff --git a/src-csharp/QueryExecutor.ContainerTests/QueryExecutor.ContainerTests.csproj b/src-csharp/QueryExecutor.ContainerTests/QueryExecutor.ContainerTests.csproj
+new file mode 100644
+index 0000000..ead49d9
+--- /dev/null
++++ b/src-csharp/QueryExecutor.ContainerTests/QueryExecutor.ContainerTests.csproj
+@@ -0,0 +1,41 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <!--
++    Containerized integration tier: runs real SQL through the production engine
++    registry (QueryEngines.Resolve -> Postgres/MySql/SqlServer engines) against
++    live database servers started with Testcontainers (Docker).
++
++    Kept separate from QueryExecutor.IntegrationTests because it needs Docker,
++    is slower, and has its own CI job. Postgres/MySQL/MariaDB use pure-managed
++    drivers (Npgsql / MySqlConnector) and run anywhere Docker is present; the
++    SQL Server engine uses raw ODBC (odbc32.dll), bridged to libodbc on Linux by
++    OdbcNativeShim. Tests SKIP (not fail) when Docker or the ODBC driver isn't
++    available, so the suite degrades gracefully off a configured CI runner.
++  -->
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <IsTestProject>true</IsTestProject>
++    <Nullable>enable</Nullable>
++    <LangVersion>latest</LangVersion>
++    <!-- Decouple namespace from the project name so the "QueryExecutor" segment
++         can't shadow the same-named engine class. AssemblyName stays the project
++         name for the InternalsVisibleTo grant. -->
++    <RootNamespace>DbArk.Integration</RootNamespace>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
++    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
++      <PrivateAssets>all</PrivateAssets>
++      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
++    </PackageReference>
++    <PackageReference Include="xunit.v3" Version="3.2.2" />
++    <PackageReference Include="Testcontainers.PostgreSql" Version="3.10.0" />
++    <PackageReference Include="Testcontainers.MySql" Version="3.10.0" />
++    <PackageReference Include="Testcontainers.MariaDb" Version="3.10.0" />
++    <PackageReference Include="Testcontainers.MsSql" Version="3.10.0" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="../QueryExecutor/QueryExecutor.csproj" />
++  </ItemGroup>
++</Project>
+diff --git a/src-csharp/QueryExecutor.IntegrationTests/QueryExecutor.IntegrationTests.csproj b/src-csharp/QueryExecutor.IntegrationTests/QueryExecutor.IntegrationTests.csproj
+new file mode 100644
+index 0000000..a908553
+--- /dev/null
++++ b/src-csharp/QueryExecutor.IntegrationTests/QueryExecutor.IntegrationTests.csproj
+@@ -0,0 +1,34 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <!--
++    End-to-end integration tests for the SQLite query path: they run REAL SQL
++    through the engine registry (QueryEngines.Resolve → SqliteQueryEngine →
++    winsqlite3/libsqlite3 P/Invoke) against a real on-disk database file, and
++    assert on the actual QueryResult the FFI boundary would serialize. The
++    existing QueryExecutor.Tests project stays pure-logic (splitters, validators);
++    this one exercises the driver seam those unit tests deliberately stub out.
++  -->
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <IsTestProject>true</IsTestProject>
++    <Nullable>enable</Nullable>
++    <!-- Decouple the namespace from the project name so the assembly's own
++         name segment (e.g. "QueryExecutor") can't shadow the same-named
++         engine class the tests reference. AssemblyName stays the project
++         name for the InternalsVisibleTo grant. -->
++    <RootNamespace>DbArk.Integration</RootNamespace>
++    <LangVersion>latest</LangVersion>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
++    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
++      <PrivateAssets>all</PrivateAssets>
++      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
++    </PackageReference>
++    <PackageReference Include="xunit.v3" Version="3.2.2" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="../QueryExecutor/QueryExecutor.csproj" />
++  </ItemGroup>
++</Project>
+diff --git a/src-csharp/QueryExecutor.IntegrationTests/SqliteEngineIntegrationTests.cs b/src-csharp/QueryExecutor.IntegrationTests/SqliteEngineIntegrationTests.cs
+new file mode 100644
+index 0000000..1c7fffd
+--- /dev/null
++++ b/src-csharp/QueryExecutor.IntegrationTests/SqliteEngineIntegrationTests.cs
+@@ -0,0 +1,168 @@
++#nullable enable
++using System;
++using System.IO;
++using System.Linq;
++using Xunit;
++// `using static` is a type-only context, so it binds `QueryExecutor` to the
++// engine class and NOT to this project's same-named default namespace — that
++// name clash is why a bare `QueryExecutor.ActiveRowLimit` fails to compile.
++using static global::QueryExecutor;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Real-database integration tests for the SQLite engine. Each test drives the
++/// engine the way <c>QueryExecutor.ExecuteQuery</c> does — resolve the engine
++/// from the registry, then run statements against a real temp <c>.sqlite</c>
++/// file — and asserts on the concrete <see cref="QueryResult"/> the FFI layer
++/// would hand back. These cover the seam the pure-logic unit tests can't:
++/// column harvesting, NULL storage-class handling, and the row-cap / truncation
++/// bookkeeping that only appears when a real driver returns rows.
++/// </summary>
++public sealed class SqliteEngineIntegrationTests : IDisposable
++{
++    private readonly string _dbPath;
++    private readonly string _conn;
++
++    // The registry lookup is the exact dispatch ExecuteQuery performs.
++    private static IQueryEngine Sqlite => QueryEngines.Resolve("sqlite");
++
++    public SqliteEngineIntegrationTests()
++    {
++        _dbPath = Path.Combine(Path.GetTempPath(), $"dbark_it_{Guid.NewGuid():N}.sqlite");
++        _conn = $"Data Source={_dbPath}"; // the exact shape build_sqlite_conn emits
++        ActiveRowLimit = 10_000; // reset the shared cap per test
++    }
++
++    public void Dispose()
++    {
++        try { File.Delete(_dbPath); } catch { /* best-effort temp cleanup */ }
++    }
++
++    /// <summary>Run a non-row statement (DDL/DML) through the engine's non-query path.</summary>
++    private void Exec(string sql) => Sqlite.ExecuteNonQuery(_conn, sql);
++
++    /// <summary>Run one row-returning statement and return its single result set.</summary>
++    private QueryResult Query(string sql)
++    {
++        var results = Sqlite.ExecuteStatement(_conn, sql);
++        Assert.Single(results);
++        return results[0];
++    }
++
++    // ── Round-trip ───────────────────────────────────────────────────────────
++
++    [Fact]
++    public void Create_insert_select_round_trips_columns_and_rows()
++    {
++        Exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
++        Exec("INSERT INTO users (id, name) VALUES (1, 'ada'), (2, 'alan')");
++
++        var r = Query("SELECT id, name FROM users ORDER BY id");
++
++        Assert.Null(r.Error);
++        Assert.Equal(new[] { "id", "name" }, r.Columns.ToArray());
++        Assert.Equal(2, r.RowCount);
++        Assert.Equal("1", r.Rows[0][0]);
++        Assert.Equal("ada", r.Rows[0][1]);
++        Assert.Equal("alan", r.Rows[1][1]);
++        Assert.False(r.Truncated);
++    }
++
++    [Fact]
++    public void Null_values_survive_as_null_not_empty_string()
++    {
++        Exec("CREATE TABLE t (a TEXT, b TEXT)");
++        Exec("INSERT INTO t (a, b) VALUES ('x', NULL)");
++
++        var r = Query("SELECT a, b FROM t");
++
++        Assert.Equal("x", r.Rows[0][0]);
++        Assert.Null(r.Rows[0][1]); // SQLITE_NULL → null, distinct from ""
++    }
++
++    [Fact]
++    public void Aggregate_returns_a_single_computed_row()
++    {
++        Exec("CREATE TABLE n (v INTEGER)");
++        Exec("INSERT INTO n (v) VALUES (10), (20), (12)");
++
++        var r = Query("SELECT COUNT(*) AS c, SUM(v) AS s FROM n");
++
++        Assert.Equal(1, r.RowCount);
++        Assert.Equal("3", r.Rows[0][0]);
++        Assert.Equal("42", r.Rows[0][1]);
++    }
++
++    [Fact]
++    public void Empty_table_yields_column_headers_and_zero_rows()
++    {
++        // Regression guard: the single-statement path used to read column names
++        // only inside the row loop, so a zero-row result lost its headers.
++        Exec("CREATE TABLE e (id INTEGER, label TEXT)");
++
++        var r = Query("SELECT id, label FROM e");
++
++        Assert.Equal(new[] { "id", "label" }, r.Columns.ToArray());
++        Assert.Empty(r.Rows);
++        Assert.Equal(0, r.RowCount);
++    }
++
++    // ── Row cap / truncation bookkeeping ─────────────────────────────────────
++
++    [Fact]
++    public void Row_cap_truncates_and_flags_when_more_rows_remain()
++    {
++        Exec("CREATE TABLE big (v INTEGER)");
++        Exec("INSERT INTO big (v) VALUES (1), (2), (3), (4), (5)");
++        ActiveRowLimit = 2;
++
++        var r = Query("SELECT v FROM big ORDER BY v");
++
++        Assert.Equal(2, r.RowCount);
++        Assert.True(r.Truncated, "more rows remained past the cap → Truncated must be set");
++    }
++
++    [Fact]
++    public void Result_size_exactly_at_the_cap_is_not_flagged_truncated()
++    {
++        // Regression guard: N rows with a cap of N is NOT a truncation. The old
++        // peek-one-more-row check mis-fired here because prepare_v2 auto-resets
++        // a statement after SQLITE_DONE, so the peek re-ran the query.
++        Exec("CREATE TABLE exact (v INTEGER)");
++        Exec("INSERT INTO exact (v) VALUES (1), (2), (3)");
++        ActiveRowLimit = 3;
++
++        var r = Query("SELECT v FROM exact ORDER BY v");
++
++        Assert.Equal(3, r.RowCount);
++        Assert.False(r.Truncated);
++    }
++
++    // ── Registry / engine-contract integration ───────────────────────────────
++
++    [Fact]
++    public void Registry_rejects_an_unknown_engine_loudly()
++    {
++        var ex = Assert.Throws<InvalidOperationException>(() => QueryEngines.Resolve("oracle"));
++        Assert.Contains("Unsupported engine", ex.Message);
++    }
++
++    [Fact]
++    public void Sqlite_is_on_the_legacy_statement_path_not_the_batch_path()
++    {
++        // Contract pin: SQLite must not be routed through ExecuteBatch until its
++        // stage-2 migration; doing so today throws by design.
++        Assert.False(Sqlite.UsesBatchPath);
++        Assert.Throws<InvalidOperationException>(() => Sqlite.ExecuteBatch(_conn, "SELECT 1"));
++    }
++
++    [Fact]
++    public void Syntax_error_comes_back_as_an_empty_result_not_a_throw()
++    {
++        // The engine swallows prepare failures into an empty result set rather
++        // than throwing across the FFI boundary; pin that behaviour.
++        var r = Query("SELECT FROM WHERE bogus");
++        Assert.Empty(r.Rows);
++    }
++}
+diff --git a/src-csharp/QueryExecutor.IntegrationTests/SqliteNativeShim.cs b/src-csharp/QueryExecutor.IntegrationTests/SqliteNativeShim.cs
+new file mode 100644
+index 0000000..3bb7bfd
+--- /dev/null
++++ b/src-csharp/QueryExecutor.IntegrationTests/SqliteNativeShim.cs
+@@ -0,0 +1,54 @@
++#nullable enable
++using System;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Test-only native-library shim so the SQLite integration tests run on every
++/// OS, not just Windows.
++///
++/// The engine hard-codes <c>[DllImport("winsqlite3.dll")]</c> — the SQLite build
++/// that ships with Windows 10/11. On Linux/macOS that library does not exist, so
++/// this module initializer registers a <see cref="NativeLibrary"/> resolver on
++/// the QueryExecutor assembly that maps the <c>winsqlite3.dll</c> import name onto
++/// the platform's system SQLite (<c>libsqlite3.so.0</c> / <c>libsqlite3.dylib</c>),
++/// which exports the same standard <c>sqlite3_*</c> C API the P/Invokes call.
++///
++/// On Windows it is a no-op: the resolver returns <see cref="IntPtr.Zero"/> and the
++/// default loader finds the real <c>winsqlite3.dll</c>. Production registers no
++/// resolver on this assembly, so there is no conflict (a second
++/// <c>SetDllImportResolver</c> would throw). This shim changes nothing about the
++/// code under test — it only satisfies the same import from a differently named file.
++/// </summary>
++internal static class SqliteNativeShim
++{
++    [ModuleInitializer]
++    internal static void Init()
++    {
++        if (OperatingSystem.IsWindows())
++            return; // real winsqlite3.dll resolves natively
++
++        // typeof(QueryResult) anchors the QueryExecutor assembly without naming the
++        // QueryExecutor class (whose name collides with this test project's namespace).
++        NativeLibrary.SetDllImportResolver(typeof(QueryResult).Assembly, Resolve);
++    }
++
++    private static IntPtr Resolve(string libraryName, System.Reflection.Assembly assembly, DllImportSearchPath? searchPath)
++    {
++        if (!libraryName.Equals("winsqlite3.dll", StringComparison.OrdinalIgnoreCase))
++            return IntPtr.Zero; // not ours — let the default resolver handle it
++
++        foreach (var candidate in Candidates())
++            if (NativeLibrary.TryLoad(candidate, out var handle))
++                return handle;
++
++        return IntPtr.Zero; // fall through to default (surfaces a clear load error)
++    }
++
++    private static string[] Candidates() =>
++        OperatingSystem.IsMacOS()
++            ? new[] { "libsqlite3.dylib", "/usr/lib/libsqlite3.dylib" }
++            : new[] { "libsqlite3.so.0", "libsqlite3.so", "sqlite3" };
++}
+diff --git a/src-csharp/QueryExecutor/Engines/SqliteQueryEngine.cs b/src-csharp/QueryExecutor/Engines/SqliteQueryEngine.cs
+index 7d4ba3d..4d2f828 100644
+--- a/src-csharp/QueryExecutor/Engines/SqliteQueryEngine.cs
++++ b/src-csharp/QueryExecutor/Engines/SqliteQueryEngine.cs
+@@ -162,22 +162,28 @@ internal sealed class SqliteQueryEngine : IQueryEngine
+ 
+             try
+             {
+-                bool firstRow = true;
+-                while (sqlite3_step(stmt) == SQLITE_ROW && (rowLimit == 0 || rowCount < rowLimit))
++                // Column count and names are fixed at prepare time, so read them
++                // BEFORE the first step. This means a zero-row result still
++                // reports its headers (matching the reader-based engines), and
++                // the truncation check no longer depends on a first row existing.
++                int colCount = sqlite3_column_count(stmt);
++                for (int i = 0; i < colCount; i++)
+                 {
+-                    int colCount = sqlite3_column_count(stmt);
++                    IntPtr namePtr = sqlite3_column_name(stmt, i);
++                    columns.Add(namePtr != IntPtr.Zero
++                        ? Marshal.PtrToStringUTF8(namePtr) ?? $"col{i}"
++                        : $"col{i}");
++                }
+ 
+-                    if (firstRow)
+-                    {
+-                        for (int i = 0; i < colCount; i++)
+-                        {
+-                            IntPtr namePtr = sqlite3_column_name(stmt, i);
+-                            columns.Add(namePtr != IntPtr.Zero
+-                                ? Marshal.PtrToStringUTF8(namePtr) ?? $"col{i}"
+-                                : $"col{i}");
+-                        }
+-                        firstRow = false;
+-                    }
++                // Enforce the cap AFTER a ROW step but BEFORE keeping the row —
++                // the same shape as ExecuteSqliteMulti. The old "peek one more
++                // row" trick was wrong: sqlite3_prepare_v2 auto-resets a
++                // statement that has returned SQLITE_DONE, so a result of exactly
++                // ActiveRowLimit rows re-ran on the peek and was falsely flagged
++                // truncated.
++                while (sqlite3_step(stmt) == SQLITE_ROW)
++                {
++                    if (rowLimit > 0 && rowCount >= rowLimit) { truncated = true; break; }
+ 
+                     var row = new List<string?>();
+                     for (int i = 0; i < colCount; i++)
+@@ -195,13 +201,6 @@ internal sealed class SqliteQueryEngine : IQueryEngine
+                     rows.Add(row);
+                     rowCount++;
+                 }
+-                // If we stopped exactly at a positive cap, peek one more row to
+-                // distinguish "exactly N rows" from "truncated at N".
+-                if (rowLimit > 0 && rowCount >= rowLimit
+-                    && sqlite3_step(stmt) == SQLITE_ROW)
+-                {
+-                    truncated = true;
+-                }
+             }
+             finally
+             {
+diff --git a/src-csharp/QueryExecutor/QueryExecutor.csproj b/src-csharp/QueryExecutor/QueryExecutor.csproj
+index 6159b6d..80169fb 100644
+--- a/src-csharp/QueryExecutor/QueryExecutor.csproj
++++ b/src-csharp/QueryExecutor/QueryExecutor.csproj
+@@ -10,6 +10,8 @@
+   </PropertyGroup>
+   <ItemGroup>
+     <InternalsVisibleTo Include="QueryExecutorTests.Tests" />
++    <InternalsVisibleTo Include="QueryExecutor.IntegrationTests" />
++    <InternalsVisibleTo Include="QueryExecutor.ContainerTests" />
+     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.0" />
+     <PackageReference Include="MySqlConnector" Version="2.5.0" />
+     <PackageReference Include="Npgsql" Version="10.0.2" />
+diff --git a/src-csharp/SchemaExplorer.IntegrationTests/SchemaExplorer.IntegrationTests.csproj b/src-csharp/SchemaExplorer.IntegrationTests/SchemaExplorer.IntegrationTests.csproj
+new file mode 100644
+index 0000000..05af9ca
+--- /dev/null
++++ b/src-csharp/SchemaExplorer.IntegrationTests/SchemaExplorer.IntegrationTests.csproj
+@@ -0,0 +1,35 @@
++<Project Sdk="Microsoft.NET.Sdk">
++  <!--
++    End-to-end integration tests for SQLite schema introspection: they seed a
++    real .sqlite file (tables, primary keys, a foreign key) and then run the
++    production SchemaEngines.Resolve("sqlite").GetFullSchema path against it,
++    asserting on the SchemaResult the sidebar consumes. The existing
++    SchemaExplorer.Tests project pins the engine *registry*; this one proves the
++    SQLite reader (sqlite_master + PRAGMA table_info + PRAGMA foreign_key_list)
++    actually returns the right tables/columns/keys from a live database.
++  -->
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <IsTestProject>true</IsTestProject>
++    <Nullable>enable</Nullable>
++    <!-- Decouple the namespace from the project name so the assembly's own
++         name segment (e.g. "QueryExecutor") can't shadow the same-named
++         engine class the tests reference. AssemblyName stays the project
++         name for the InternalsVisibleTo grant. -->
++    <RootNamespace>DbArk.Integration</RootNamespace>
++    <LangVersion>latest</LangVersion>
++  </PropertyGroup>
++
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
++    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
++      <PrivateAssets>all</PrivateAssets>
++      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
++    </PackageReference>
++    <PackageReference Include="xunit.v3" Version="3.2.2" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="../SchemaExplorer/SchemaExplorer.csproj" />
++  </ItemGroup>
++</Project>
+diff --git a/src-csharp/SchemaExplorer.IntegrationTests/SchemaNativeShim.cs b/src-csharp/SchemaExplorer.IntegrationTests/SchemaNativeShim.cs
+new file mode 100644
+index 0000000..48e9cb4
+--- /dev/null
++++ b/src-csharp/SchemaExplorer.IntegrationTests/SchemaNativeShim.cs
+@@ -0,0 +1,50 @@
++#nullable enable
++using System;
++using System.Reflection;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Test-only native shim (see the QueryExecutor integration project for the full
++/// rationale). Maps the <c>winsqlite3.dll</c> import name onto the platform's
++/// system SQLite on non-Windows, so both the SchemaExplorer engine under test AND
++/// this project's own <see cref="SqliteTestDb"/> seeder resolve everywhere.
++///
++/// A resolver is registered once per assembly: one on the SchemaExplorer assembly
++/// (the SqliteSchemaEngine P/Invokes) and one on this test assembly (the seeder's
++/// P/Invokes). Neither assembly registers its own resolver in production for
++/// winsqlite3, so there is no double-registration conflict. No-op on Windows.
++/// </summary>
++internal static class SchemaNativeShim
++{
++    [ModuleInitializer]
++    internal static void Init()
++    {
++        if (OperatingSystem.IsWindows())
++            return;
++
++        // Engine assembly (SchemaExplorerLib lives in the global namespace).
++        NativeLibrary.SetDllImportResolver(typeof(global::SchemaExplorerLib).Assembly, Resolve);
++        // This test assembly (the SqliteTestDb seeder's imports).
++        NativeLibrary.SetDllImportResolver(typeof(SchemaNativeShim).Assembly, Resolve);
++    }
++
++    private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
++    {
++        if (!libraryName.Equals("winsqlite3.dll", StringComparison.OrdinalIgnoreCase))
++            return IntPtr.Zero;
++
++        foreach (var candidate in Candidates())
++            if (NativeLibrary.TryLoad(candidate, out var handle))
++                return handle;
++
++        return IntPtr.Zero;
++    }
++
++    private static string[] Candidates() =>
++        OperatingSystem.IsMacOS()
++            ? new[] { "libsqlite3.dylib", "/usr/lib/libsqlite3.dylib" }
++            : new[] { "libsqlite3.so.0", "libsqlite3.so", "sqlite3" };
++}
+diff --git a/src-csharp/SchemaExplorer.IntegrationTests/SqliteSchemaIntegrationTests.cs b/src-csharp/SchemaExplorer.IntegrationTests/SqliteSchemaIntegrationTests.cs
+new file mode 100644
+index 0000000..a9a6dcc
+--- /dev/null
++++ b/src-csharp/SchemaExplorer.IntegrationTests/SqliteSchemaIntegrationTests.cs
+@@ -0,0 +1,105 @@
++#nullable enable
++using System;
++using System.IO;
++using System.Linq;
++using Xunit;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Real-database integration tests for SQLite schema introspection. A temp
++/// database is seeded with two related tables, then the production schema reader
++/// (<c>SchemaEngines.Resolve("sqlite").GetFullSchema</c>) walks it and we assert
++/// on the returned <see cref="SchemaResult"/> — the exact object the schema
++/// sidebar renders.
++/// </summary>
++public sealed class SqliteSchemaIntegrationTests : IDisposable
++{
++    private readonly string _dbPath;
++    private readonly string _conn;
++
++    private static ISchemaEngine Sqlite => SchemaEngines.Resolve("sqlite");
++
++    public SqliteSchemaIntegrationTests()
++    {
++        _dbPath = Path.Combine(Path.GetTempPath(), $"dbark_schema_it_{Guid.NewGuid():N}.sqlite");
++        _conn = $"Data Source={_dbPath}";
++        SqliteTestDb.Seed(
++            _dbPath,
++            "CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
++            "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER, note TEXT, " +
++                "FOREIGN KEY (parent_id) REFERENCES parent(id))");
++    }
++
++    public void Dispose()
++    {
++        try { File.Delete(_dbPath); } catch { /* best-effort */ }
++    }
++
++    [Fact]
++    public void Lists_every_table_ordered_by_name()
++    {
++        var schema = Sqlite.GetFullSchema(_conn);
++
++        Assert.Null(schema.Error);
++        Assert.Equal(new[] { "child", "parent" }, schema.Tables.Select(t => t.Name).ToArray());
++        Assert.All(schema.Tables, t => Assert.Equal("main", t.Schema));
++    }
++
++    [Fact]
++    public void Reads_columns_types_and_primary_key_flags()
++    {
++        var schema = Sqlite.GetFullSchema(_conn);
++
++        var child = schema.Tables.Single(t => t.Name == "child");
++        Assert.Equal(new[] { "id", "parent_id", "note" }, child.Columns.Select(c => c.Name).ToArray());
++
++        var id = child.Columns.Single(c => c.Name == "id");
++        Assert.True(id.IsPrimaryKey);
++        Assert.Equal("INTEGER", id.DataType, ignoreCase: true);
++
++        var parentId = child.Columns.Single(c => c.Name == "parent_id");
++        Assert.False(parentId.IsPrimaryKey);
++    }
++
++    [Fact]
++    public void Reports_not_null_constraint_from_pragma()
++    {
++        var schema = Sqlite.GetFullSchema(_conn);
++        var parentName = schema.Tables.Single(t => t.Name == "parent").Columns.Single(c => c.Name == "name");
++        Assert.False(parentName.IsNullable); // declared NOT NULL
++    }
++
++    [Fact]
++    public void Resolves_the_foreign_key_source_and_target()
++    {
++        var schema = Sqlite.GetFullSchema(_conn);
++
++        var fk = Assert.Single(schema.ForeignKeys);
++        Assert.Equal("child", fk.SourceTable);
++        Assert.Equal("parent_id", fk.SourceColumn);
++        Assert.Equal("parent", fk.TargetTable);
++        Assert.Equal("id", fk.TargetColumn);
++    }
++
++    [Fact]
++    public void Sqlite_leaves_host_resolved_object_kinds_empty()
++    {
++        // Views/triggers/indexes/procedures/functions are fetched by the Rust
++        // host for SQLite, not this DLL — the reader must return them empty, not
++        // fabricate entries. Pins that contract.
++        var schema = Sqlite.GetFullSchema(_conn);
++        Assert.Empty(schema.Views);
++        Assert.Empty(schema.Triggers);
++        Assert.Empty(schema.Indexes);
++        Assert.Empty(schema.Procedures);
++        Assert.Empty(schema.Functions);
++    }
++
++    [Fact]
++    public void Sqlite_has_no_database_layer()
++    {
++        // One file == one database; the sidebar's database dropdown is empty.
++        Assert.Empty(Sqlite.ListDatabases(_conn));
++    }
++}
+diff --git a/src-csharp/SchemaExplorer.IntegrationTests/SqliteTestDb.cs b/src-csharp/SchemaExplorer.IntegrationTests/SqliteTestDb.cs
+new file mode 100644
+index 0000000..7d11e28
+--- /dev/null
++++ b/src-csharp/SchemaExplorer.IntegrationTests/SqliteTestDb.cs
+@@ -0,0 +1,79 @@
++#nullable enable
++using System;
++using System.Runtime.InteropServices;
++
++namespace DbArk.Integration;
++
++/// <summary>
++/// Minimal test-only SQLite seeder: opens a database file and executes setup
++/// statements (CREATE TABLE, INSERT) so an integration test can hand a populated
++/// database to the code under test. Uses the same <c>winsqlite3.dll</c> import
++/// name the app uses, so the <see cref="SchemaNativeShim"/> resolver serves it on
++/// every OS. Deliberately tiny — this is a harness, not a driver.
++/// </summary>
++internal static class SqliteTestDb
++{
++    private const string Dll = "winsqlite3.dll";
++    private const int SqliteOk = 0;
++    private const int SqliteRow = 100;
++    private const int SqliteDone = 101;
++
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_open([MarshalAs(UnmanagedType.LPUTF8Str)] string filename, out IntPtr db);
++
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_close(IntPtr db);
++
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_prepare_v2(
++        IntPtr db, [MarshalAs(UnmanagedType.LPUTF8Str)] string sql, int nByte, out IntPtr stmt, out IntPtr tail);
++
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_step(IntPtr stmt);
++
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern int sqlite3_finalize(IntPtr stmt);
++
++    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
++    private static extern IntPtr sqlite3_errmsg(IntPtr db);
++
++    /// <summary>Execute each statement in order against the file at <paramref name="path"/>.</summary>
++    public static void Seed(string path, params string[] statements)
++    {
++        int rc = sqlite3_open(path, out IntPtr db);
++        if (rc != SqliteOk)
++            throw new InvalidOperationException($"sqlite3_open failed (code {rc}) for {path}");
++        try
++        {
++            foreach (var sql in statements)
++                RunOne(db, sql);
++        }
++        finally
++        {
++            sqlite3_close(db);
++        }
++    }
++
++    private static void RunOne(IntPtr db, string sql)
++    {
++        int rc = sqlite3_prepare_v2(db, sql, -1, out IntPtr stmt, out _);
++        if (rc != SqliteOk || stmt == IntPtr.Zero)
++            throw new InvalidOperationException($"prepare failed: {ErrMsg(db)} — {sql}");
++        try
++        {
++            int step = sqlite3_step(stmt);
++            if (step != SqliteDone && step != SqliteRow)
++                throw new InvalidOperationException($"step failed (code {step}): {ErrMsg(db)} — {sql}");
++        }
++        finally
++        {
++            sqlite3_finalize(stmt);
++        }
++    }
++
++    private static string ErrMsg(IntPtr db)
++    {
++        IntPtr p = sqlite3_errmsg(db);
++        return p != IntPtr.Zero ? Marshal.PtrToStringUTF8(p) ?? "unknown" : "unknown";
++    }
++}
+diff --git a/src-csharp/SchemaExplorer/SchemaExplorer.csproj b/src-csharp/SchemaExplorer/SchemaExplorer.csproj
+index c9e11ad..9dd4498 100644
+--- a/src-csharp/SchemaExplorer/SchemaExplorer.csproj
++++ b/src-csharp/SchemaExplorer/SchemaExplorer.csproj
+@@ -10,6 +10,7 @@
+   </PropertyGroup>
+   <ItemGroup>
+     <InternalsVisibleTo Include="SchemaExplorer.Tests" />
++    <InternalsVisibleTo Include="SchemaExplorer.IntegrationTests" />
+     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.0" />
+     <PackageReference Include="MySqlConnector" Version="2.3.7" />
+     <PackageReference Include="Npgsql" Version="8.0.5" />
+diff --git a/src-tauri/src/integration_tests.rs b/src-tauri/src/integration_tests.rs
+new file mode 100644
+index 0000000..43c1a27
+--- /dev/null
++++ b/src-tauri/src/integration_tests.rs
+@@ -0,0 +1,172 @@
++//! Cross-module integration tests for the Rust host.
++//!
++//! The per-module `#[cfg(test)]` suites (in `engine.rs`, `conn_string.rs`,
++//! `ipc.rs`, `natives.rs`) each pin one unit in isolation. This module instead
++//! wires the modules together along the exact path a database command travels
++//! *before* it reaches the native layer:
++//!
++//! ```text
++//!   wire engine string ──▶ engine::Engine::parse
++//!                     ──▶ Engine::connection_string (conn_string builders + escaping)
++//!                     ──▶ natives::to_cstring        (FFI boundary)
++//!   engine/parse errors ─▶ ipc::IpcError            (the envelope the frontend sees)
++//! ```
++//!
++//! A regression in any one module that only shows up in combination — an engine
++//! that stops escaping its password, an error that maps to the wrong IPC code,
++//! an identifier that breaks out of its quotes — fails here even when the
++//! isolated unit tests still pass. The crate is a `cdylib`, so these live as an
++//! in-crate `#[cfg(test)]` module (the project's established pattern) rather than
++//! as a `tests/` integration crate, which a cdylib cannot link against.
++
++#![cfg(test)]
++
++use crate::conn_string::ConnArgs;
++use crate::engine::{Engine, EngineError};
++use crate::ipc::{IpcError, IpcErrorCode};
++
++/// Every engine the host speaks, paired with its canonical wire name.
++const WIRE_NAMES: &[&str] = &["sqlserver", "postgres", "cockroachdb", "mysql", "mariadb", "sqlite"];
++
++fn conn_args<'a>(database: &'a str, username: &'a str, password: &'a str) -> ConnArgs<'a> {
++    ConnArgs {
++        host: "db.internal",
++        port: 5432,
++        instance: "",
++        database,
++        username,
++        password,
++        win_auth: false,
++        ssl_mode: "prefer",
++        via_tunnel: false,
++        connect_timeout_secs: None,
++    }
++}
++
++// ── parse ──▶ connection_string, for every engine ────────────────────────────
++
++#[test]
++fn every_wire_name_parses_and_builds_a_connection_string() {
++    for name in WIRE_NAMES {
++        let engine = Engine::parse(name).unwrap_or_else(|_| panic!("{name} should parse"));
++        // The name must round-trip back to the canonical wire string the C#
++        // layer dispatches on.
++        assert_eq!(engine.name(), *name);
++
++        let conn = engine.connection_string(&conn_args("appdb", "svc", "pw"));
++        assert!(!conn.is_empty(), "{name}: empty connection string");
++
++        // Each dialect has a recognisable shape — pin the driver-specific prefix.
++        match engine {
++            Engine::SqlServer => assert!(conn.contains("Driver={") && conn.contains("Database=appdb")),
++            Engine::Postgres | Engine::CockroachDb => assert!(conn.starts_with("Host=db.internal;")),
++            Engine::MySql | Engine::MariaDb => assert!(conn.starts_with("Server=db.internal;")),
++            Engine::Sqlite => assert_eq!(conn, "Data Source=appdb"),
++        }
++    }
++}
++
++// ── security: password escaping survives the whole pipeline ───────────────────
++
++#[test]
++fn injected_password_is_escaped_for_every_credentialed_engine() {
++    // A password with `;` `'` `"` `=` must never terminate a field or break the
++    // string apart. This is the audit H-2 seam, verified through the public
++    // Engine::connection_string entry point rather than the private builders.
++    let nasty = r#"p;w'x"y=z"#;
++
++    // Postgres/MySQL (ADO.NET key-value): the value is quote-enclosed.
++    for name in ["postgres", "cockroachdb", "mysql", "mariadb"] {
++        let conn = Engine::parse(name).unwrap().connection_string(&conn_args("db", "u", nasty));
++        assert!(
++            !conn.contains(&format!("={nasty};")),
++            "{name}: raw injected password leaked unescaped into {conn}"
++        );
++        assert!(conn.contains('"'), "{name}: expected a quote-enclosed value in {conn}");
++    }
++
++    // SQL Server (ODBC): the value is brace-enclosed.
++    let conn = Engine::SqlServer.connection_string(&conn_args("db", "u", nasty));
++    assert!(conn.contains("PWD={"), "sqlserver: expected brace-enclosed PWD in {conn}");
++}
++
++// ── engine errors ──▶ the IPC envelope the frontend parses ───────────────────
++
++#[test]
++fn engine_errors_map_onto_the_expected_ipc_codes() {
++    let cases = [
++        (EngineError::Unsupported("oracle".into()), IpcErrorCode::Validation),
++        (EngineError::CredentialNotFound("missing".into()), IpcErrorCode::NotFound),
++        (EngineError::NoPassword("cred:1".into()), IpcErrorCode::NotFound),
++        (EngineError::Keychain("locked".into()), IpcErrorCode::Internal),
++    ];
++    for (err, expected_code) in cases {
++        let ipc: IpcError = err.into();
++        assert_eq!(ipc.code, expected_code);
++        assert!(!ipc.message.is_empty());
++    }
++}
++
++#[test]
++fn an_unknown_wire_engine_surfaces_as_a_validation_error_end_to_end() {
++    // The exact path a command takes for a bad engine string: parse fails, and
++    // the `?`/`.into()` bridge turns it into the wire error the UI branches on.
++    let ipc: IpcError = Engine::parse("nosuchdb").unwrap_err().into();
++    assert_eq!(ipc.code, IpcErrorCode::Validation);
++    assert!(ipc.message.contains("Unsupported engine: nosuchdb"));
++
++    // And it serialises to the stable shape the frontend's single parse expects.
++    let json = serde_json::to_string(&ipc).unwrap();
++    assert!(json.contains(r#""code":"validation""#), "got {json}");
++}
++
++// ── DROP identifier quoting is injection-safe on every dialect ────────────────
++
++#[test]
++fn drop_statement_quotes_a_hostile_object_name_on_every_engine() {
++    // The object name arrives from the frontend over IPC and is untrusted
++    // (audit H-1). Each engine must quote it with its own delimiter doubled so a
++    // crafted name can't break out and append SQL.
++    let hostile_sqlserver = "evil]; DROP TABLE users;--";
++    let stmt = Engine::SqlServer
++        .build_drop_statement("table", hostile_sqlserver, "dbo", "")
++        .unwrap();
++    assert!(stmt.contains("[evil]]; DROP TABLE users;--]"), "got {stmt}");
++
++    let hostile_ansi = r#"evil"; DROP TABLE users;--"#;
++    for name in ["postgres", "cockroachdb", "sqlite"] {
++        let engine = Engine::parse(name).unwrap();
++        let stmt = engine.build_drop_statement("table", hostile_ansi, "public", "").unwrap();
++        // the embedded double-quote is doubled inside the quoted identifier
++        assert!(stmt.contains(r#""evil""; DROP TABLE users;--""#), "{name}: got {stmt}");
++    }
++
++    let hostile_mysql = "evil`; DROP TABLE users;--";
++    let stmt = Engine::MySql.build_drop_statement("table", hostile_mysql, "", "").unwrap();
++    assert!(stmt.contains("`evil``; DROP TABLE users;--`"), "got {stmt}");
++}
++
++#[test]
++fn drop_statement_rejects_an_unknown_object_type_instead_of_interpolating_it() {
++    // An unrecognised object_type must be an error, never spliced in as a raw
++    // SQL keyword.
++    let err = Engine::Postgres
++        .build_drop_statement("'; DROP DATABASE x;--", "t", "public", "")
++        .unwrap_err();
++    assert!(err.contains("Unsupported object type"), "got {err}");
++}
++
++// ── the FFI boundary rejects NUL and accepts clean strings ───────────────────
++
++#[test]
++fn connection_string_crosses_the_ffi_boundary_or_is_rejected_for_nul() {
++    // A clean connection string converts to a CString for the native call.
++    let good = Engine::Sqlite.connection_string(&conn_args("/data/app.db", "", ""));
++    assert!(crate::natives::to_cstring(good).is_ok());
++
++    // An interior NUL can't cross into C; it becomes the one canonical
++    // validation IpcError rather than a panic or a truncated string.
++    let err = crate::natives::to_cstring("Data Source=/tmp/a\0b.db").unwrap_err();
++    assert_eq!(err.code, IpcErrorCode::Validation);
++    assert!(err.message.contains("NUL"));
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index 92da4c3..9bebee5 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -13,6 +13,9 @@ mod fatal;
+ mod ipc;
+ mod natives;
+ 
++#[cfg(test)]
++mod integration_tests;
++
+ use std::ffi::CString;
+ use std::time::Instant;
+ 
+diff --git a/src/query/runQuery.integration.test.ts b/src/query/runQuery.integration.test.ts
+new file mode 100644
+index 0000000..66ea5d9
+--- /dev/null
++++ b/src/query/runQuery.integration.test.ts
+@@ -0,0 +1,373 @@
++// ─────────────────────────────────────────────────────────────────────────────
++// Frontend integration test: the runQuery data pipeline, end-to-end, across a
++// FAKED Tauri IPC boundary.
++//
++// Unlike the unit tests in this repo (which each pin one pure function), this
++// test wires the *real* modules together the way App.tsx's runQuery does —
++//
++//     invoke()  ──▶  ipc()/toIpcError  ──▶  JSON.parse
++//               ──▶  extractPayloadError (in-band DB error detection)
++//               ──▶  normaliseQueryResponse / reshapeSqlServerPlan / appendExplainPlan
++//               ──▶  tabsReducer (results land on the active tab)
++//               ──▶  historyReducer (a history entry is recorded)
++//
++// The ONLY thing stubbed is the outermost seam: `@tauri-apps/api/core`'s
++// `invoke`, which stands in for the Rust host + C# engine. Everything between
++// the wire and the state tree is the production code. That makes this a
++// regression guard for the whole class of bugs the audit flagged — the
++// SyntaxError-on-"ERROR:" crash, the silent failed-DROP, the five-shapes IPC
++// contract — at the level where those modules actually meet.
++// ─────────────────────────────────────────────────────────────────────────────
++import { describe, it, expect, beforeEach, vi } from "vitest";
++
++// A mutable handler the fake `invoke` delegates to. `vi.hoisted` runs before
++// the hoisted `vi.mock` factory, so the factory can close over this ref.
++const wire = vi.hoisted(() => ({
++  handler: (_cmd: string, _args?: unknown): unknown => {
++    throw new Error("wire.handler not set by test");
++  },
++}));
++
++vi.mock("@tauri-apps/api/core", () => ({
++  // Real Tauri returns a Promise; a throwing handler becomes a rejection, which
++  // is exactly the path `ipc()` normalises through `toIpcError`.
++  invoke: (cmd: string, args?: unknown) =>
++    Promise.resolve().then(() => wire.handler(cmd, args)),
++}));
++
++// Real production modules under integration:
++import { ipc, toIpcError, extractPayloadError } from "../ipc";
++import {
++  normaliseQueryResponse,
++  reshapeSqlServerPlan,
++  appendExplainPlan,
++  type RawQueryResponse,
++} from "./planReshape";
++import { tabsReducer, type TabsState } from "../state/tabsReducer";
++import { historyReducer, initHistoryState, type HistoryState } from "../state/historyReducer";
++import { toEngineName, type EngineName } from "../engines";
++import { createTab } from "../appState";
++import type { QueryResult, HistoryEntry, Tab } from "../types";
++
++// ── The pipeline under test ──────────────────────────────────────────────────
++// A faithful, React-free transcription of App.tsx's runQuery *data flow*. It
++// composes the real ipc/parse/reshape/reducer modules; only the side effects
++// (Monaco, timers) are dropped. If the real runQuery's contract with these
++// modules drifts, this reassembly breaks — which is the point.
++
++interface RunOpts {
++  sql: string;
++  engineWire: string; // the raw lowercase engine string off the wire
++  connectionId: string;
++  connectionName: string;
++  file?: string | null;
++  joinTables?: string[];
++  includePlan?: boolean;
++}
++
++interface AppSlice {
++  tabs: TabsState;
++  history: HistoryState;
++}
++
++function rowCountOf(results: QueryResult[]): number {
++  return results.reduce((n, r) => n + (r.rowCount ?? 0), 0);
++}
++
++async function runQuery(state: AppSlice, opts: RunOpts): Promise<AppSlice> {
++  // 1) Narrow the untrusted wire engine string exactly as the app does.
++  const engine: EngineName = toEngineName(opts.engineWire);
++
++  // 2) Cross the (faked) IPC boundary through the single ipc() entry point.
++  let raw: string;
++  try {
++    if (opts.file && opts.joinTables && opts.joinTables.length > 0) {
++      raw = await ipc<string>("query_file_with_db", {
++        filePath: opts.file,
++        sql: opts.sql,
++        tableNames: opts.joinTables.join(","),
++      });
++    } else if (opts.file) {
++      raw = await ipc<string>("query_file", { filePath: opts.file, sql: opts.sql });
++    } else {
++      raw = await ipc<string>("execute_query", { sql: opts.sql, engine });
++    }
++  } catch (e) {
++    // Transport/validation failure: the promise rejected. One error path.
++    const err = toIpcError(e);
++    const tabs = tabsReducer(state.tabs, {
++      type: "UPDATE_ACTIVE_TAB",
++      updates: { results: [], error: err.message, loading: false },
++    });
++    const entry = makeEntry(opts, false, 0);
++    const history = historyReducer(state.history, {
++      type: "SET_ENTRIES",
++      entries: [entry, ...state.history.entries],
++    });
++    return { tabs, history };
++  }
++
++  // 3) In-band DB error detection BEFORE trusting the payload (silent-DROP guard).
++  const dbError = extractPayloadError(raw);
++
++  // 4) Parse + normalise into the multi-result envelope.
++  let results: QueryResult[] = [];
++  let topError: string | undefined;
++  let parsed: RawQueryResponse | null = null;
++  try {
++    parsed = JSON.parse(raw) as RawQueryResponse;
++  } catch {
++    parsed = null; // legacy bare-error string; dbError already carries it
++  }
++  if (parsed) {
++    const norm = normaliseQueryResponse(parsed);
++    results = norm.results;
++    topError = norm.error;
++
++    // 5) Plan reshaping — the same branch runQuery takes.
++    if (engine === "sqlserver") {
++      results = reshapeSqlServerPlan(results, engine);
++    } else if (opts.includePlan) {
++      const planRaw = await ipc<string>("execute_query", {
++        sql: `EXPLAIN ${opts.sql}`,
++        engine,
++      });
++      results = appendExplainPlan(results, planRaw, engine);
++    }
++  }
++
++  // 6) Fold results onto the active tab and record history.
++  const errorMsg = dbError ?? topError ?? null;
++  const success = errorMsg == null;
++  const tabs = tabsReducer(state.tabs, {
++    type: "UPDATE_ACTIVE_TAB",
++    updates: { results, error: errorMsg, loading: false },
++  });
++  const entry = makeEntry(opts, success, rowCountOf(results));
++  const history = historyReducer(state.history, {
++    type: "SET_ENTRIES",
++    entries: [entry, ...state.history.entries],
++  });
++  return { tabs, history };
++}
++
++function makeEntry(opts: RunOpts, success: boolean, rowCount: number): HistoryEntry {
++  return {
++    id: Date.now(),
++    connectionId: opts.connectionId,
++    connectionName: opts.connectionName,
++    sql: opts.sql,
++    executedAt: Date.now(),
++    durationMs: 1,
++    rowCount,
++    success,
++  };
++}
++
++// ── Fixtures ────────────────────────────────────────────────────────────────
++
++function freshApp(): AppSlice {
++  const tab: Tab = { ...createTab("t1"), connection: null };
++  return {
++    tabs: { tabs: [tab], activeTabId: "t1" },
++    history: initHistoryState(),
++  };
++}
++
++const conn = { connectionId: "c1", connectionName: "local-sqlite" };
++
++function activeTab(app: AppSlice): Tab {
++  return app.tabs.tabs.find((t) => t.id === app.tabs.activeTabId)!;
++}
++
++// ── Tests ─────────────────────────────────────────────────────────────────────
++
++describe("runQuery pipeline (integration, faked IPC)", () => {
++  beforeEach(() => {
++    wire.handler = () => {
++      throw new Error("no wire handler configured");
++    };
++  });
++
++  it("SELECT success: rows land on the active tab and a successful history entry is recorded", async () => {
++    wire.handler = (cmd) => {
++      expect(cmd).toBe("execute_query");
++      return JSON.stringify({
++        results: [
++          { columns: ["id", "name"], rows: [["1", "ada"], ["2", "alan"]], rowCount: 2 },
++        ],
++      });
++    };
++
++    const app = await runQuery(freshApp(), {
++      ...conn,
++      engineWire: "sqlite",
++      sql: "SELECT id, name FROM users",
++    });
++
++    const tab = activeTab(app);
++    expect(tab.error).toBeNull();
++    expect(tab.results).toHaveLength(1);
++    expect(tab.results[0].columns).toEqual(["id", "name"]);
++    expect(tab.results[0].rows).toHaveLength(2);
++    expect(app.history.entries[0]).toMatchObject({ success: true, rowCount: 2, sql: "SELECT id, name FROM users" });
++  });
++
++  it("multi-statement: each result set becomes its own tab result", async () => {
++    wire.handler = () =>
++      JSON.stringify({
++        results: [
++          { columns: ["a"], rows: [["1"]], rowCount: 1 },
++          { columns: ["b"], rows: [["2"], ["3"]], rowCount: 2 },
++        ],
++      });
++
++    const app = await runQuery(freshApp(), { ...conn, engineWire: "sqlite", sql: "SELECT 1; SELECT 2" });
++
++    expect(activeTab(app).results).toHaveLength(2);
++    expect(app.history.entries[0].rowCount).toBe(3); // summed across result sets
++  });
++
++  it("read-only violation comes back as a bare (non-JSON) error string and surfaces as a tab error", async () => {
++    // The executor returns a legacy bare string here, not JSON — the exact
++    // shape that once crashed the parser with `SyntaxError: Unexpected token 'C'`.
++    wire.handler = () => "Connection is read-only — statement not allowed: DROP TABLE users";
++
++    const app = await runQuery(freshApp(), { ...conn, engineWire: "sqlite", sql: "DROP TABLE users" });
++
++    const tab = activeTab(app);
++    expect(tab.error).toMatch(/read-only/);
++    expect(tab.results).toHaveLength(0);
++    expect(app.history.entries[0].success).toBe(false);
++  });
++
++  it("failed DROP reported in-band still fails the run (silent-drop regression)", async () => {
++    // A successful IPC round-trip whose payload carries a per-statement error.
++    // Ignoring the payload would mark this a success while the object survives.
++    wire.handler = () =>
++      JSON.stringify({
++        results: [
++          { columns: [], rows: [], rowCount: 0, error: "Cannot drop the table 'users', because it does not exist." },
++        ],
++      });
++
++    const app = await runQuery(freshApp(), { ...conn, engineWire: "sqlite", sql: "DROP TABLE users" });
++
++    expect(activeTab(app).error).toMatch(/Cannot drop the table/);
++    expect(app.history.entries[0].success).toBe(false);
++  });
++
++  it("flat-file query: a single top-level result is wrapped into the multi-result envelope", async () => {
++    // query_file returns the result fields at the TOP LEVEL (no `results` array).
++    wire.handler = (cmd) => {
++      expect(cmd).toBe("query_file");
++      return JSON.stringify({ columns: ["city"], rows: [["oslo"], ["riga"]], rowCount: 2 });
++    };
++
++    const app = await runQuery(freshApp(), {
++      ...conn,
++      engineWire: "sqlite",
++      sql: "SELECT city FROM data",
++      file: "/tmp/cities.csv",
++    });
++
++    const tab = activeTab(app);
++    expect(tab.error).toBeNull();
++    expect(tab.results).toHaveLength(1);
++    expect(tab.results[0].columns).toEqual(["city"]);
++  });
++
++  it("file + DB join routes through query_file_with_db with the checked table names", async () => {
++    let seenArgs: { tableNames?: string } | null = null;
++    wire.handler = (cmd, args) => {
++      expect(cmd).toBe("query_file_with_db");
++      seenArgs = args as { tableNames?: string };
++      return JSON.stringify({ columns: ["x"], rows: [["1"]], rowCount: 1 });
++    };
++
++    await runQuery(freshApp(), {
++      ...conn,
++      engineWire: "sqlite",
++      sql: "SELECT * FROM data JOIN db_orders USING(id)",
++      file: "/tmp/data.csv",
++      joinTables: ["orders", "customers"],
++    });
++
++    expect(seenArgs!.tableNames).toBe("orders,customers");
++  });
++
++  it("SQL Server STATISTICS XML: the plan cell is lifted into a dedicated isPlan result", async () => {
++    const planXml =
++      '<ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan"><BatchSequence/></ShowPlanXML>';
++    wire.handler = () =>
++      JSON.stringify({
++        results: [
++          { columns: ["id"], rows: [["1"]], rowCount: 1 },
++          { columns: ["Microsoft SQL Server 2005 XML Showplan"], rows: [[planXml]], rowCount: 1 },
++        ],
++      });
++
++    const app = await runQuery(freshApp(), {
++      ...conn,
++      engineWire: "sqlserver",
++      sql: "SET STATISTICS XML ON; SELECT 1",
++    });
++
++    const results = activeTab(app).results;
++    const plan = results.find((r) => r.isPlan);
++    expect(plan).toBeDefined();
++    expect(plan!.planEngine).toBe("sqlserver");
++    expect(plan!.rows[0][0]).toContain("ShowPlanXML");
++    // the data result is preserved, the raw XML result set is not shown as data
++    expect(results.some((r) => !r.isPlan && r.columns.includes("id"))).toBe(true);
++  });
++
++  it("EXPLAIN plan (postgres): a second IPC call's plan is appended as an isPlan result", async () => {
++    wire.handler = (_cmd, args) => {
++      const sql = (args as { sql: string }).sql;
++      if (sql.startsWith("EXPLAIN")) {
++        return JSON.stringify({ results: [{ columns: ["QUERY PLAN"], rows: [["Seq Scan on users"]], rowCount: 1 }] });
++      }
++      return JSON.stringify({ results: [{ columns: ["id"], rows: [["1"]], rowCount: 1 }] });
++    };
++
++    const app = await runQuery(freshApp(), {
++      ...conn,
++      engineWire: "postgres",
++      sql: "SELECT * FROM users",
++      includePlan: true,
++    });
++
++    const results = activeTab(app).results;
++    const plan = results.find((r) => r.isPlan);
++    expect(plan).toBeDefined();
++    expect(plan!.planEngine).toBe("postgres");
++    expect(plan!.rows[0][0]).toContain("Seq Scan");
++    // the data result from the first call survives
++    expect(results.some((r) => !r.isPlan)).toBe(true);
++  });
++
++  it("transport failure: a rejected invoke is normalised and never crashes the pipeline", async () => {
++    wire.handler = () => {
++      throw new Error("IPC channel closed");
++    };
++
++    const app = await runQuery(freshApp(), { ...conn, engineWire: "sqlite", sql: "SELECT 1" });
++
++    expect(activeTab(app).error).toBe("IPC channel closed");
++    expect(app.history.entries[0].success).toBe(false);
++  });
++
++  it("an unsupported engine name off the wire is rejected before any IPC call", async () => {
++    let called = false;
++    wire.handler = () => {
++      called = true;
++      return "{}";
++    };
++
++    await expect(
++      runQuery(freshApp(), { ...conn, engineWire: "oracle", sql: "SELECT 1" }),
++    ).rejects.toThrow(/Unsupported engine: oracle/);
++    expect(called).toBe(false);
++  });
++});
+diff --git a/vitest.config.ts b/vitest.config.ts
+index edab537..4d893e9 100644
+--- a/vitest.config.ts
++++ b/vitest.config.ts
+@@ -1,9 +1,13 @@
+-import { defineConfig } from "vitest/config";
++import { defineConfig, configDefaults } from "vitest/config";
+ 
+ export default defineConfig({
+   test: {
+     // Pure-logic unit tests (reducers, helpers). No DOM needed → node env.
+     environment: "node",
+     include: ["src/**/*.test.ts"],
++    // Integration tests wire multiple modules across a faked IPC boundary and
++    // run under their own config/gate (vitest.integration.config.ts) so the
++    // unit gate stays a fast, pure-logic signal.
++    exclude: [...configDefaults.exclude, "src/**/*.integration.test.ts"],
+   },
+ });
+diff --git a/vitest.integration.config.ts b/vitest.integration.config.ts
+new file mode 100644
+index 0000000..86b41e2
+--- /dev/null
++++ b/vitest.integration.config.ts
+@@ -0,0 +1,13 @@
++import { defineConfig } from "vitest/config";
++
++// Module-integration tests: the real query pipeline (ipc → parse → reshape →
++// reducers) wired together across a faked Tauri IPC boundary. Kept in a
++// separate project from the unit gate so a slower/broader suite can grow here
++// without diluting the "one pure function" unit tests. Same node env — these
++// exercise logic seams, not the DOM.
++export default defineConfig({
++  test: {
++    environment: "node",
++    include: ["src/**/*.integration.test.ts"],
++  },
++});

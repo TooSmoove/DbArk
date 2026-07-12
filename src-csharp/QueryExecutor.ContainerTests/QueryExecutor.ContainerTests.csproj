@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Containerized integration tier: runs real SQL through the production engine
+    registry (QueryEngines.Resolve -> Postgres/MySql/SqlServer engines) against
+    live database servers started with Testcontainers (Docker).
+
+    Kept separate from QueryExecutor.IntegrationTests because it needs Docker,
+    is slower, and has its own CI job. Postgres/MySQL/MariaDB use pure-managed
+    drivers (Npgsql / MySqlConnector) and run anywhere Docker is present; the
+    SQL Server engine uses raw ODBC (odbc32.dll), bridged to libodbc on Linux by
+    OdbcNativeShim. Tests SKIP (not fail) when Docker or the ODBC driver isn't
+    available, so the suite degrades gracefully off a configured CI runner.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- Decouple namespace from the project name so the "QueryExecutor" segment
+         can't shadow the same-named engine class. AssemblyName stays the project
+         name for the InternalsVisibleTo grant. -->
+    <RootNamespace>DbArk.Integration</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="3.10.0" />
+    <PackageReference Include="Testcontainers.MySql" Version="3.10.0" />
+    <PackageReference Include="Testcontainers.MariaDb" Version="3.10.0" />
+    <PackageReference Include="Testcontainers.MsSql" Version="3.10.0" />
+    <PackageReference Include="Testcontainers.CockroachDb" Version="3.10.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../QueryExecutor/QueryExecutor.csproj" />
+  </ItemGroup>
+</Project>

@@ -12,6 +12,12 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("QueryExecutor.Tests")]
+// Integration + container test assemblies reach the internal engine registry
+// (QueryEngines / IQueryEngine). Declared in source (not just the csproj
+// <InternalsVisibleTo> items) so the grant is embedded here and editing this
+// file forces QueryExecutor to recompile — a csproj-only grant can be missed by
+// an incremental build and surfaces as CS0122 in the referencing test project.
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("QueryExecutor.ContainerTests")]
 
 public static class QueryExecutor
 {

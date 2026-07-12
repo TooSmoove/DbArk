@@ -9,7 +9,7 @@ using System.Collections.Generic;
 /// engine-specific decision is answered by an implementation of this
 /// interface, resolved once through <see cref="QueryEngines"/>.
 /// </summary>
-internal interface IQueryEngine
+public interface IQueryEngine
 {
     /// <summary>True when this engine runs whole batches through
     /// <see cref="ExecuteBatch"/>; false for engines still on the legacy
@@ -36,11 +36,11 @@ internal interface IQueryEngine
 /// reuses the MySQL implementation (same MySqlConnector driver) and
 /// CockroachDB gets its own (Postgres driver, Cockroach-specific retries).
 /// </summary>
-internal static class QueryEngines
+public static class QueryEngines
 {
-    private static readonly Dictionary<string, IQueryEngine> Registry = Build();
+    public static readonly Dictionary<string, IQueryEngine> Registry = Build();
 
-    private static Dictionary<string, IQueryEngine> Build()
+    public static Dictionary<string, IQueryEngine> Build()
     {
         var mySql = new MySqlQueryEngine();
         return new Dictionary<string, IQueryEngine>(StringComparer.OrdinalIgnoreCase)
